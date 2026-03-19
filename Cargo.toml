@@ -1,0 +1,23 @@
+[package]
+name = "xcp_client"
+version = "0.1.0"
+edition = "2021"
+description = "XCP Master client for calibration and DAQ"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+csv = "1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-input = "0.11"
+tokio-util = "0.7"
+
+[profile.release]
+opt-level = 3
+lto = true
