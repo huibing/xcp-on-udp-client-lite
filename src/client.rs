@@ -1,8 +1,7 @@
 //! XCP Client Core
 
 use crate::protocol::{
-    commands, parse_response, parse_connect_response, parse_get_id_response,
-    ConnectInfo, ErrorCode, Mta, Response,
+    ConnectInfo, ErrorCode, Mta, Response, commands, parse_connect_response, parse_get_id_response, parse_response
 };
 use crate::transport::{UdpTransport, TransportError};
 use std::sync::Arc;
@@ -39,6 +38,17 @@ pub struct ClientState {
     pub connected: bool,
     pub connect_info: Option<ConnectInfo>,
     pub slave_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DAQResolutionInfo {
+    /// GET_DAQ_RESOLUTION_INFO
+    pub odt_entry_granularity_daq: u8,
+    pub max_odt_entry_size_daq: u8,
+    pub odt_entry_granularity_stim: u8,
+    pub max_odt_entry_size_stim: u8,
+    pub timestamp_mode: u8,
+    pub timestamp_ticks: u16
 }
 
 impl Default for ClientState {
@@ -289,6 +299,40 @@ impl XcpClient {
         Ok(())
     }
 
+    pub async fn get_daq_resolution_info(&self) -> Result<DAQResolutionInfo, XcpError> {
+        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
+        let repsonse = transport.send_command(&commands::get_daq_resolution_info()).await?;
+        let parsed = parse_response(&repsonse).map_err(XcpError::ParseError)?;
+        match parsed {
+            Response::Res(data) if data.len() == 7=> {
+                let odt_entry_granularity_daq= data[0];
+                let max_odt_entry_size_daq= data[1];
+                let odt_entry_granularity_stim= data[2];
+                let max_odt_entry_size_stim= data[3];
+                let timestamp_mode= data[4];
+                let timestamp_ticks= u16::from_be_bytes([data[5], data[6]]);
+                Ok(DAQResolutionInfo {
+                    odt_entry_granularity_daq,
+                    max_odt_entry_size_daq,
+                    odt_entry_granularity_stim,
+                    max_odt_entry_size_stim,
+                    timestamp_mode,
+                    timestamp_ticks
+                })
+            },
+            Response::Res(data) => {
+                Err(XcpError::InvalidResponse(format!("Invalid response length: {}", data.len())))
+            },
+            Response:: Err(err) => {
+                Err(XcpError::Protocol(err))
+            },
+            _ => {
+                Err(XcpError::InvalidResponse("Unexpected response type".to_string()))
+            }
+        }
+        
+    }
+
     /// Free DAQ resources
     pub async fn free_daq(&self) -> Result<(), XcpError> {
         let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
@@ -403,6 +447,19 @@ impl XcpClient {
         let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
 
         let response = transport.send_command(&commands::start_stop_daq_list(mode, daq_list)).await?;
+        let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(XcpError::Protocol(err)),
+            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    pub async fn start_stop_synch(&self, mode: u8) -> Result<(), XcpError> {
+        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
+
+        let response = transport.send_command(&commands::start_stop_synch(mode)).await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {

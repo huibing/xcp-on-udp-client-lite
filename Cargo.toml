@@ -17,6 +17,7 @@ ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 tui-input = "0.11"
 tokio-util = "0.7"
+bitflags = "2.4"
 
 [profile.release]
 opt-level = 3

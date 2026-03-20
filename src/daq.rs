@@ -9,6 +9,7 @@ use crate::client::XcpClient;
 use crate::protocol::Mta;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::io::{Cursor, Read};
 use std::fs::OpenOptions;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
@@ -16,11 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-
-/// DTO (Data Transfer Object) header: PID for DAQ lists
-/// PID = DAQ_LIST_NUMBER | 0xC0 (top 2 bits = 11 for DAQ)
-const DTO_PID_MASK: u8 = 0xC0;
-
 /// Measurement definition
 #[derive(Debug, Clone)]
 pub struct Measurement {
@@ -62,6 +58,8 @@ pub struct DtoData {
     pub odt: u8,
     /// Raw data bytes
     pub data: Vec<u8>,
+    /// Timestamp
+    pub timestamp: Option<u32>,
 }
 
 /// DAQ Manager - implements Dynamic DAQ
@@ -82,6 +80,9 @@ pub struct DaqManager {
     event_channel: u16,
     /// Latest DAQ sample (for UI display)
     latest_sample: Arc<RwLock<Option<DaqRecord>>>,
+    /// timestamp mode and size
+    timestamp_fixed: bool,
+    timestamp_size: Option<u8>
 }
 
 impl DaqManager {
@@ -99,6 +100,8 @@ impl DaqManager {
             daq_list_count: 1,
             event_channel: 0,
             latest_sample: Arc::new(RwLock::new(None)),
+            timestamp_fixed: false,
+            timestamp_size: None,
         }
     }
 
@@ -117,6 +120,32 @@ impl DaqManager {
         self.latest_sample.read().await.clone()
     }
 
+    pub async fn get_timestamp_mode(&mut self, client: &XcpClient) -> Result<(), String>{
+        tracing::debug!("Getting timestamp mode...");
+        // Get timestamp mode from slave through GET_DAQ_RESOLUTION_INFO
+        let daqresolution_info = client.get_daq_resolution_info().await.map_err(|e| format!("GET_DAQ_RESOLUTION_INFO failed: {}", e))?;
+        let timestamp_mode = daqresolution_info.timestamp_mode;
+        self.timestamp_fixed = timestamp_mode & 0b1000 == 0b1000;
+        let timestamp_size_bits = timestamp_mode & 0b0111;
+        match timestamp_size_bits {
+            0 if self.timestamp_fixed => {
+                tracing::error!("Timestamp mode is fixed but timestamp size is 0.");
+                return Err("Timestamp mode is fixed but timestamp size is not specified".to_string());
+            }
+            0 => {
+                self.timestamp_size = None;
+            }
+            1 | 2 | 4 => {  
+                self.timestamp_size = Some(timestamp_size_bits);
+            }
+            _ => {
+                tracing::error!("Timestamp SIZE NOT ALLOWED: {}", timestamp_size_bits);
+                return Err("Timestamp SIZE NOT ALLOWED".to_string())
+            }
+        }
+        return Ok(());
+    }
+
     /// Configure DAQ on the XCP slave using Dynamic DAQ
     ///
     /// Steps:
@@ -126,7 +155,7 @@ impl DaqManager {
     /// 4. ALLOC_ODT_ENTRY - Allocate entries in each ODT
     /// 5. SET_DAQ_PTR + WRITE_DAQ - Configure each entry
     /// 6. SET_DAQ_LIST_MODE - Set mode and event channel
-    pub async fn configure(&self, client: &XcpClient) -> Result<(), String> {
+    pub async fn configure(&mut self, client: &XcpClient) -> Result<(), String> {
         tracing::info!("Configuring Dynamic DAQ...");
 
         // 1. FREE_DAQ - Release any existing DAQ configuration
@@ -205,7 +234,7 @@ impl DaqManager {
     /// Start DAQ acquisition
     ///
     /// This starts the DAQ list and begins receiving DTO packets from slave
-    pub async fn start(&self, client: &XcpClient, _interval_ms: u64) -> Result<(), String> {
+    pub async fn start(&mut self, client: &XcpClient, _interval_ms: u64) -> Result<(), String> {
         if self.running.load(Ordering::SeqCst) {
             return Err("DAQ already running".to_string());
         }
@@ -217,11 +246,15 @@ impl DaqManager {
         let transport = client.transport().ok_or("No transport available")?.clone();
 
         // Start DAQ list 0
-        tracing::info!("Starting DAQ list 0");
+        tracing::info!("Selecte DAQ list 0");
         client
-            .start_stop_daq_list(1, 0) // mode=1 (start), daq_list=0
+            .start_stop_daq_list(2, 0)  // mode=2 (select DAQ list) 
             .await
             .map_err(|e| format!("START_STOP_DAQ_LIST failed: {}", e))?;
+
+        tracing::info!("DAQ selected, starting DAQ...");
+        // client.start_stop_synch(0x03).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
+        client.start_stop_synch(0x01).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
 
         self.running.store(true, Ordering::SeqCst);
 
@@ -242,6 +275,7 @@ impl DaqManager {
         let running = self.running.clone();
         let latest_sample = self.latest_sample.clone();
         let measurements = self.measurements.clone();
+        let timestamp_size = self.timestamp_size.unwrap_or(0);
 
         // Spawn DTO reception task
         let handle = tokio::spawn(async move {
@@ -257,60 +291,57 @@ impl DaqManager {
                 match transport.recv_daq_packet().await {
                     Ok(packet) => {
                         // Parse DTO packet
-                        if let Some(data) = parse_dto_packet(&packet) {
-                            tracing::trace!("Received DTO: daq_list={}, data_len={}", data.daq_list, data.data.len());
+                        if let Some(data_vec) = parse_dto_packet(&packet, timestamp_size) {
+                            for data in data_vec {
+                                tracing::trace!("Received DTO: daq_list={}, data_len={}", data.daq_list, data.data.len());
+                                // Parse measurement data
+                                let mut offset = 0;
+                                let mut counter_val: Option<u32> = None;
+                                let mut const_data_val: Option<u32> = None;
 
-                            // Parse measurement data
-                            let mut offset = 0;
-                            let mut counter_val: Option<u32> = None;
-                            let mut const_data_val: Option<u32> = None;
-
-                            for meas in &measurements {
-                                if offset + meas.size <= data.data.len() {
-                                    let bytes: [u8; 4] = if meas.size == 4 {
-                                        [
-                                            data.data[offset],
-                                            data.data[offset + 1],
-                                            data.data[offset + 2],
-                                            data.data[offset + 3],
-                                        ]
-                                    } else {
-                                        [0, 0, 0, 0]
-                                    };
-
-                                    if meas.name == "counter" {
-                                        counter_val = Some(u32::from_be_bytes(bytes));
-                                    } else if meas.name == "const_data" {
-                                        const_data_val = Some(u32::from_be_bytes(bytes));
+                                for meas in &measurements {
+                                    if offset + meas.size <= data.data.len() {
+                                        let bytes: [u8; 4] = if meas.size == 4 {
+                                            [
+                                                data.data[offset],
+                                                data.data[offset + 1],
+                                                data.data[offset + 2],
+                                                data.data[offset + 3],
+                                            ]
+                                        } else {
+                                            [0, 0, 0, 0]
+                                        };
+                                        if meas.name == "counter" {
+                                            counter_val = Some(u32::from_be_bytes(bytes));
+                                        } else if meas.name == "const_data" {
+                                            const_data_val = Some(u32::from_be_bytes(bytes));
+                                        }
                                     }
+                                    offset += meas.size;
                                 }
-                                offset += meas.size;
-                            }
 
-                            // Write to CSV
-                            let timestamp: DateTime<Utc> = Utc::now();
-                            let record = DaqRecord {
-                                timestamp: timestamp.to_rfc3339(),
-                                counter: counter_val,
-                                const_data: const_data_val,
-                            };
-
-                            // Update latest sample for UI
-                            {
-                                let mut latest = latest_sample.write().await;
-                                *latest = Some(record.clone());
-                            }
-
-                            // Write CSV line
-                            let csv_line = format!(
-                                "{},{},{}",
-                                record.timestamp,
-                                record.counter.map(|v| v.to_string()).unwrap_or_default(),
-                                record.const_data.map(|v| v.to_string()).unwrap_or_default()
-                            );
-
-                            if let Err(e) = writeln!(csv_file, "{}", csv_line) {
-                                tracing::error!("Failed to write CSV: {}", e);
+                                // Write to CSV
+                                let timestamp: DateTime<Utc> = Utc::now();
+                                let record = DaqRecord {
+                                    timestamp: timestamp.to_rfc3339(),
+                                    counter: counter_val,
+                                    const_data: const_data_val,
+                                };
+                                // Update latest sample for UI
+                                {
+                                    let mut latest = latest_sample.write().await;
+                                    *latest = Some(record.clone());
+                                }
+                                // Write CSV line
+                                let csv_line = format!(
+                                    "{},{},{}",
+                                    record.timestamp,
+                                    record.counter.map(|v| v.to_string()).unwrap_or_default(),
+                                    record.const_data.map(|v| v.to_string()).unwrap_or_default()
+                                );
+                                if let Err(e) = writeln!(csv_file, "{}", csv_line) {
+                                    tracing::error!("Failed to write CSV: {}", e);
+                                }
                             }
                         }
                     }
@@ -367,43 +398,82 @@ impl Default for DaqManager {
     }
 }
 
+
+struct DtoHeader {  
+    len: u16,
+    counter: u16,
+}
 /// Parse a DTO packet from slave
 ///
 /// DTO packet format (XCP on Ethernet):
 /// - 4 bytes: Transport header [LEN_L, LEN_H, COUNTER_L, COUNTER_H]
 /// - 1 byte: PID (DAQ list number | 0xC0)
 /// - N bytes: ODT data
-fn parse_dto_packet(packet: &[u8]) -> Option<DtoData> {
+fn parse_dto_packet(packet: &[u8], timestamp_size: u8) -> Option<Vec<DtoData>> {
     // Minimum size: 4 (header) + 1 (PID) = 5 bytes
     if packet.len() < 5 {
-        tracing::warn!("DTO packet too short: {} bytes", packet.len());
+        tracing::error!("DTO packet too short: {} bytes", packet.len());
         return None;
     }
-
-    // Skip transport header (4 bytes)
-    let pid = packet[4];
-
-    // Check if this is a DAQ DTO (PID should have top 2 bits = 11)
-    if pid & DTO_PID_MASK != DTO_PID_MASK {
-        tracing::warn!("Invalid DTO PID: 0x{:02X} (expected 0xC0-0xFF)", pid);
-        return None;
+    let mut dto_data: Vec<DtoData> = Vec::new();
+    let mut cur = Cursor::new(packet);
+    while let Some(header) = parse_dto_header(&mut cur) {
+        let mut pid_buf = [0u8];
+        cur.read_exact(&mut pid_buf).ok()?;
+        let daq_list = pid_buf[0] & 0xF0;
+        let odt = pid_buf[0] & 0x0F;
+        let timestamp = match timestamp_size {
+            0 => {  /* no timestamp */ None},
+            1 => { /* 1 byte timestamp */
+                let mut timestamp_buf = [0u8];
+                cur.read_exact(&mut timestamp_buf).ok()?;
+                Some(timestamp_buf[0] as u32)
+            },
+            2 => { /* 2 byte timestamp */
+                let mut timestamp_buf = [0u8; 2];
+                cur.read_exact(&mut timestamp_buf).ok()?;
+                Some(u16::from_le_bytes(timestamp_buf) as u32)
+            },
+            4 => { /* 3 byte timestamp */
+                let mut timestamp_buf = [0u8; 4];
+                cur.read_exact(&mut timestamp_buf).ok()?;
+                Some(u32::from_le_bytes(timestamp_buf))
+            },
+            _ => {
+                tracing::error!("Invalid timestamp size: {}", timestamp_size);
+                None
+            }
+        };
+        let mut data = Vec::with_capacity(header.len as usize - 1 - timestamp_size as usize);
+        cur.read_exact(&mut data).ok()?;
+        dto_data.push(DtoData {
+            daq_list,
+            odt,
+            timestamp,
+            data,
+        });
     }
+    return Some(dto_data);
+}
 
-    // Extract DAQ list number from PID (lower 6 bits)
-    let daq_list = pid & 0x3F;
-
-    // ODT number is typically determined by sequence in DTO packets
-    // For simple case, assume ODT 0
-    let odt = 0;
-
-    // Extract data (skip 4-byte header + 1-byte PID)
-    let data = packet[5..].to_vec();
-
-    Some(DtoData {
-        daq_list,
-        odt,
-        data,
-    })
+fn parse_dto_header(packet: &mut Cursor<&[u8]>) -> Option<DtoHeader> { 
+    let remaining_bytes = packet.get_ref().len() - packet.position() as usize;
+    if remaining_bytes == 0 {
+        None
+    } else if remaining_bytes < 4 {
+        tracing::warn!("DTO packet too short: {} bytes", remaining_bytes);
+        None
+    } else {
+        let mut buf = [0; 2];
+        packet.read_exact(&mut buf).ok()?;
+        let len = u16::from_le_bytes(buf);
+        packet.read_exact(&mut buf).ok()?;
+        let counter = u16::from_le_bytes(buf);
+        Some(DtoHeader {
+            len,
+            counter,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -414,27 +484,27 @@ mod tests {
     fn test_parse_dto_packet() {
         // Valid DTO packet: header + PID (0xC0 = DAQ list 0) + data
         let packet = [0x08, 0x00, 0x01, 0x00, 0xC0, 0x01, 0x02, 0x03, 0x04];
-        let result = parse_dto_packet(&packet);
+        let result = parse_dto_packet(&packet, 0);
         assert!(result.is_some());
         let data = result.unwrap();
-        assert_eq!(data.daq_list, 0);
-        assert_eq!(data.data, vec![0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(data[0].daq_list, 0);
+        assert_eq!(data[0].data, vec![0x01, 0x02, 0x03, 0x04]);
 
         // DAQ list 1 (PID = 0xC1)
         let packet = [0x08, 0x00, 0x02, 0x00, 0xC1, 0xAA, 0xBB, 0xCC, 0xDD];
-        let result = parse_dto_packet(&packet);
+        let result = parse_dto_packet(&packet, 0);
         assert!(result.is_some());
         let data = result.unwrap();
-        assert_eq!(data.daq_list, 1);
+        assert_eq!(data[0].daq_list, 1);
 
         // Invalid PID (not a DAQ DTO)
         let packet = [0x08, 0x00, 0x03, 0x00, 0xFF, 0x01, 0x02, 0x03, 0x04];
-        let result = parse_dto_packet(&packet);
+        let result = parse_dto_packet(&packet, 0);
         assert!(result.is_some()); // 0xFF = DAQ list 63
 
         // Packet too short
         let packet = [0x01, 0x00, 0x01, 0x00];
-        let result = parse_dto_packet(&packet);
+        let result = parse_dto_packet(&packet, 0);
         assert!(result.is_none());
     }
 }

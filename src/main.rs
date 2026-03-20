@@ -2,6 +2,7 @@
 
 mod tui;
 
+use std::fs::OpenOptions;
 use std::time::Duration;
 use tui::app::App;
 use tui::event::{Event, EventHandler};
@@ -11,10 +12,17 @@ use xcp_client::{CalibrationManager, DaqManager, XcpClient};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging to file
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("xcp_client.log")?;
+
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive("debug".parse()?),
         )
+        .with_ansi(false)  // Disable ANSI color codes for log file
+        .with_writer(move || log_file.try_clone().expect("Failed to clone log file"))
         .try_init()
         .ok();
 

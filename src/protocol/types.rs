@@ -72,21 +72,21 @@ pub enum CommandCode {
     /// SET_DAQ_PTR - Set DAQ pointer
     SetDaqPtr = 0xE2,
     /// WRITE_DAQ - Write DAQ entry
-    WriteDaq = 0xDA,
+    WriteDaq = 0xE1,
     /// SET_DAQ_LIST_MODE - Set DAQ list mode
     SetDaqListMode = 0xE0,
     /// GET_DAQ_LIST_MODE - Get DAQ list mode
-    GetDaqListMode = 0xDD,
+    GetDaqListMode = 0xDF,
     /// START_STOP_DAQ_LIST - Start/stop DAQ list
     StartStopDaqList = 0xDE,
     /// START_STOP_SYNCH - Start/stop all DAQ lists synchronously
-    StartStopSynch = 0xDF,
+    StartStopSynch = 0xDD,
     /// GET_DAQ_CLOCK - Get DAQ clock
     GetDaqClock = 0xDC,
     /// READ_DAQ - Read DAQ entry
     ReadDaq = 0xD8,
     /// GET_DAQ_PROCESSOR_INFO - Get DAQ processor info
-    GetDaqProcessorInfo = 0xD7,
+    GetDaqProcessorInfo = 0xDA,
     /// GET_DAQ_RESOLUTION_INFO - Get DAQ resolution info
     GetDaqResolutionInfo = 0xD9,
     /// GET_DAQ_LIST_INFO - Get DAQ list info
@@ -143,18 +143,18 @@ pub enum ErrorCode {
     PageNotValid = 0x25,
     #[error("Segment not valid")]
     SegmentNotValid = 0x26,
-    #[error("Sequence error")]
-    Sequence = 0x27,
+    #[error("Mode not valid")]
+    MODENOTVALID = 0x27,
     #[error("DAQ configuration not valid")]
     DaqConfig = 0x28,
     #[error("Memory overflow")]
     MemoryOverflow = 0x29,
     #[error("Generic error")]
-    Generic = 0x2A,
+    Generic = 0x31,
     #[error("Verify error")]
     Verify = 0x30,
-    #[error("Calibration data type not supported")]
-    CalibrationDataType = 0x31,
+    #[error("DAQ config not valid")]
+    DAQCONFIGERR = 0x2A,
     #[error("Undefined error: 0x{0:02X}")]
     Unknown(u8),
 }
@@ -174,12 +174,12 @@ impl From<u8> for ErrorCode {
             0x24 => ErrorCode::AccessLocked,
             0x25 => ErrorCode::PageNotValid,
             0x26 => ErrorCode::SegmentNotValid,
-            0x27 => ErrorCode::Sequence,
+            0x27 => ErrorCode::MODENOTVALID,
             0x28 => ErrorCode::DaqConfig,
             0x29 => ErrorCode::MemoryOverflow,
-            0x2A => ErrorCode::Generic,
+            0x31 => ErrorCode::Generic,
             0x30 => ErrorCode::Verify,
-            0x31 => ErrorCode::CalibrationDataType,
+            0x2A => ErrorCode::DAQCONFIGERR,
             other => ErrorCode::Unknown(other),
         }
     }
