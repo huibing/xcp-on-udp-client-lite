@@ -84,13 +84,13 @@ pub enum CommandCode {
     /// GET_DAQ_CLOCK - Get DAQ clock
     GetDaqClock = 0xDC,
     /// READ_DAQ - Read DAQ entry
-    ReadDaq = 0xD8,
+    ReadDaq = 0xDB,
     /// GET_DAQ_PROCESSOR_INFO - Get DAQ processor info
     GetDaqProcessorInfo = 0xDA,
     /// GET_DAQ_RESOLUTION_INFO - Get DAQ resolution info
     GetDaqResolutionInfo = 0xD9,
     /// GET_DAQ_LIST_INFO - Get DAQ list info
-    GetDaqListInfo = 0xE5,
+    GetDaqListInfo = 0xD8,
     /// GET_DAQ_EVENT_INFO - Get DAQ event info
     GetDaqEventInfo = 0xE4,
 

@@ -4,10 +4,10 @@
 
 pub mod protocol;
 pub mod transport;
-pub mod client;
+pub mod client_v2;
 pub mod calibration;
 pub mod daq;
 
-pub use client::XcpClient;
+pub use client_v2::XcpClient;
 pub use calibration::{CalibrationParam, CalibrationValue, CalibrationType, CalibrationManager};
 pub use daq::{DaqManager, Measurement};

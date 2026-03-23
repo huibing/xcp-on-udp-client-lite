@@ -1,6 +1,6 @@
 //! Calibration Parameter Management
 
-use crate::client::XcpClient;
+use crate::client_v2::XcpClient;
 use crate::protocol::Mta;
 
 /// Calibration parameter types

@@ -5,7 +5,7 @@
 //! 2. Start DAQ list - slave sends DTO packets automatically
 //! 3. Receive and parse DTO packets from slave
 
-use crate::client::XcpClient;
+use crate::client_v2::XcpClient;
 use crate::protocol::Mta;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -24,6 +24,14 @@ pub struct Measurement {
     pub address: u32,
     pub address_ext: u8,
     pub size: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum IdentificationFieldType {
+    AbosulteODT,
+    RelatetiveODTBYTE,
+    RelatetiveODTWORD,
+    RelatetiveODTWORDAlign,
 }
 
 impl Measurement {
@@ -53,7 +61,7 @@ pub struct DaqRecord {
 #[derive(Debug, Clone)]
 pub struct DtoData {
     /// DAQ list number (from PID)
-    pub daq_list: u8,
+    pub daq_list: Option<u16>,
     /// ODT number (implied by sequence in DTO packets)
     pub odt: u8,
     /// Raw data bytes
@@ -82,7 +90,8 @@ pub struct DaqManager {
     latest_sample: Arc<RwLock<Option<DaqRecord>>>,
     /// timestamp mode and size
     timestamp_fixed: bool,
-    timestamp_size: Option<u8>
+    timestamp_size: Option<u8>,
+    indentification_field_type: IdentificationFieldType,
 }
 
 impl DaqManager {
@@ -102,6 +111,7 @@ impl DaqManager {
             latest_sample: Arc::new(RwLock::new(None)),
             timestamp_fixed: false,
             timestamp_size: None,
+            indentification_field_type: IdentificationFieldType::AbosulteODT,
         }
     }
 
@@ -136,6 +146,7 @@ impl DaqManager {
                 self.timestamp_size = None;
             }
             1 | 2 | 4 => {  
+                tracing::debug!("Timestamp size: {}", timestamp_size_bits);
                 self.timestamp_size = Some(timestamp_size_bits);
             }
             _ => {
@@ -144,6 +155,36 @@ impl DaqManager {
             }
         }
         return Ok(());
+    }
+
+    pub async fn get_daq_processor_info(&self, client: &XcpClient) -> Result<IdentificationFieldType, String> { 
+        tracing::debug!("Getting DAQ processor info...");
+        let daq_processor_info = client.get_daq_processor_info().await.map_err(|e| format!("GET_DAQ_PROCESSOR_INFO failed: {}", e))?;
+        let daq_key_byte = daq_processor_info.daq_key_byte;
+        tracing::info!("DAQ key byte: {}", daq_key_byte);
+        let bits = (daq_key_byte & 0b11000000) >> 6;
+        match bits {
+            0 => {
+                tracing::debug!("abosulte odt is used");
+                return Ok(IdentificationFieldType::AbosulteODT)
+            }
+            1  => {
+                tracing::debug!("releative odt is used");
+                return Ok(IdentificationFieldType::RelatetiveODTBYTE)
+            }
+            2 => {
+                tracing::debug!("releative odt is used");
+                return Ok(IdentificationFieldType::RelatetiveODTWORD)
+            }
+            3 => {
+                tracing::debug!("releative odt is used");
+                return Ok(IdentificationFieldType::RelatetiveODTWORDAlign)
+            }
+            _ => {
+                tracing::error!("IDENTIFICATION FIELD NOT ALLOWED: {}", bits);
+                return Err("IDENTIFICATION FIELD NOT ALLOWED".to_string())
+            }
+        }
     }
 
     /// Configure DAQ on the XCP slave using Dynamic DAQ
@@ -156,6 +197,9 @@ impl DaqManager {
     /// 5. SET_DAQ_PTR + WRITE_DAQ - Configure each entry
     /// 6. SET_DAQ_LIST_MODE - Set mode and event channel
     pub async fn configure(&mut self, client: &XcpClient) -> Result<(), String> {
+        let identification_field_type = self.get_daq_processor_info(client).await?;
+        self.indentification_field_type = identification_field_type;
+        self.get_timestamp_mode(client).await?;
         tracing::info!("Configuring Dynamic DAQ...");
 
         // 1. FREE_DAQ - Release any existing DAQ configuration
@@ -242,13 +286,13 @@ impl DaqManager {
         // Configure DAQ first
         self.configure(client).await?;
 
-        // Get transport for DTO reception (must be done before starting DAQ)
-        let transport = client.transport().ok_or("No transport available")?.clone();
+        // Get DTO receiver for DAQ reception (must be done before starting DAQ)
+        let dto_rx = client.get_dto_receiver().ok_or("No DTO receiver available")?;
 
         // Start DAQ list 0
         tracing::info!("Selecte DAQ list 0");
         client
-            .start_stop_daq_list(2, 0)  // mode=2 (select DAQ list) 
+            .start_stop_daq_list(2, 0)  // mode=2 (select DAQ list)
             .await
             .map_err(|e| format!("START_STOP_DAQ_LIST failed: {}", e))?;
 
@@ -276,6 +320,7 @@ impl DaqManager {
         let latest_sample = self.latest_sample.clone();
         let measurements = self.measurements.clone();
         let timestamp_size = self.timestamp_size.unwrap_or(0);
+        let iden_field_type = self.indentification_field_type.clone();
 
         // Spawn DTO reception task
         let handle = tokio::spawn(async move {
@@ -287,18 +332,27 @@ impl DaqManager {
             tracing::info!("DAQ started, waiting for DTO packets...");
 
             while running.load(Ordering::SeqCst) {
-                // Receive DTO packet
-                match transport.recv_daq_packet().await {
-                    Ok(packet) => {
-                        // Parse DTO packet
-                        if let Some(data_vec) = parse_dto_packet(&packet, timestamp_size) {
-                            for data in data_vec {
-                                tracing::trace!("Received DTO: daq_list={}, data_len={}", data.daq_list, data.data.len());
+                // Receive DTO packet from channel
+                // Lock is acquired for each recv to allow other tasks to access the receiver
+                let msg = {
+                    let mut rx = dto_rx.lock().await;
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(100),
+                        rx.recv()
+                    ).await
+                };
+
+                match msg {
+                    Ok(Some(msg)) => {
+                        // msg.data already contains complete XCP packet (4-byte header + payload)
+                        // Parse single DTO packet
+                        if let Some(data) = parse_dto_packet(&msg.data, timestamp_size, &iden_field_type) {
+                            {
+                                tracing::info!("Received DTO: daq_list={:?}, data_len={}", data.daq_list, data.data.len());
                                 // Parse measurement data
                                 let mut offset = 0;
                                 let mut counter_val: Option<u32> = None;
                                 let mut const_data_val: Option<u32> = None;
-
                                 for meas in &measurements {
                                     if offset + meas.size <= data.data.len() {
                                         let bytes: [u8; 4] = if meas.size == 4 {
@@ -312,9 +366,9 @@ impl DaqManager {
                                             [0, 0, 0, 0]
                                         };
                                         if meas.name == "counter" {
-                                            counter_val = Some(u32::from_be_bytes(bytes));
+                                            counter_val = Some(u32::from_le_bytes(bytes));
                                         } else if meas.name == "const_data" {
-                                            const_data_val = Some(u32::from_be_bytes(bytes));
+                                            const_data_val = Some(u32::from_le_bytes(bytes));
                                         }
                                     }
                                     offset += meas.size;
@@ -345,10 +399,14 @@ impl DaqManager {
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to receive DTO packet: {}", e);
-                        // Small delay to avoid busy loop on error
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    Ok(None) => {
+                        // Channel closed
+                        tracing::warn!("DTO channel closed");
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout, continue to check running flag
+                        continue;
                     }
                 }
             }
@@ -366,12 +424,21 @@ impl DaqManager {
     }
 
     /// Stop DAQ acquisition
-    pub async fn stop(&self) -> Result<(), String> {
+    pub async fn stop(&self, client: &XcpClient) -> Result<(), String> {
         if !self.running.load(Ordering::SeqCst) {
             return Err("DAQ not running".to_string());
         }
 
-        // Signal task to stop
+        // First, stop DAQ on slave side to prevent further DTO packets
+        tracing::info!("Stopping DAQ list on slave...");
+        if let Err(e) = client.start_stop_synch(0x00).await {
+            tracing::warn!("Failed to send STOP_SYNCH: {}", e);
+        }
+
+        // Small delay to allow any in-flight packets to arrive
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Signal reception task to stop
         self.running.store(false, Ordering::SeqCst);
 
         // Wait for task to finish
@@ -399,81 +466,94 @@ impl Default for DaqManager {
 }
 
 
-struct DtoHeader {  
-    len: u16,
-    counter: u16,
-}
-/// Parse a DTO packet from slave
+/// Parse a single DTO packet from slave
 ///
 /// DTO packet format (XCP on Ethernet):
 /// - 4 bytes: Transport header [LEN_L, LEN_H, COUNTER_L, COUNTER_H]
 /// - 1 byte: PID (DAQ list number | 0xC0)
-/// - N bytes: ODT data
-fn parse_dto_packet(packet: &[u8], timestamp_size: u8) -> Option<Vec<DtoData>> {
+/// - N bytes: ODT data (including identification field and timestamp)
+fn parse_dto_packet(packet: &[u8], timestamp_size: u8, ind_field_type: &IdentificationFieldType) -> Option<DtoData> {
     // Minimum size: 4 (header) + 1 (PID) = 5 bytes
     if packet.len() < 5 {
         tracing::error!("DTO packet too short: {} bytes", packet.len());
         return None;
     }
-    let mut dto_data: Vec<DtoData> = Vec::new();
-    let mut cur = Cursor::new(packet);
-    while let Some(header) = parse_dto_header(&mut cur) {
-        let mut pid_buf = [0u8];
-        cur.read_exact(&mut pid_buf).ok()?;
-        let daq_list = pid_buf[0] & 0xF0;
-        let odt = pid_buf[0] & 0x0F;
-        let timestamp = match timestamp_size {
-            0 => {  /* no timestamp */ None},
-            1 => { /* 1 byte timestamp */
-                let mut timestamp_buf = [0u8];
-                cur.read_exact(&mut timestamp_buf).ok()?;
-                Some(timestamp_buf[0] as u32)
-            },
-            2 => { /* 2 byte timestamp */
-                let mut timestamp_buf = [0u8; 2];
-                cur.read_exact(&mut timestamp_buf).ok()?;
-                Some(u16::from_le_bytes(timestamp_buf) as u32)
-            },
-            4 => { /* 3 byte timestamp */
-                let mut timestamp_buf = [0u8; 4];
-                cur.read_exact(&mut timestamp_buf).ok()?;
-                Some(u32::from_le_bytes(timestamp_buf))
-            },
-            _ => {
-                tracing::error!("Invalid timestamp size: {}", timestamp_size);
-                None
-            }
-        };
-        let mut data = Vec::with_capacity(header.len as usize - 1 - timestamp_size as usize);
-        cur.read_exact(&mut data).ok()?;
-        dto_data.push(DtoData {
-            daq_list,
-            odt,
-            timestamp,
-            data,
-        });
-    }
-    return Some(dto_data);
-}
 
-fn parse_dto_header(packet: &mut Cursor<&[u8]>) -> Option<DtoHeader> { 
-    let remaining_bytes = packet.get_ref().len() - packet.position() as usize;
-    if remaining_bytes == 0 {
-        None
-    } else if remaining_bytes < 4 {
-        tracing::warn!("DTO packet too short: {} bytes", remaining_bytes);
-        None
-    } else {
-        let mut buf = [0; 2];
-        packet.read_exact(&mut buf).ok()?;
-        let len = u16::from_le_bytes(buf);
-        packet.read_exact(&mut buf).ok()?;
-        let counter = u16::from_le_bytes(buf);
-        Some(DtoHeader {
-            len,
-            counter,
-        })
-    }
+    let mut cur = Cursor::new(packet);
+
+    // Parse XCP header: [LEN_L, LEN_H, COUNTER_L, COUNTER_H]
+    let mut buf = [0u8; 2];
+    cur.read_exact(&mut buf).ok()?;
+    let len = u16::from_le_bytes(buf) as usize;
+    cur.read_exact(&mut buf).ok()?;
+    let _counter = u16::from_le_bytes(buf);
+
+    // Parse identification field based on type
+    let (daq_list, odt, pid_size) = match ind_field_type {
+        IdentificationFieldType::AbosulteODT => {
+            let mut odt_buff = [0u8];
+            cur.read_exact(&mut odt_buff).ok()?;
+            (None, odt_buff[0], 1usize)
+        }
+        IdentificationFieldType::RelatetiveODTBYTE => {
+            let mut odt_buff = [0u8];
+            cur.read_exact(&mut odt_buff).ok()?;
+            let mut daq_buff = [0u8];
+            cur.read_exact(&mut daq_buff).ok()?;
+            (Some(daq_buff[0] as u16), odt_buff[0], 2usize)
+        }
+        IdentificationFieldType::RelatetiveODTWORD => {
+            let mut odt_buff = [0u8];
+            cur.read_exact(&mut odt_buff).ok()?;
+            let mut daq_buff = [0u8; 2];
+            cur.read_exact(&mut daq_buff).ok()?;
+            (Some(u16::from_le_bytes(daq_buff)), odt_buff[0], 3usize)
+        }
+        IdentificationFieldType::RelatetiveODTWORDAlign => {
+            let mut odt_buff = [0u8; 2]; // FILL byte + ODT
+            cur.read_exact(&mut odt_buff).ok()?;
+            let mut daq_buff = [0u8; 2];
+            cur.read_exact(&mut daq_buff).ok()?;
+            (Some(u16::from_le_bytes(daq_buff)), odt_buff[0], 4usize)
+        }
+    };
+
+    // Parse timestamp if present
+    let timestamp = match timestamp_size {
+        0 => None,
+        1 => {
+            let mut timestamp_buf = [0u8];
+            cur.read_exact(&mut timestamp_buf).ok()?;
+            Some(timestamp_buf[0] as u32)
+        }
+        2 => {
+            let mut timestamp_buf = [0u8; 2];
+            cur.read_exact(&mut timestamp_buf).ok()?;
+            Some(u16::from_le_bytes(timestamp_buf) as u32)
+        }
+        4 => {
+            let mut timestamp_buf = [0u8; 4];
+            cur.read_exact(&mut timestamp_buf).ok()?;
+            Some(u32::from_le_bytes(timestamp_buf))
+        }
+        _ => {
+            tracing::error!("Invalid timestamp size: {}", timestamp_size);
+            None
+        }
+    };
+
+    // Calculate and read ODT data
+    // len = identification field size + timestamp size + data size
+    let data_len = len.saturating_sub(pid_size).saturating_sub(timestamp_size as usize);
+    let mut data = vec![0u8; data_len];
+    cur.read_exact(&mut data).ok()?;
+
+    Some(DtoData {
+        daq_list,
+        odt,
+        timestamp,
+        data,
+    })
 }
 
 #[cfg(test)]
@@ -482,29 +562,30 @@ mod tests {
 
     #[test]
     fn test_parse_dto_packet() {
-        // Valid DTO packet: header + PID (0xC0 = DAQ list 0) + data
-        let packet = [0x08, 0x00, 0x01, 0x00, 0xC0, 0x01, 0x02, 0x03, 0x04];
-        let result = parse_dto_packet(&packet, 0);
+        // Valid DTO packet: header + ODT (0x00) + data (AbosulteODT mode)
+        // Note: In AbosulteODT mode, the ODT number is absolute, daq_list is None
+        // XCP header: len=5, counter=1, then ODT=0x00, then 4 bytes data
+        let packet = [0x05, 0x00, 0x01, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04];
+        let result = parse_dto_packet(&packet, 0, &IdentificationFieldType::AbosulteODT);
         assert!(result.is_some());
         let data = result.unwrap();
-        assert_eq!(data[0].daq_list, 0);
-        assert_eq!(data[0].data, vec![0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(data.daq_list, None); // AbosulteODT doesn't include daq_list
+        assert_eq!(data.odt, 0x00);
+        assert_eq!(data.data, vec![0x01, 0x02, 0x03, 0x04]);
 
-        // DAQ list 1 (PID = 0xC1)
-        let packet = [0x08, 0x00, 0x02, 0x00, 0xC1, 0xAA, 0xBB, 0xCC, 0xDD];
-        let result = parse_dto_packet(&packet, 0);
+        // Test with RelativeODT mode - includes DAQ list
+        // Format: header + ODT (1 byte) + DAQ list (1 byte) + data
+        // XCP header: len=6, counter=2, then ODT=0x01, DAQ=0x01, then 4 bytes data
+        let packet = [0x06, 0x00, 0x02, 0x00, 0x01, 0x01, 0xAA, 0xBB, 0xCC, 0xDD];
+        let result = parse_dto_packet(&packet, 0, &IdentificationFieldType::RelatetiveODTBYTE);
         assert!(result.is_some());
         let data = result.unwrap();
-        assert_eq!(data[0].daq_list, 1);
+        assert_eq!(data.daq_list, Some(1));
+        assert_eq!(data.odt, 0x01);
 
-        // Invalid PID (not a DAQ DTO)
-        let packet = [0x08, 0x00, 0x03, 0x00, 0xFF, 0x01, 0x02, 0x03, 0x04];
-        let result = parse_dto_packet(&packet, 0);
-        assert!(result.is_some()); // 0xFF = DAQ list 63
-
-        // Packet too short
+        // Packet too short (less than 5 bytes)
         let packet = [0x01, 0x00, 0x01, 0x00];
-        let result = parse_dto_packet(&packet, 0);
+        let result = parse_dto_packet(&packet, 0, &IdentificationFieldType::AbosulteODT);
         assert!(result.is_none());
     }
 }

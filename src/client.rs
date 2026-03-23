@@ -51,6 +51,15 @@ pub struct DAQResolutionInfo {
     pub timestamp_ticks: u16
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DAQProcessorInfo {
+    pub daq_properties: u8,
+    pub max_daq: u16,
+    pub max_event_channel: u16,
+    pub min_daq: u8,
+    pub daq_key_byte: u8,
+}
+
 impl Default for ClientState {
     fn default() -> Self {
         Self {
@@ -331,6 +340,31 @@ impl XcpClient {
             }
         }
         
+    }
+
+    pub async fn get_daq_processor_info(&self) -> Result<DAQProcessorInfo, XcpError> {
+        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
+        let repsonse = transport.send_command(&commands::get_daq_processor_info()).await?;
+        let parsed = parse_response(&repsonse).map_err(XcpError::ParseError)?;
+        match parsed {
+            Response::Res(data) if data.len() == 7=> {
+                let daq_properties= data[0];
+                let max_daq = u16::from_le_bytes([data[1], data[2]]);
+                let max_event_channel = u16::from_le_bytes([data[3], data[4]]);
+                let min_daq = data[5];
+                let daq_key_byte = data[6];
+                Ok(DAQProcessorInfo {
+                    daq_properties,
+                    max_daq,
+                    max_event_channel,
+                    min_daq,
+                    daq_key_byte
+                })
+            },
+            _ => {
+                return Err(XcpError::InvalidResponse("Invalid response length".to_string()));
+            }
+        }
     }
 
     /// Free DAQ resources

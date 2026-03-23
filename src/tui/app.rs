@@ -64,6 +64,7 @@ impl MenuItem {
 #[derive(Debug, Clone, Default)]
 pub struct DaqSample {
     pub counter: Option<u32>,
+    pub const_data: Option<u32>,
 }
 
 /// Application state
@@ -516,7 +517,10 @@ impl App {
         self.loading = true;
         self.loading_msg = "Stopping DAQ...".to_string();
 
-        let result = daq_manager.lock().await.stop().await;
+        let result = {
+            let client_guard = self.client.lock().await;
+            daq_manager.lock().await.stop(&*client_guard).await
+        };
 
         self.loading = false;
 
@@ -546,6 +550,7 @@ impl App {
             if let Some(record) = record {
                 let sample = DaqSample {
                     counter: record.counter,
+                    const_data: record.const_data,
                 };
                 self.daq_samples.push(sample);
                 if self.daq_samples.len() > 50 {
@@ -803,6 +808,13 @@ impl App {
                     .and_then(|s| s.counter.map(|c| c.to_string()))
                     .unwrap_or_else(|| "N/A".to_string()),
             ),
+            Span::styled("    Const data: ", Style::default().fg(Color::Red)),
+            Span::raw(
+                self.daq_samples
+                    .last()
+                    .and_then(|s| s.const_data.map(|c| c.to_string()))
+                    .unwrap_or_else(|| "N/A".to_string()),
+            ),
         ])];
 
         // Show last few samples
@@ -817,7 +829,11 @@ impl App {
                 .counter
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "-".to_string());
-            data_lines.push(Line::from(format!("  Counter: {}", counter)));
+            let const_data = sample
+                .const_data
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            data_lines.push(Line::from(format!("  Counter: {} | Data: {}", counter, const_data)));
         }
 
         let data = Paragraph::new(data_lines).block(
