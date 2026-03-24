@@ -34,6 +34,65 @@ pub enum IdentificationFieldType {
     RelatetiveODTWORDAlign,
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(u16)]
+pub enum TimestampTicks {
+    DAQTIMESTAMPUNIT1NS = 0x0,
+    DAQTIMESTAMPUNIT10NS = 0x1,
+    DAQTIMESTAMPUNIT100NS = 0x2,
+    DAQTIMESTAMPUNIT1US = 0x3,
+    DAQTIMESTAMPUNIT10US = 0x4,
+    DAQTIMESTAMPUNIT100US = 0x5,
+    DAQTIMESTAMPUNIT1MS = 0x6,
+    DAQTIMESTAMPUNIT10MS = 0x7,
+    DAQTIMESTAMPUNIT100MS = 0x8,
+    DAQTIMESTAMPUNIT1S = 0x9,
+    DAQTIMESTAMPUNIT1PS = 0xa,
+    DAQTIMESTAMPUNIT10PS = 0xb,
+    DAQTIMESTAMPUNIT100PS = 0xc,
+}
+
+impl TimestampTicks {
+    /// 获取每个 tick 对应的秒数
+    pub fn to_seconds(&self) -> f64 {
+        match self {
+            TimestampTicks::DAQTIMESTAMPUNIT1PS => 1e-12,
+            TimestampTicks::DAQTIMESTAMPUNIT10PS => 1e-11,
+            TimestampTicks::DAQTIMESTAMPUNIT100PS => 1e-10,
+            TimestampTicks::DAQTIMESTAMPUNIT1NS => 1e-9,
+            TimestampTicks::DAQTIMESTAMPUNIT10NS => 1e-8,
+            TimestampTicks::DAQTIMESTAMPUNIT100NS => 1e-7,
+            TimestampTicks::DAQTIMESTAMPUNIT1US => 1e-6,
+            TimestampTicks::DAQTIMESTAMPUNIT10US => 1e-5,
+            TimestampTicks::DAQTIMESTAMPUNIT100US => 1e-4,
+            TimestampTicks::DAQTIMESTAMPUNIT1MS => 1e-3,
+            TimestampTicks::DAQTIMESTAMPUNIT10MS => 1e-2,
+            TimestampTicks::DAQTIMESTAMPUNIT100MS => 1e-1,
+            TimestampTicks::DAQTIMESTAMPUNIT1S => 1.0,
+        }
+    }
+    
+    /// 从 u16 安全转换
+    pub fn from_u16(value: u16) -> Option<Self> {
+        match value {
+            0x0 => Some(TimestampTicks::DAQTIMESTAMPUNIT1NS),
+            0x1 => Some(TimestampTicks::DAQTIMESTAMPUNIT10NS),
+            0x2 => Some(TimestampTicks::DAQTIMESTAMPUNIT100NS),
+            0x3 => Some(TimestampTicks::DAQTIMESTAMPUNIT1US),
+            0x4 => Some(TimestampTicks::DAQTIMESTAMPUNIT10US),
+            0x5 => Some(TimestampTicks::DAQTIMESTAMPUNIT100US),
+            0x6 => Some(TimestampTicks::DAQTIMESTAMPUNIT1MS),
+            0x7 => Some(TimestampTicks::DAQTIMESTAMPUNIT10MS),
+            0x8 => Some(TimestampTicks::DAQTIMESTAMPUNIT100MS),
+            0x9 => Some(TimestampTicks::DAQTIMESTAMPUNIT1S),
+            0xa => Some(TimestampTicks::DAQTIMESTAMPUNIT1PS),
+            0xb => Some(TimestampTicks::DAQTIMESTAMPUNIT10PS),
+            0xc => Some(TimestampTicks::DAQTIMESTAMPUNIT100PS),
+            _ => None,
+        }
+    }
+}
+
 impl Measurement {
     pub fn new(name: &str, address: u32, address_ext: u8, size: usize) -> Self {
         Self {
@@ -92,6 +151,7 @@ pub struct DaqManager {
     timestamp_fixed: bool,
     timestamp_size: Option<u8>,
     indentification_field_type: IdentificationFieldType,
+    timestamp_tick: Option<TimestampTicks>,
 }
 
 impl DaqManager {
@@ -112,6 +172,7 @@ impl DaqManager {
             timestamp_fixed: false,
             timestamp_size: None,
             indentification_field_type: IdentificationFieldType::AbosulteODT,
+            timestamp_tick: Some(TimestampTicks::DAQTIMESTAMPUNIT1MS),
         }
     }
 
@@ -154,6 +215,8 @@ impl DaqManager {
                 return Err("Timestamp SIZE NOT ALLOWED".to_string())
             }
         }
+        let timestamp_tick = daqresolution_info.timestamp_ticks;
+        self.timestamp_tick = TimestampTicks::from_u16(timestamp_tick);
         return Ok(());
     }
 
