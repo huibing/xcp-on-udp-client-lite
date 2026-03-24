@@ -292,32 +292,32 @@ impl Default for ByteOrder {
     }
 }
 
-/// Convert u32 from big-endian bytes
-pub fn u32_from_be_bytes(data: &[u8]) -> u32 {
-    u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+/// Convert u32 from little-endian bytes
+pub fn u32_from_le_bytes(data: &[u8]) -> u32 {
+    u32::from_le_bytes([data[0], data[1], data[2], data[3]])
 }
 
-/// Convert u16 from big-endian bytes
-pub fn u16_from_be_bytes(data: &[u8]) -> u16 {
-    u16::from_be_bytes([data[0], data[1]])
+/// Convert u16 from little-endian bytes
+pub fn u16_from_le_bytes(data: &[u8]) -> u16 {
+    u16::from_le_bytes([data[0], data[1]])
 }
 
-/// Convert u64 from big-endian bytes
-pub fn u64_from_be_bytes(data: &[u8]) -> u64 {
-    u64::from_be_bytes([
+/// Convert u64 from little-endian bytes
+pub fn u64_from_le_bytes(data: &[u8]) -> u64 {
+    u64::from_le_bytes([
         data[0], data[1], data[2], data[3],
         data[4], data[5], data[6], data[7],
     ])
 }
 
-/// Convert f32 from big-endian bytes
-pub fn f32_from_be_bytes(data: &[u8]) -> f32 {
-    f32::from_be_bytes([data[0], data[1], data[2], data[3]])
+/// Convert f32 from little-endian bytes
+pub fn f32_from_le_bytes(data: &[u8]) -> f32 {
+    f32::from_le_bytes([data[0], data[1], data[2], data[3]])
 }
 
-/// Convert f64 from big-endian bytes
-pub fn f64_from_be_bytes(data: &[u8]) -> f64 {
-    f64::from_be_bytes([
+/// Convert f64 from little-endian bytes
+pub fn f64_from_le_bytes(data: &[u8]) -> f64 {
+    f64::from_le_bytes([
         data[0], data[1], data[2], data[3],
         data[4], data[5], data[6], data[7],
     ])

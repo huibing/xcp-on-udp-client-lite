@@ -255,12 +255,12 @@ impl XcpClient {
         if data.len() < 4 {
             return Err(XcpError::InvalidResponse("Not enough data for u32".to_string()));
         }
-        Ok(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+        Ok(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
     }
 
     /// Write a U32 value to memory
     pub async fn write_u32(&self, mta: Mta, value: u32) -> Result<(), XcpError> {
-        let bytes = value.to_be_bytes();
+        let bytes = value.to_le_bytes();
         self.write_memory(mta, &bytes).await
     }
 
@@ -319,7 +319,7 @@ impl XcpClient {
                 let odt_entry_granularity_stim= data[2];
                 let max_odt_entry_size_stim= data[3];
                 let timestamp_mode= data[4];
-                let timestamp_ticks= u16::from_be_bytes([data[5], data[6]]);
+                let timestamp_ticks= u16::from_le_bytes([data[5], data[6]]);
                 Ok(DAQResolutionInfo {
                     odt_entry_granularity_daq,
                     max_odt_entry_size_daq,

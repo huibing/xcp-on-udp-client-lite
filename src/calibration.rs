@@ -207,35 +207,35 @@ impl CalibrationManager {
         let value = match &param.data_type {
             CalibrationType::U8 => CalibrationValue::U8(data.get(0).copied().unwrap_or(0)),
             CalibrationType::U16 => {
-                CalibrationValue::U16(u16::from_be_bytes([data[0], data[1]]))
+                CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]]))
             }
             CalibrationType::U32 => {
-                CalibrationValue::U32(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+                CalibrationValue::U32(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
             }
             CalibrationType::U64 => {
-                CalibrationValue::U64(u64::from_be_bytes([
+                CalibrationValue::U64(u64::from_le_bytes([
                     data[0], data[1], data[2], data[3],
                     data[4], data[5], data[6], data[7],
                 ]))
             }
             CalibrationType::I8 => CalibrationValue::I8(data[0] as i8),
             CalibrationType::I16 => {
-                CalibrationValue::I16(i16::from_be_bytes([data[0], data[1]]))
+                CalibrationValue::I16(i16::from_le_bytes([data[0], data[1]]))
             }
             CalibrationType::I32 => {
-                CalibrationValue::I32(i32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+                CalibrationValue::I32(i32::from_le_bytes([data[0], data[1], data[2], data[3]]))
             }
             CalibrationType::I64 => {
-                CalibrationValue::I64(i64::from_be_bytes([
+                CalibrationValue::I64(i64::from_le_bytes([
                     data[0], data[1], data[2], data[3],
                     data[4], data[5], data[6], data[7],
                 ]))
             }
             CalibrationType::F32 => {
-                CalibrationValue::F32(f32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+                CalibrationValue::F32(f32::from_le_bytes([data[0], data[1], data[2], data[3]]))
             }
             CalibrationType::F64 => {
-                CalibrationValue::F64(f64::from_be_bytes([
+                CalibrationValue::F64(f64::from_le_bytes([
                     data[0], data[1], data[2], data[3],
                     data[4], data[5], data[6], data[7],
                 ]))
@@ -274,31 +274,31 @@ impl CalibrationManager {
                 client.write_u8(mta, *v).await.map_err(|e| e.to_string())?
             }
             (CalibrationType::U16, CalibrationValue::U16(v)) => {
-                client.write_memory(mta, &v.to_be_bytes()).await.map_err(|e| e.to_string())?
+                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
             }
             (CalibrationType::U32, CalibrationValue::U32(v)) => {
                 client.write_u32(mta, *v).await.map_err(|e| e.to_string())?
             }
             (CalibrationType::U64, CalibrationValue::U64(v)) => {
-                client.write_memory(mta, &v.to_be_bytes()).await.map_err(|e| e.to_string())?
+                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
             }
             (CalibrationType::I8, CalibrationValue::I8(v)) => {
                 client.write_u8(mta, *v as u8).await.map_err(|e| e.to_string())?
             }
             (CalibrationType::I16, CalibrationValue::I16(v)) => {
-                client.write_memory(mta, &v.to_be_bytes()).await.map_err(|e| e.to_string())?
+                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
             }
             (CalibrationType::I32, CalibrationValue::I32(v)) => {
-                client.write_memory(mta, &v.to_be_bytes()).await.map_err(|e| e.to_string())?
+                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
             }
             (CalibrationType::I64, CalibrationValue::I64(v)) => {
-                client.write_memory(mta, &v.to_be_bytes()).await.map_err(|e| e.to_string())?
+                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
             }
             (CalibrationType::F32, CalibrationValue::F32(v)) => {
-                client.write_memory(mta, &v.to_be_bytes()).await.map_err(|e| e.to_string())?
+                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
             }
             (CalibrationType::F64, CalibrationValue::F64(v)) => {
-                client.write_memory(mta, &v.to_be_bytes()).await.map_err(|e| e.to_string())?
+                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
             }
             (CalibrationType::Bool, CalibrationValue::Bool(v)) => {
                 client.write_u8(mta, if *v { 1 } else { 0 }).await.map_err(|e| e.to_string())?
