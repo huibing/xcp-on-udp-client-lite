@@ -5,25 +5,156 @@
 //! 2. Start DAQ list - slave sends DTO packets automatically
 //! 3. Receive and parse DTO packets from slave
 
-use crate::client_v2::XcpClient;
+use crate::a2l_reader::{A2lDataType, A2lMeasurement, A2lReader};
+use crate::client::{DAQResolutionInfo, XcpClient};
 use crate::protocol::Mta;
-use chrono::{DateTime, Utc};
+// Note: chrono not used - timestamps are raw slave clock values, not UTC time
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::fs::OpenOptions;
 use std::io::Write as IoWrite;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-/// Measurement definition
+
+/// COMPU_METHOD for converting raw values to physical values
+#[derive(Debug, Clone)]
+pub enum CompuMethod {
+    /// No conversion (raw = physical)
+    Identical,
+    /// Linear conversion: physical = factor * raw + offset
+    Linear { factor: f64, offset: f64 },
+    /// Rational conversion: physical = (a * raw + b) / (c * raw + d)
+    Rational { a: f64, b: f64, c: f64, d: f64 },
+    /// Table lookup (simplified - could be extended)
+    TabVerb { pairs: Vec<(f64, f64)> },
+}
+
+impl CompuMethod {
+    /// Apply conversion to raw value
+    pub fn convert(&self, raw: f64) -> f64 {
+        match self {
+            CompuMethod::Identical => raw,
+            CompuMethod::Linear { factor, offset } => factor * raw + offset,
+            CompuMethod::Rational { a, b, c, d } => {
+                let denom = c * raw + d;
+                if denom.abs() < f64::EPSILON {
+                    raw
+                } else {
+                    (a * raw + b) / denom
+                }
+            }
+            CompuMethod::TabVerb { pairs } => {
+                // Find closest match or interpolate
+                for i in 0..pairs.len().saturating_sub(1) {
+                    if raw >= pairs[i].0 && raw <= pairs[i + 1].0 {
+                        // Linear interpolation
+                        let t = (raw - pairs[i].0) / (pairs[i + 1].0 - pairs[i].0);
+                        return pairs[i].1 + t * (pairs[i + 1].1 - pairs[i].1);
+                    }
+                }
+                // Return closest boundary value
+                pairs.first().map(|p| p.1).unwrap_or(raw)
+            }
+        }
+    }
+
+    /// Convert raw bytes based on data type
+    pub fn convert_bytes(&self, data_type: &A2lDataType, bytes: &[u8]) -> f64 {
+        let raw = match data_type {
+            A2lDataType::U8 => bytes.first().copied().unwrap_or(0) as f64,
+            A2lDataType::U16 => {
+                if bytes.len() >= 2 {
+                    u16::from_le_bytes([bytes[0], bytes[1]]) as f64
+                } else {
+                    0.0
+                }
+            }
+            A2lDataType::U32 => {
+                if bytes.len() >= 4 {
+                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
+                } else {
+                    0.0
+                }
+            }
+            A2lDataType::U64 => {
+                if bytes.len() >= 8 {
+                    u64::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7],
+                    ]) as f64
+                } else {
+                    0.0
+                }
+            }
+            A2lDataType::I8 => bytes.first().copied().unwrap_or(0) as i8 as f64,
+            A2lDataType::I16 => {
+                if bytes.len() >= 2 {
+                    i16::from_le_bytes([bytes[0], bytes[1]]) as f64
+                } else {
+                    0.0
+                }
+            }
+            A2lDataType::I32 => {
+                if bytes.len() >= 4 {
+                    i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
+                } else {
+                    0.0
+                }
+            }
+            A2lDataType::I64 => {
+                if bytes.len() >= 8 {
+                    i64::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7],
+                    ]) as f64
+                } else {
+                    0.0
+                }
+            }
+            A2lDataType::F32 => {
+                if bytes.len() >= 4 {
+                    f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
+                } else {
+                    0.0
+                }
+            }
+            A2lDataType::F64 => {
+                if bytes.len() >= 8 {
+                    f64::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7],
+                    ])
+                } else {
+                    0.0
+                }
+            }
+            A2lDataType::Bool => (bytes.first().copied().unwrap_or(0) != 0) as u8 as f64,
+            A2lDataType::U8Array(_) | A2lDataType::U8Matrix(_, _) => {
+                // For arrays, just use first element
+                bytes.first().copied().unwrap_or(0) as f64
+            }
+        };
+        self.convert(raw)
+    }
+}
+
+/// Measurement definition with full type information
 #[derive(Debug, Clone)]
 pub struct Measurement {
     pub name: String,
     pub address: u32,
     pub address_ext: u8,
     pub size: usize,
+    /// Data type for proper parsing
+    pub data_type: A2lDataType,
+    /// Unit for display
+    pub unit: Option<String>,
+    /// COMPU_METHOD for converting raw to physical values
+    pub compu_method: CompuMethod,
 }
 
 #[derive(Debug, Clone)]
@@ -35,8 +166,8 @@ pub enum IdentificationFieldType {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[repr(u16)]
-pub enum TimestampTicks {
+#[repr(u8)]
+pub enum TimestampUnit {
     DAQTIMESTAMPUNIT1NS = 0x0,
     DAQTIMESTAMPUNIT10NS = 0x1,
     DAQTIMESTAMPUNIT100NS = 0x2,
@@ -52,42 +183,42 @@ pub enum TimestampTicks {
     DAQTIMESTAMPUNIT100PS = 0xc,
 }
 
-impl TimestampTicks {
+impl TimestampUnit {
     /// 获取每个 tick 对应的秒数
     pub fn to_seconds(&self) -> f64 {
         match self {
-            TimestampTicks::DAQTIMESTAMPUNIT1PS => 1e-12,
-            TimestampTicks::DAQTIMESTAMPUNIT10PS => 1e-11,
-            TimestampTicks::DAQTIMESTAMPUNIT100PS => 1e-10,
-            TimestampTicks::DAQTIMESTAMPUNIT1NS => 1e-9,
-            TimestampTicks::DAQTIMESTAMPUNIT10NS => 1e-8,
-            TimestampTicks::DAQTIMESTAMPUNIT100NS => 1e-7,
-            TimestampTicks::DAQTIMESTAMPUNIT1US => 1e-6,
-            TimestampTicks::DAQTIMESTAMPUNIT10US => 1e-5,
-            TimestampTicks::DAQTIMESTAMPUNIT100US => 1e-4,
-            TimestampTicks::DAQTIMESTAMPUNIT1MS => 1e-3,
-            TimestampTicks::DAQTIMESTAMPUNIT10MS => 1e-2,
-            TimestampTicks::DAQTIMESTAMPUNIT100MS => 1e-1,
-            TimestampTicks::DAQTIMESTAMPUNIT1S => 1.0,
+            TimestampUnit::DAQTIMESTAMPUNIT1PS => 1e-12,
+            TimestampUnit::DAQTIMESTAMPUNIT10PS => 1e-11,
+            TimestampUnit::DAQTIMESTAMPUNIT100PS => 1e-10,
+            TimestampUnit::DAQTIMESTAMPUNIT1NS => 1e-9,
+            TimestampUnit::DAQTIMESTAMPUNIT10NS => 1e-8,
+            TimestampUnit::DAQTIMESTAMPUNIT100NS => 1e-7,
+            TimestampUnit::DAQTIMESTAMPUNIT1US => 1e-6,
+            TimestampUnit::DAQTIMESTAMPUNIT10US => 1e-5,
+            TimestampUnit::DAQTIMESTAMPUNIT100US => 1e-4,
+            TimestampUnit::DAQTIMESTAMPUNIT1MS => 1e-3,
+            TimestampUnit::DAQTIMESTAMPUNIT10MS => 1e-2,
+            TimestampUnit::DAQTIMESTAMPUNIT100MS => 1e-1,
+            TimestampUnit::DAQTIMESTAMPUNIT1S => 1.0,
         }
     }
     
     /// 从 u16 安全转换
-    pub fn from_u16(value: u16) -> Option<Self> {
+    pub fn from_u8(value: u8) -> Option<Self> {
         match value {
-            0x0 => Some(TimestampTicks::DAQTIMESTAMPUNIT1NS),
-            0x1 => Some(TimestampTicks::DAQTIMESTAMPUNIT10NS),
-            0x2 => Some(TimestampTicks::DAQTIMESTAMPUNIT100NS),
-            0x3 => Some(TimestampTicks::DAQTIMESTAMPUNIT1US),
-            0x4 => Some(TimestampTicks::DAQTIMESTAMPUNIT10US),
-            0x5 => Some(TimestampTicks::DAQTIMESTAMPUNIT100US),
-            0x6 => Some(TimestampTicks::DAQTIMESTAMPUNIT1MS),
-            0x7 => Some(TimestampTicks::DAQTIMESTAMPUNIT10MS),
-            0x8 => Some(TimestampTicks::DAQTIMESTAMPUNIT100MS),
-            0x9 => Some(TimestampTicks::DAQTIMESTAMPUNIT1S),
-            0xa => Some(TimestampTicks::DAQTIMESTAMPUNIT1PS),
-            0xb => Some(TimestampTicks::DAQTIMESTAMPUNIT10PS),
-            0xc => Some(TimestampTicks::DAQTIMESTAMPUNIT100PS),
+            0x0 => Some(TimestampUnit::DAQTIMESTAMPUNIT1NS),
+            0x1 => Some(TimestampUnit::DAQTIMESTAMPUNIT10NS),
+            0x2 => Some(TimestampUnit::DAQTIMESTAMPUNIT100NS),
+            0x3 => Some(TimestampUnit::DAQTIMESTAMPUNIT1US),
+            0x4 => Some(TimestampUnit::DAQTIMESTAMPUNIT10US),
+            0x5 => Some(TimestampUnit::DAQTIMESTAMPUNIT100US),
+            0x6 => Some(TimestampUnit::DAQTIMESTAMPUNIT1MS),
+            0x7 => Some(TimestampUnit::DAQTIMESTAMPUNIT10MS),
+            0x8 => Some(TimestampUnit::DAQTIMESTAMPUNIT100MS),
+            0x9 => Some(TimestampUnit::DAQTIMESTAMPUNIT1S),
+            0xa => Some(TimestampUnit::DAQTIMESTAMPUNIT1PS),
+            0xb => Some(TimestampUnit::DAQTIMESTAMPUNIT10PS),
+            0xc => Some(TimestampUnit::DAQTIMESTAMPUNIT100PS),
             _ => None,
         }
     }
@@ -100,6 +231,30 @@ impl Measurement {
             address,
             address_ext,
             size,
+            data_type: A2lDataType::U32,
+            unit: None,
+            compu_method: CompuMethod::Identical,
+        }
+    }
+
+    /// Create a measurement with full type information
+    pub fn with_type(
+        name: &str,
+        address: u32,
+        address_ext: u8,
+        data_type: A2lDataType,
+        unit: Option<String>,
+        compu_method: CompuMethod,
+    ) -> Self {
+        let size = data_type.size();
+        Self {
+            name: name.to_string(),
+            address,
+            address_ext,
+            size,
+            data_type,
+            unit,
+            compu_method,
         }
     }
 
@@ -108,12 +263,139 @@ impl Measurement {
     }
 }
 
+/// ODT Entry configuration - tracks a single measurement's position in DAQ structure
+#[derive(Debug, Clone)]
+pub struct OdtEntryConfig {
+    /// Measurement name
+    pub name: String,
+    /// DAQ list number
+    pub daq_list: u16,
+    /// ODT number within the DAQ list
+    pub odt: u8,
+    /// Entry index within the ODT
+    pub entry: u8,
+    /// Byte offset within the ODT data payload
+    pub byte_offset: usize,
+    /// Size in bytes
+    pub size: usize,
+    /// Data type for parsing
+    pub data_type: A2lDataType,
+    /// Unit string
+    pub unit: Option<String>,
+    /// COMPU_METHOD for conversion
+    pub compu_method: CompuMethod,
+}
+
+/// DAQ Configuration - stores complete DAQ structure for decoding
+#[derive(Debug, Clone)]
+pub struct DaqConfiguration {
+    /// ODT entry configurations (one per measurement)
+    pub odt_entries: Vec<OdtEntryConfig>,
+    /// Timestamp size in bytes (0, 1, 2, or 4)
+    pub timestamp_size: u8,
+    /// Timestamp unit for conversion
+    pub timestamp_unit: Option<TimestampUnit>,
+    /// Identification field type
+    pub identification_type: IdentificationFieldType,
+    /// Maximum ODT entry size from slave
+    pub max_odt_entry_size: u8,
+    /// ODT entry granularity from slave
+    pub odt_entry_granularity: u8,
+    /// Number of DAQ lists configured
+    pub daq_list_count: u16,
+    /// Number of ODTs per DAQ list
+    pub odt_count_per_list: Vec<u8>,
+}
+
+impl DaqConfiguration {
+    /// Create empty configuration
+    pub fn new() -> Self {
+        Self {
+            odt_entries: Vec::new(),
+            timestamp_size: 0,
+            timestamp_unit: None,
+            identification_type: IdentificationFieldType::AbosulteODT,
+            max_odt_entry_size: 0,
+            odt_entry_granularity: 1,
+            daq_list_count: 0,
+            odt_count_per_list: Vec::new(),
+        }
+    }
+
+    /// Get configuration for a measurement by name
+    pub fn get_entry(&self, name: &str) -> Option<&OdtEntryConfig> {
+        self.odt_entries.iter().find(|e| e.name == name)
+    }
+
+    /// Get entries for a specific ODT
+    pub fn get_odt_entries(&self, daq_list: u16, odt: u8) -> Vec<&OdtEntryConfig> {
+        self.odt_entries
+            .iter()
+            .filter(|e| e.daq_list == daq_list && e.odt == odt)
+            .collect()
+    }
+
+    /// Calculate total size of all entries (for validation)
+    pub fn total_size(&self) -> usize {
+        self.odt_entries.iter().map(|e| e.size).sum()
+    }
+
+    /// Clear all entries
+    pub fn clear(&mut self) {
+        self.odt_entries.clear();
+        self.odt_count_per_list.clear();
+    }
+}
+
+impl Default for DaqConfiguration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// DAQ data record for CSV output
 #[derive(Debug, Clone, Serialize)]
 pub struct DaqRecord {
-    pub timestamp: String,
-    pub counter: Option<u32>,
-    pub const_data: Option<u32>,
+    /// Raw timestamp value (base + relative, in slave clock ticks)
+    /// Note: This is NOT UTC time - it's a raw counter value from the slave
+    pub timestamp: u32,
+    /// Measurement values (name -> physical value as f64)
+    /// Values are converted from raw bytes using COMPU_METHOD
+    pub values: HashMap<String, f64>,
+    /// Raw values for debugging (name -> raw bytes)
+    #[serde(skip)]
+    pub raw_values: HashMap<String, Vec<u8>>,
+}
+
+impl DaqRecord {
+    /// Create a new DAQ record with timestamp
+    pub fn new(timestamp: u32) -> Self {
+        Self {
+            timestamp,
+            values: HashMap::new(),
+            raw_values: HashMap::new(),
+        }
+    }
+
+    /// Add a measurement value (physical value after conversion)
+    pub fn add_value(&mut self, name: &str, value: f64) {
+        self.values.insert(name.to_string(), value);
+    }
+
+    /// Add raw measurement bytes
+    pub fn add_raw_value(&mut self, name: &str, raw: Vec<u8>) {
+        self.raw_values.insert(name.to_string(), raw);
+    }
+
+    /// Get a measurement value
+    pub fn get_value(&self, name: &str) -> Option<f64> {
+        self.values.get(name).copied()
+    }
+
+    /// Get raw bytes for a measurement
+    pub fn get_raw_value(&self, name: &str) -> Option<&Vec<u8>> {
+        self.raw_values.get(name)
+    }
 }
 
 /// Parsed DTO packet data
@@ -131,8 +413,10 @@ pub struct DtoData {
 
 /// DAQ Manager - implements Dynamic DAQ
 pub struct DaqManager {
-    /// Measurement definitions
-    measurements: Vec<Measurement>,
+    /// All available measurement definitions (from A2L)
+    all_measurements: Vec<Measurement>,
+    /// Selected measurement indices for DAQ
+    selected_indices: Vec<usize>,
     /// DAQ running flag
     running: Arc<AtomicBool>,
     /// Background task handle
@@ -151,17 +435,30 @@ pub struct DaqManager {
     timestamp_fixed: bool,
     timestamp_size: Option<u8>,
     indentification_field_type: IdentificationFieldType,
-    timestamp_tick: Option<TimestampTicks>,
+    timestamp_unit: Option<TimestampUnit>,
+    /// Base timestamp from GET_DAQ_CLOCK (used for relative timestamp calculation)
+    /// Note: This is a raw u32 value, not UTC epoch time (the 0 point is slave-specific)
+    base_timestamp: Option<u32>,
+    /// DAQ resolution info from slave (ODT entry limits)
+    daq_resolution: Option<DAQResolutionInfo>,
+    /// DAQ configuration - stores mapping of measurements to ODT entries
+    daq_config: Arc<RwLock<DaqConfiguration>>,
+    /// Flag indicating if selection has changed while DAQ was running
+    selection_changed: Arc<AtomicBool>,
 }
 
 impl DaqManager {
-    /// Create a new DAQ manager with measurements from A2L
+    /// Create a new DAQ manager with default hardcoded measurements
     pub fn new() -> Self {
+        let default_measurements = vec![
+            Measurement::new("const_data", 0xFFFC, 2, 4),
+            Measurement::new("counter", 0xFFF8, 2, 4),
+        ];
+        let selected_indices = (0..default_measurements.len()).collect();
+
         Self {
-            measurements: vec![
-                Measurement::new("const_data", 0xFFFC, 2, 4),
-                Measurement::new("counter", 0xFFF8, 2, 4),
-            ],
+            all_measurements: default_measurements,
+            selected_indices,
             running: Arc::new(AtomicBool::new(false)),
             task_handle: Arc::new(RwLock::new(None)),
             csv_path: PathBuf::from("daq_data.csv"),
@@ -172,8 +469,248 @@ impl DaqManager {
             timestamp_fixed: false,
             timestamp_size: None,
             indentification_field_type: IdentificationFieldType::AbosulteODT,
-            timestamp_tick: Some(TimestampTicks::DAQTIMESTAMPUNIT1MS),
+            timestamp_unit: None,
+            base_timestamp: None,
+            daq_resolution: None,
+            daq_config: Arc::new(RwLock::new(DaqConfiguration::new())),
+            selection_changed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Create a DAQ manager from an A2L file
+    pub fn from_a2l<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        let reader = A2lReader::load(path)?;
+        let a2l_measurements = reader.get_measurements();
+
+        let all_measurements: Vec<Measurement> = a2l_measurements
+            .into_iter()
+            .filter_map(|m| Self::convert_measurement(m))
+            .collect();
+
+        // By default, select first 8 measurements or all if less than 8
+        let selected_count = all_measurements.len().min(8);
+        let selected_indices = (0..selected_count).collect();
+
+        Ok(Self {
+            all_measurements,
+            selected_indices,
+            running: Arc::new(AtomicBool::new(false)),
+            task_handle: Arc::new(RwLock::new(None)),
+            csv_path: PathBuf::from("daq_data.csv"),
+            slave_addr: "127.0.0.1:5555".to_string(),
+            daq_list_count: 1,
+            event_channel: 0,
+            latest_sample: Arc::new(RwLock::new(None)),
+            timestamp_fixed: false,
+            timestamp_size: None,
+            indentification_field_type: IdentificationFieldType::AbosulteODT,   // most commonly used
+            timestamp_unit: None,
+            base_timestamp: None,
+            daq_resolution: None,
+            daq_config: Arc::new(RwLock::new(DaqConfiguration::new())),
+            selection_changed: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Convert A2L measurement to DAQ Measurement with full type info
+    fn convert_measurement(m: A2lMeasurement) -> Option<Measurement> {
+        let size = m.data_type.size();
+        // Create COMPU_METHOD from A2L conversion info
+        // For now, use linear conversion based on min/max if available
+        let compu_method = CompuMethod::Identical;
+
+        Some(Measurement {
+            name: m.name,
+            address: m.address,
+            address_ext: m.address_ext,
+            size,
+            data_type: m.data_type,
+            unit: m.unit,
+            compu_method,
+        })
+    }
+
+    /// Get the DAQ configuration (for use by other components)
+    pub fn get_config(&self) -> Arc<RwLock<DaqConfiguration>> {
+        self.daq_config.clone()
+    }
+
+    /// Check if DAQ needs restart due to selection changes
+    pub fn needs_restart(&self) -> bool {
+        self.selection_changed.load(Ordering::SeqCst)
+    }
+
+    /// Clear the restart flag
+    pub fn clear_restart_flag(&self) {
+        self.selection_changed.store(false, Ordering::SeqCst);
+    }
+
+    /// Get DAQ resolution info
+    pub fn get_daq_resolution(&self) -> Option<&DAQResolutionInfo> {
+        self.daq_resolution.as_ref()
+    }
+
+    /// Get all available measurements
+    pub fn all_measurements(&self) -> &[Measurement] {
+        &self.all_measurements
+    }
+
+    /// Get selected measurement indices
+    pub fn selected_indices(&self) -> &[usize] {
+        &self.selected_indices
+    }
+
+    /// Get selected measurements for DAQ
+    pub fn selected_measurements(&self) -> Vec<Measurement> {
+        self.selected_indices
+            .iter()
+            .filter_map(|&idx| self.all_measurements.get(idx).cloned())
+            .collect()
+    }
+
+    /// Check if a measurement is selected
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selected_indices.contains(&index)
+    }
+
+    /// Toggle selection of a measurement
+    /// If DAQ is running, marks that restart is needed
+    pub fn toggle_measurement(&mut self, index: usize) {
+        let was_running = self.running.load(Ordering::SeqCst);
+
+        if let Some(pos) = self.selected_indices.iter().position(|&i| i == index) {
+            self.selected_indices.remove(pos);
+        } else if index < self.all_measurements.len() {
+            self.selected_indices.push(index);
+            // Keep sorted for consistent display
+            self.selected_indices.sort_unstable();
+        }
+
+        // Mark selection changed if DAQ was running
+        if was_running {
+            self.selection_changed.store(true, Ordering::SeqCst);
+            tracing::info!("Selection changed while DAQ running - restart required");
+        }
+    }
+
+    /// Calculate ODT allocation based on slave limits
+    /// Returns (daq_list_count, odt_count_per_list, daq_lists_allocation)
+    /// where daq_lists_allocation[daq_list][odt] = Vec<measurement_indices>
+    /// This ensures we don't exceed max_odt_entry_size_daq
+    fn calculate_odt_allocation(&self, max_odt_entry_size: u8) -> (u16, Vec<u8>, Vec<Vec<Vec<usize>>>) {
+        let selected = self.selected_measurements();
+        if selected.is_empty() {
+            return (0, Vec::new(), Vec::new());
+        }
+
+        // Convert max entry size from granularity units to bytes
+        let max_bytes = max_odt_entry_size as usize;
+
+        // Group measurements into ODTs
+        // Each ODT can hold up to max_bytes bytes
+        let mut daq_lists: Vec<Vec<Vec<usize>>> = Vec::new(); // [daq_list][odt][entry_indices]
+        let mut current_list: Vec<Vec<usize>> = Vec::new();
+        let mut current_odt: Vec<usize> = Vec::new();
+        let mut current_odt_size: usize = 0;
+
+        for (idx, meas) in selected.iter().enumerate() {
+            let meas_size = meas.size;
+
+            // Check if this measurement fits in current ODT
+            if current_odt_size + meas_size > max_bytes && !current_odt.is_empty() {
+                // Finish current ODT
+                current_list.push(current_odt);
+                current_odt = Vec::new();
+                current_odt_size = 0;
+            }
+
+            // Check if we need a new DAQ list (arbitrary limit: 255 ODTs per list)
+            if current_list.len() >= 255 {
+                daq_lists.push(current_list);
+                current_list = Vec::new();
+            }
+
+            // Add measurement to current ODT
+            current_odt.push(idx);
+            current_odt_size += meas_size;
+
+            // Check if ODT is full
+            if current_odt_size >= max_bytes {
+                current_list.push(current_odt);
+                current_odt = Vec::new();
+                current_odt_size = 0;
+            }
+        }
+
+        // Don't forget the last ODT
+        if !current_odt.is_empty() {
+            current_list.push(current_odt);
+        }
+        if !current_list.is_empty() {
+            daq_lists.push(current_list);
+        }
+
+        // Convert to return format
+        let daq_list_count = daq_lists.len() as u16;
+        let odt_count_per_list: Vec<u8> = daq_lists.iter().map(|l| l.len() as u8).collect();
+
+        (daq_list_count, odt_count_per_list, daq_lists)
+    }
+
+    /// Select all measurements (with restart flag)
+    pub fn select_all(&mut self) {
+        let was_running = self.running.load(Ordering::SeqCst);
+        self.selected_indices = (0..self.all_measurements.len()).collect();
+        if was_running {
+            self.selection_changed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Deselect all measurements (with restart flag)
+    pub fn deselect_all(&mut self) {
+        let was_running = self.running.load(Ordering::SeqCst);
+        self.selected_indices.clear();
+        if was_running {
+            self.selection_changed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Select a measurement (with restart flag)
+    pub fn select_measurement(&mut self, index: usize) {
+        let was_running = self.running.load(Ordering::SeqCst);
+        if index < self.all_measurements.len() && !self.selected_indices.contains(&index) {
+            self.selected_indices.push(index);
+            self.selected_indices.sort_unstable();
+        }
+        if was_running {
+            self.selection_changed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Deselect a measurement (with restart flag)
+    pub fn deselect_measurement(&mut self, index: usize) {
+        let was_running = self.running.load(Ordering::SeqCst);
+        if let Some(pos) = self.selected_indices.iter().position(|&i| i == index) {
+            self.selected_indices.remove(pos);
+        }
+        if was_running {
+            self.selection_changed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Clear all measurements (with restart flag if running)
+    pub fn clear_measurements(&mut self) {
+        let was_running = self.running.load(Ordering::SeqCst);
+        self.all_measurements.clear();
+        self.selected_indices.clear();
+        if was_running {
+            self.selection_changed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Add a measurement to available list
+    pub fn add_measurement(&mut self, measurement: Measurement) {
+        self.all_measurements.push(measurement);
     }
 
     /// Set slave address for DAQ
@@ -181,9 +718,14 @@ impl DaqManager {
         self.slave_addr = addr;
     }
 
-    /// Get measurements
-    pub fn measurements(&self) -> &[Measurement] {
-        &self.measurements
+    /// Get count of all available measurements
+    pub fn available_count(&self) -> usize {
+        self.all_measurements.len()
+    }
+
+    /// Get count of selected measurements
+    pub fn selected_count(&self) -> usize {
+        self.selected_indices.len()
     }
 
     /// Get latest sample
@@ -215,8 +757,9 @@ impl DaqManager {
                 return Err("Timestamp SIZE NOT ALLOWED".to_string())
             }
         }
-        let timestamp_tick = daqresolution_info.timestamp_ticks;
-        self.timestamp_tick = TimestampTicks::from_u16(timestamp_tick);
+        let timestamp_unit = (timestamp_mode & 0b1111_0000) >> 4;
+        self.timestamp_unit = TimestampUnit::from_u8(timestamp_unit);
+        tracing::debug!("Timestamp tick: {:?}", self.timestamp_unit);
         return Ok(());
     }
 
@@ -253,88 +796,176 @@ impl DaqManager {
     /// Configure DAQ on the XCP slave using Dynamic DAQ
     ///
     /// Steps:
-    /// 1. FREE_DAQ - Release existing DAQ configuration
-    /// 2. ALLOC_DAQ - Allocate DAQ lists
-    /// 3. ALLOC_ODT - Allocate ODTs in each DAQ list
-    /// 4. ALLOC_ODT_ENTRY - Allocate entries in each ODT
-    /// 5. SET_DAQ_PTR + WRITE_DAQ - Configure each entry
-    /// 6. SET_DAQ_LIST_MODE - Set mode and event channel
+    /// 1. Get DAQ resolution info (ODT entry limits from slave)
+    /// 2. FREE_DAQ - Release existing DAQ configuration
+    /// 3. Calculate ODT allocation based on max_odt_entry_size
+    /// 4. ALLOC_DAQ - Allocate DAQ lists
+    /// 5. ALLOC_ODT - Allocate ODTs in each DAQ list
+    /// 6. ALLOC_ODT_ENTRY - Allocate entries in each ODT
+    /// 7. SET_DAQ_PTR + WRITE_DAQ - Configure each entry
+    /// 8. SET_DAQ_LIST_MODE - Set mode and event channel
+    /// 9. Build DaqConfiguration for decoding
     pub async fn configure(&mut self, client: &XcpClient) -> Result<(), String> {
         let identification_field_type = self.get_daq_processor_info(client).await?;
-        self.indentification_field_type = identification_field_type;
+        self.indentification_field_type = identification_field_type.clone();
         self.get_timestamp_mode(client).await?;
+
+        // Get DAQ resolution info for ODT entry limits
+        let daq_resolution = client.get_daq_resolution_info().await
+            .map_err(|e| format!("GET_DAQ_RESOLUTION_INFO failed: {}", e))?;
+        self.daq_resolution = Some(daq_resolution.clone());
+
+        let max_odt_entry_size = daq_resolution.max_odt_entry_size_daq;
+        let odt_granularity = daq_resolution.odt_entry_granularity_daq;
+
         tracing::info!("Configuring Dynamic DAQ...");
+        tracing::info!("ODT entry limits: max_size={}, granularity={}",
+            max_odt_entry_size, odt_granularity);
+
+        // Calculate ODT allocation based on slave limits
+        let selected_measurements = self.selected_measurements();
+        if selected_measurements.is_empty() {
+            return Err("No measurements selected for DAQ".to_string());
+        }
+
+        // Calculate how many ODTs and DAQ lists we need
+        let (daq_list_count, odt_count_per_list, daq_lists_allocation) =
+            self.calculate_odt_allocation(max_odt_entry_size);
+
+        if daq_list_count == 0 {
+            return Err("Failed to calculate ODT allocation".to_string());
+        }
+
+        tracing::info!("ODT allocation: {} DAQ lists", daq_list_count);
+        for (list_idx, odt_count) in odt_count_per_list.iter().enumerate() {
+            tracing::info!("  DAQ list {}: {} ODTs", list_idx, odt_count);
+        }
 
         // 1. FREE_DAQ - Release any existing DAQ configuration
         tracing::debug!("FREE_DAQ");
         client.free_daq().await.map_err(|e| format!("FREE_DAQ failed: {}", e))?;
 
-        // 2. ALLOC_DAQ - Allocate DAQ lists (we need 1 list)
-        tracing::debug!("ALLOC_DAQ: {} lists", self.daq_list_count);
+        // Clear old configuration
+        {
+            let mut config = self.daq_config.write().await;
+            config.clear();
+            config.max_odt_entry_size = max_odt_entry_size;
+            config.odt_entry_granularity = odt_granularity;
+            config.identification_type = identification_field_type.clone();
+            config.timestamp_size = self.timestamp_size.unwrap_or(0);
+            config.timestamp_unit = self.timestamp_unit.clone();
+            config.daq_list_count = daq_list_count;
+            config.odt_count_per_list = odt_count_per_list.clone();
+        }
+
+        // 2. ALLOC_DAQ - Allocate DAQ lists
+        tracing::debug!("ALLOC_DAQ: {} lists", daq_list_count);
         client
-            .alloc_daq(self.daq_list_count)
+            .alloc_daq(daq_list_count)
             .await
             .map_err(|e| format!("ALLOC_DAQ failed: {}", e))?;
 
-        // For DAQ list 0, configure all measurements
-        let daq_list: u16 = 0;
+        // 3-7. For each DAQ list, allocate ODTs and configure entries
+        let mut global_entry_idx: usize = 0;
 
-        // 3. ALLOC_ODT - Allocate ODTs (one ODT per measurement for simplicity)
-        // Or we can put all measurements in one ODT
-        // Option 1: One ODT containing all measurements (more efficient)
-        let odt_count = 1;
-        tracing::debug!("ALLOC_ODT: DAQ list {}, {} ODTs", daq_list, odt_count);
-        client
-            .alloc_odt(daq_list, odt_count)
-            .await
-            .map_err(|e| format!("ALLOC_ODT failed: {}", e))?;
+        for (daq_list_idx, odt_count) in odt_count_per_list.iter().enumerate() {
+            let daq_list = daq_list_idx as u16;
 
-        // 4. ALLOC_ODT_ENTRY - Allocate entries in ODT 0
-        let entry_count = self.measurements.len() as u8;
-        tracing::debug!("ALLOC_ODT_ENTRY: {} entries", entry_count);
-        client
-            .alloc_odt_entry(daq_list, 0, entry_count)
-            .await
-            .map_err(|e| format!("ALLOC_ODT_ENTRY failed: {}", e))?;
+            // ALLOC_ODT - Allocate ODTs for this DAQ list
+            tracing::debug!("ALLOC_ODT: DAQ list {}, {} ODTs", daq_list, odt_count);
+            client
+                .alloc_odt(daq_list, *odt_count)
+                .await
+                .map_err(|e| format!("ALLOC_ODT failed for list {}: {}", daq_list, e))?;
 
-        // 5. SET_DAQ_PTR + WRITE_DAQ - Configure each entry
-        for (entry_idx, meas) in self.measurements.iter().enumerate() {
+            // Get the allocation for this DAQ list
+            let list_allocation = &daq_lists_allocation[daq_list_idx];
+
+            // For each ODT in this DAQ list
+            for (odt_idx, entry_indices) in list_allocation.iter().enumerate() {
+                let odt = odt_idx as u8;
+                let entry_count = entry_indices.len() as u8;
+
+                // ALLOC_ODT_ENTRY - Allocate entries in this ODT
+                tracing::debug!("ALLOC_ODT_ENTRY: DAQ list {}, ODT {}, {} entries",
+                    daq_list, odt, entry_count);
+                client
+                    .alloc_odt_entry(daq_list, odt, entry_count)
+                    .await
+                    .map_err(|e| format!("ALLOC_ODT_ENTRY failed: {}", e))?;
+
+                // SET_DAQ_PTR + WRITE_DAQ - Configure each entry
+                let mut byte_offset: usize = 0;
+
+                for (entry_idx, &meas_idx) in entry_indices.iter().enumerate() {
+                    let meas = &selected_measurements[meas_idx];
+
+                    tracing::debug!(
+                        "WRITE_DAQ: DAQ list {}, ODT {}, entry {}, addr 0x{:08X}, size {}",
+                        daq_list, odt, entry_idx, meas.address, meas.size
+                    );
+
+                    // Set DAQ pointer to this entry
+                    client
+                        .set_daq_ptr(daq_list, odt, entry_idx as u8)
+                        .await
+                        .map_err(|e| format!("SET_DAQ_PTR failed: {}", e))?;
+
+                    // Write DAQ entry configuration
+                    // Ensure size is aligned to granularity
+                    let aligned_size = ((meas.size + odt_granularity as usize - 1)
+                        / odt_granularity as usize) * odt_granularity as usize;
+                    client
+                        .write_daq(0, meas.mta(), aligned_size as u8)
+                        .await
+                        .map_err(|e| format!("WRITE_DAQ failed: {}", e))?;
+
+                    // Add to configuration for decoding
+                    {
+                        let mut config = self.daq_config.write().await;
+                        config.odt_entries.push(OdtEntryConfig {
+                            name: meas.name.clone(),
+                            daq_list,
+                            odt,
+                            entry: entry_idx as u8,
+                            byte_offset,
+                            size: meas.size,
+                            data_type: meas.data_type.clone(),
+                            unit: meas.unit.clone(),
+                            compu_method: meas.compu_method.clone(),
+                        });
+                    }
+
+                    byte_offset += meas.size;
+                    global_entry_idx += 1;
+                }
+            }
+
+            // SET_DAQ_LIST_MODE - Configure DAQ list mode
+            // Mode: 0x10 = selected + DAQ (send on event)
+            // Event channel: determines trigger source
             tracing::debug!(
-                "WRITE_DAQ: entry {}, addr 0x{:08X}, size {}",
-                entry_idx,
-                meas.address,
-                meas.size
+                "SET_DAQ_LIST_MODE: mode=0x10, daq_list={}, event_channel={}, prescaler=1",
+                daq_list, self.event_channel
             );
-
-            // Set DAQ pointer to this entry
             client
-                .set_daq_ptr(daq_list, 0, entry_idx as u8)
+                .set_daq_list_mode(0x10, daq_list, self.event_channel, 1, 0)
                 .await
-                .map_err(|e| format!("SET_DAQ_PTR failed: {}", e))?;
-
-            // Write DAQ entry configuration
-            client
-                .write_daq(0, meas.mta(), meas.size as u8)
-                .await
-                .map_err(|e| format!("WRITE_DAQ failed: {}", e))?;
+                .map_err(|e| format!("SET_DAQ_LIST_MODE failed: {}", e))?;
         }
 
-        // 6. SET_DAQ_LIST_MODE - Configure DAQ list mode
-        // Mode: 0 = alternate (send all ODTs in sequence)
-        // Event channel: determines trigger source (0 = default/timer)
-        // Prescaler: 1 = no prescaling
-        // Priority: 0 = default
-        tracing::debug!(
-            "SET_DAQ_LIST_MODE: mode=0, daq_list={}, event_channel={}, prescaler=1",
-            daq_list,
-            self.event_channel
-        );
-        client
-            .set_daq_list_mode(0x10, daq_list, self.event_channel, 1, 0)
-            .await
-            .map_err(|e| format!("SET_DAQ_LIST_MODE failed: {}", e))?;
+        tracing::info!("DAQ configuration complete: {} entries configured", global_entry_idx);
 
-        tracing::info!("DAQ configuration complete");
+        // Log configuration summary
+        {
+            let config = self.daq_config.read().await;
+            tracing::info!("DAQ Configuration:");
+            for entry in &config.odt_entries {
+                tracing::info!("  {}: DAQ={}, ODT={}, entry={}, offset={}",
+                    entry.name, entry.daq_list, entry.odt, entry.entry, entry.byte_offset);
+            }
+        }
+
         Ok(())
     }
 
@@ -360,10 +991,35 @@ impl DaqManager {
             .map_err(|e| format!("START_STOP_DAQ_LIST failed: {}", e))?;
 
         tracing::info!("DAQ selected, starting DAQ...");
+
+        // Get base timestamp from slave if timestamp mode is enabled
+        // This is used for relative timestamp calculation in DTO packets
+        if self.timestamp_unit.is_some() && self.timestamp_size.is_some() {
+            match client.get_daq_clock().await {
+                Ok(base_ts) => {
+                    tracing::info!("Got base timestamp from slave: {} ticks", base_ts);
+                    self.base_timestamp = Some(base_ts);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to get DAQ clock from slave: {}. Using receive time as fallback.", e);
+                    self.base_timestamp = None;
+                }
+            }
+        } else {
+            tracing::debug!("Timestamp mode not enabled, skipping GET_DAQ_CLOCK");
+            self.base_timestamp = None;
+        }
+
         // client.start_stop_synch(0x03).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
         client.start_stop_synch(0x01).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
 
         self.running.store(true, Ordering::SeqCst);
+
+        // Get selected measurements for CSV header
+        let selected_measurements = self.selected_measurements();
+        if selected_measurements.is_empty() {
+            return Err("No measurements selected for DAQ".to_string());
+        }
 
         // Create CSV file with header
         let csv_path = self.csv_path.clone();
@@ -375,15 +1031,25 @@ impl DaqManager {
                 .open(&csv_path)
                 .map_err(|e| format!("Failed to create CSV: {}", e))?;
 
-            writeln!(file, "timestamp,counter,const_data")
+            // Build CSV header with selected measurement names
+            let mut header = String::from("timestamp");
+            for meas in &selected_measurements {
+                header.push(',');
+                header.push_str(&meas.name);
+            }
+            writeln!(file, "{}", header)
                 .map_err(|e| format!("Failed to write CSV header: {}", e))?;
         }
 
         let running = self.running.clone();
         let latest_sample = self.latest_sample.clone();
-        let measurements = self.measurements.clone();
+        let daq_config = self.daq_config.clone();
         let timestamp_size = self.timestamp_size.unwrap_or(0);
         let iden_field_type = self.indentification_field_type.clone();
+        let base_timestamp = self.base_timestamp;
+        let _timestamp_unit = self.timestamp_unit.clone();
+        let use_slave_timestamp = base_timestamp.is_some();
+        let selection_changed = self.selection_changed.clone();
 
         // Spawn DTO reception task
         let handle = tokio::spawn(async move {
@@ -395,8 +1061,13 @@ impl DaqManager {
             tracing::info!("DAQ started, waiting for DTO packets...");
 
             while running.load(Ordering::SeqCst) {
+                // Check if selection changed - if so, we need to restart
+                if selection_changed.load(Ordering::SeqCst) {
+                    tracing::info!("Selection changed - DAQ task will exit for restart");
+                    break;
+                }
+
                 // Receive DTO packet from channel
-                // Lock is acquired for each recv to allow other tasks to access the receiver
                 let msg = {
                     let mut rx = dto_rx.lock().await;
                     tokio::time::timeout(
@@ -407,63 +1078,95 @@ impl DaqManager {
 
                 match msg {
                     Ok(Some(msg)) => {
-                        // msg.data already contains complete XCP packet (4-byte header + payload)
                         // Parse single DTO packet
                         if let Some(data) = parse_dto_packet(&msg.data, timestamp_size, &iden_field_type) {
+                            // Get configuration for this DAQ list and ODT
+                            let config = daq_config.read().await;
+
+                            // Find entries for this ODT
+                            let entries: Vec<&OdtEntryConfig> = config.odt_entries.iter()
+                                .filter(|e| {
+                                    let daq_list_match = match data.daq_list {
+                                        Some(dl) => e.daq_list == dl,
+                                        None => e.daq_list == 0, // Default to list 0 if not specified
+                                    };
+                                    daq_list_match && e.odt == data.odt
+                                })
+                                .collect();
+
+                            if entries.is_empty() {
+                                tracing::warn!("No configuration found for DAQ list {:?}, ODT {}",
+                                    data.daq_list, data.odt);
+                                continue;
+                            }
+
+                            tracing::debug!("Received DTO: daq_list={:?}, odt={}, data_len={}, entries={}",
+                                data.daq_list, data.odt, data.data.len(), entries.len());
+
+                            // Parse measurement data using configuration
+                            let mut record = DaqRecord::new(0);
+
+                            for entry in entries {
+                                let offset = entry.byte_offset;
+                                if offset + entry.size <= data.data.len() {
+                                    let raw_bytes = &data.data[offset..offset + entry.size];
+
+                                    // Convert raw bytes to physical value using COMPU_METHOD
+                                    let physical_value = entry.compu_method.convert_bytes(
+                                        &entry.data_type,
+                                        raw_bytes
+                                    );
+
+                                    record.add_value(&entry.name, physical_value);
+                                    record.add_raw_value(&entry.name, raw_bytes.to_vec());
+                                } else {
+                                    tracing::warn!("Data too short for {}: need {} bytes at offset {}, have {}",
+                                        entry.name, entry.size, offset, data.data.len());
+                                }
+                            }
+
+                            // Calculate timestamp
+                            let timestamp = if use_slave_timestamp {
+                                if let (Some(base), Some(rel_ts)) = (base_timestamp, data.timestamp) {
+                                    base.wrapping_add(rel_ts)
+                                } else {
+                                    data.timestamp.unwrap_or(0)
+                                }
+                            } else {
+                                0
+                            };
+                            record.timestamp = timestamp;
+
+                            // Update latest sample for UI
                             {
-                                tracing::info!("Received DTO: daq_list={:?}, data_len={}", data.daq_list, data.data.len());
-                                // Parse measurement data
-                                let mut offset = 0;
-                                let mut counter_val: Option<u32> = None;
-                                let mut const_data_val: Option<u32> = None;
-                                for meas in &measurements {
-                                    if offset + meas.size <= data.data.len() {
-                                        let bytes: [u8; 4] = if meas.size == 4 {
-                                            [
-                                                data.data[offset],
-                                                data.data[offset + 1],
-                                                data.data[offset + 2],
-                                                data.data[offset + 3],
-                                            ]
-                                        } else {
-                                            [0, 0, 0, 0]
-                                        };
-                                        if meas.name == "counter" {
-                                            counter_val = Some(u32::from_le_bytes(bytes));
-                                        } else if meas.name == "const_data" {
-                                            const_data_val = Some(u32::from_le_bytes(bytes));
+                                let mut latest = latest_sample.write().await;
+                                *latest = Some(record.clone());
+                            }
+
+                            // Write CSV line with values in correct order (by entry order)
+                            let mut csv_line = record.timestamp.to_string();
+                            for entry in &config.odt_entries {
+                                csv_line.push(',');
+                                if let Some(value) = record.get_value(&entry.name) {
+                                    // Format based on data type
+                                    match entry.data_type {
+                                        A2lDataType::F32 | A2lDataType::F64 => {
+                                            csv_line.push_str(&format!("{:.6}", value));
+                                        }
+                                        _ => {
+                                            csv_line.push_str(&format!("{:.0}", value));
                                         }
                                     }
-                                    offset += meas.size;
+                                } else {
+                                    csv_line.push('0');
                                 }
-
-                                // Write to CSV
-                                let timestamp: DateTime<Utc> = Utc::now();
-                                let record = DaqRecord {
-                                    timestamp: timestamp.to_rfc3339(),
-                                    counter: counter_val,
-                                    const_data: const_data_val,
-                                };
-                                // Update latest sample for UI
-                                {
-                                    let mut latest = latest_sample.write().await;
-                                    *latest = Some(record.clone());
-                                }
-                                // Write CSV line
-                                let csv_line = format!(
-                                    "{},{},{}",
-                                    record.timestamp,
-                                    record.counter.map(|v| v.to_string()).unwrap_or_default(),
-                                    record.const_data.map(|v| v.to_string()).unwrap_or_default()
-                                );
-                                if let Err(e) = writeln!(csv_file, "{}", csv_line) {
-                                    tracing::error!("Failed to write CSV: {}", e);
-                                }
+                            }
+                            if let Err(e) = writeln!(csv_file, "{}", csv_line) {
+                                tracing::error!("Failed to write CSV: {}", e);
                             }
                         }
                     }
                     Ok(None) => {
-                        // Channel closed
                         tracing::warn!("DTO channel closed");
                         break;
                     }
@@ -519,6 +1222,31 @@ impl DaqManager {
     /// Check if DAQ is running
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    /// Restart DAQ if selection changed
+    /// This should be called periodically to check if DAQ needs restart
+    pub async fn restart_if_needed(&mut self, client: &XcpClient) -> Result<bool, String> {
+        if self.selection_changed.load(Ordering::SeqCst) && self.running.load(Ordering::SeqCst) {
+            tracing::info!("Restarting DAQ due to selection change...");
+
+            // Stop DAQ
+            self.stop(client).await.ok();
+
+            // Clear the flag
+            self.selection_changed.store(false, Ordering::SeqCst);
+
+            // Wait a moment for cleanup
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            // Restart DAQ
+            self.start(client, 0).await?;
+
+            tracing::info!("DAQ restarted successfully");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 

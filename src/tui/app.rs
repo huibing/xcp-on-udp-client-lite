@@ -28,8 +28,12 @@ pub enum AppMode {
     ParamDetail,
     /// DAQ view
     DaqView,
+    /// DAQ measurement selection
+    DaqSelectMeasurements,
     /// Input dialog
     Input,
+    /// A2L file selection
+    SelectA2L,
 }
 
 /// Menu items
@@ -39,6 +43,8 @@ pub enum MenuItem {
     Disconnect,
     ListParams,
     DaqView,
+    DaqSelectMeas,
+    LoadA2L,
     Exit,
 }
 
@@ -49,11 +55,16 @@ impl MenuItem {
                 (MenuItem::Disconnect, "Disconnect"),
                 (MenuItem::ListParams, "Calibration Parameters"),
                 (MenuItem::DaqView, "DAQ Acquisition"),
+                (MenuItem::DaqSelectMeas, "Select DAQ Measurements"),
+                (MenuItem::LoadA2L, "Load A2L File"),
                 (MenuItem::Exit, "Exit"),
             ]
         } else {
             vec![
                 (MenuItem::Connect, "Connect to XCP Slave"),
+                (MenuItem::DaqView, "DAQ Acquisition"),
+                (MenuItem::DaqSelectMeas, "Select DAQ Measurements"),
+                (MenuItem::LoadA2L, "Load A2L File"),
                 (MenuItem::Exit, "Exit"),
             ]
         }
@@ -63,8 +74,15 @@ impl MenuItem {
 /// DAQ data sample
 #[derive(Debug, Clone, Default)]
 pub struct DaqSample {
-    pub counter: Option<u32>,
-    pub const_data: Option<u32>,
+    /// Measurement values (name -> physical value)
+    pub values: std::collections::HashMap<String, f64>,
+}
+
+impl DaqSample {
+    /// Get a measurement value
+    pub fn get(&self, name: &str) -> Option<f64> {
+        self.values.get(name).copied()
+    }
 }
 
 /// Application state
@@ -105,9 +123,15 @@ pub struct App {
     daq_samples: Vec<DaqSample>,
     daq_running: bool,
 
+    /// DAQ measurement selection state
+    daq_meas_selected: usize,
+
     /// Loading state
     loading: bool,
     loading_msg: String,
+
+    /// A2L file path
+    a2l_path: String,
 }
 
 /// Input dialog action
@@ -115,12 +139,13 @@ pub struct App {
 pub enum InputAction {
     SlaveAddress,
     ParamValue(usize),
+    A2LPath,
     None,
 }
 
 impl App {
     /// Create new application
-    pub fn new(client: XcpClient, cal_manager: CalibrationManager, daq_manager: DaqManager) -> Self {
+    pub fn new(client: XcpClient, cal_manager: CalibrationManager, daq_manager: DaqManager, a2l_path: String) -> Self {
         Self {
             client: Arc::new(Mutex::new(client)),
             cal_manager,
@@ -135,12 +160,14 @@ impl App {
             input: Input::default(),
             input_prompt: String::new(),
             input_action: InputAction::None,
-            status: None,
+            status: Some(format!("A2L: {}", a2l_path)),
             error: None,
             daq_samples: Vec::new(),
             daq_running: false,
+            daq_meas_selected: 0,
             loading: false,
             loading_msg: String::new(),
+            a2l_path,
         }
     }
 
@@ -193,7 +220,9 @@ impl App {
             AppMode::ParamList => self.handle_param_list_key(key).await,
             AppMode::ParamDetail => self.handle_param_detail_key(key).await,
             AppMode::DaqView => self.handle_daq_key(key).await,
+            AppMode::DaqSelectMeasurements => self.handle_daq_select_key(key).await,
             AppMode::Input => self.handle_input_key(key).await,
+            AppMode::SelectA2L => self.handle_select_a2l_key(key).await,
         };
 
         // Catch errors and display them instead of propagating
@@ -237,6 +266,16 @@ impl App {
                         }
                         MenuItem::DaqView => {
                             self.mode = AppMode::DaqView;
+                        }
+                        MenuItem::DaqSelectMeas => {
+                            self.mode = AppMode::DaqSelectMeasurements;
+                            self.daq_meas_selected = 0;
+                        }
+                        MenuItem::LoadA2L => {
+                            self.mode = AppMode::SelectA2L;
+                            self.input = Input::new(self.a2l_path.clone());
+                            self.input_prompt = "A2L File Path".to_string();
+                            self.input_action = InputAction::A2LPath;
                         }
                         MenuItem::Exit => {
                             if self.connected {
@@ -350,6 +389,47 @@ impl App {
         Ok(true)
     }
 
+    async fn handle_daq_select_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+        // Get the count of available measurements
+        let available_count = {
+            let daq_manager = self.daq_manager.lock().await;
+            daq_manager.available_count()
+        };
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.daq_meas_selected > 0 {
+                    self.daq_meas_selected -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.daq_meas_selected < available_count.saturating_sub(1) {
+                    self.daq_meas_selected += 1;
+                }
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                // Toggle selection
+                let mut daq_manager = self.daq_manager.lock().await;
+                daq_manager.toggle_measurement(self.daq_meas_selected);
+            }
+            KeyCode::Char('a') => {
+                // Select all
+                let mut daq_manager = self.daq_manager.lock().await;
+                daq_manager.select_all();
+            }
+            KeyCode::Char('d') => {
+                // Deselect all
+                let mut daq_manager = self.daq_manager.lock().await;
+                daq_manager.deselect_all();
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = AppMode::Menu;
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
     async fn handle_input_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
         match key.code {
             KeyCode::Esc => {
@@ -372,6 +452,10 @@ impl App {
                         self.write_param(*idx, &value).await?;
                         self.mode = self.prev_mode.unwrap_or(AppMode::ParamList);
                     }
+                    InputAction::A2LPath => {
+                        self.load_a2l_file(&value).await?;
+                        self.mode = AppMode::Menu;
+                    }
                     InputAction::None => {}
                 }
                 self.prev_mode = None;
@@ -385,6 +469,120 @@ impl App {
             }
         }
         Ok(true)
+    }
+
+    async fn handle_select_a2l_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = AppMode::Menu;
+                self.input = Input::default();
+            }
+            KeyCode::Enter => {
+                let path = self.input.value().to_string();
+                if path.is_empty() {
+                    self.error = Some("A2L file path cannot be empty".to_string());
+                } else {
+                    self.load_a2l_file(&path).await?;
+                    self.mode = AppMode::Menu;
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Ok(false);
+            }
+            _ => {
+                self.input.handle_event(&crossterm::event::Event::Key(key));
+            }
+        }
+        Ok(true)
+    }
+
+    async fn load_a2l_file(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use xcp_client::A2lReader;
+
+        self.loading = true;
+        self.loading_msg = format!("Loading A2L file: {}...", path);
+
+        let path_clone = path.to_string();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let reader = A2lReader::load(&path_clone)?;
+            let measurements = reader.get_measurements();
+            let characteristics = reader.get_characteristics();
+            Ok::<_, String>((measurements, characteristics))
+        })
+        .await?;
+
+        self.loading = false;
+
+        match result {
+            Ok((measurements, characteristics)) => {
+                // Clear existing params and load from A2L
+                self.cal_manager.clear_params();
+                for ch in characteristics {
+                    if let Some(param) = Self::convert_characteristic(ch) {
+                        self.cal_manager.add_param(param);
+                    }
+                }
+
+                // Clear existing measurements and load from A2L
+                {
+                    let mut daq_manager = self.daq_manager.lock().await;
+                    daq_manager.clear_measurements();
+                    for m in measurements {
+                        if let Some(meas) = Self::convert_measurement(m) {
+                            daq_manager.add_measurement(meas);
+                        }
+                    }
+                }
+
+                self.a2l_path = path.to_string();
+                let meas_count = {
+                    self.daq_manager.lock().await.selected_count()
+                };
+                self.status = Some(format!("Loaded A2L: {} chars, {} meas",
+                    self.cal_manager.params().len(), meas_count));
+            }
+            Err(e) => {
+                self.error = Some(format!("Failed to load A2L: {}", e));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn convert_characteristic(ch: xcp_client::A2lCharacteristic) -> Option<xcp_client::CalibrationParam> {
+        use xcp_client::{CalibrationParam, CalibrationType};
+
+        let data_type = match ch.data_type {
+            xcp_client::A2lDataType::U8 => CalibrationType::U8,
+            xcp_client::A2lDataType::U16 => CalibrationType::U16,
+            xcp_client::A2lDataType::U32 => CalibrationType::U32,
+            xcp_client::A2lDataType::U64 => CalibrationType::U64,
+            xcp_client::A2lDataType::I8 => CalibrationType::I8,
+            xcp_client::A2lDataType::I16 => CalibrationType::I16,
+            xcp_client::A2lDataType::I32 => CalibrationType::I32,
+            xcp_client::A2lDataType::I64 => CalibrationType::I64,
+            xcp_client::A2lDataType::F32 => CalibrationType::F32,
+            xcp_client::A2lDataType::F64 => CalibrationType::F64,
+            xcp_client::A2lDataType::Bool => CalibrationType::Bool,
+            xcp_client::A2lDataType::U8Array(n) => CalibrationType::U8Array(n),
+            xcp_client::A2lDataType::U8Matrix(rows, cols) => CalibrationType::U8Matrix(rows, cols),
+        };
+
+        let mut param = CalibrationParam::new(&ch.name, ch.address, ch.address_ext, data_type)
+            .with_description(&ch.description)
+            .with_range(ch.min, ch.max);
+
+        if let Some(unit) = ch.unit {
+            param = param.with_unit(&unit);
+        }
+
+        Some(param)
+    }
+
+    fn convert_measurement(m: xcp_client::A2lMeasurement) -> Option<xcp_client::Measurement> {
+        let size = m.data_type.size();
+        Some(xcp_client::Measurement::new(&m.name, m.address, m.address_ext, size))
     }
 
     async fn connect(&mut self, addr: String) -> Result<(), Box<dyn std::error::Error>> {
@@ -549,8 +747,7 @@ impl App {
             };
             if let Some(record) = record {
                 let sample = DaqSample {
-                    counter: record.counter,
-                    const_data: record.const_data,
+                    values: record.values,
                 };
                 self.daq_samples.push(sample);
                 if self.daq_samples.len() > 50 {
@@ -580,7 +777,9 @@ impl App {
             AppMode::ParamList => self.render_param_list(frame, chunks[1]),
             AppMode::ParamDetail => self.render_param_detail(frame, chunks[1]),
             AppMode::DaqView => self.render_daq_view(frame, chunks[1]),
+            AppMode::DaqSelectMeasurements => self.render_daq_select(frame, chunks[1]),
             AppMode::Input => self.render_input(frame, chunks[1]),
+            AppMode::SelectA2L => self.render_select_a2l(frame, chunks[1]),
         }
 
         // Footer
@@ -617,13 +816,20 @@ impl App {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let text = if let Some(status) = &self.status {
-            format!(" {}", status)
+            // Truncate status if too long to fit in footer
+            let max_len = area.width.saturating_sub(4) as usize;
+            if status.len() > max_len {
+                format!(" {}...", &status[..max_len.saturating_sub(3)])
+            } else {
+                format!(" {}", status)
+            }
         } else {
             " Press q to quit".to_string()
         };
 
         let footer = Paragraph::new(text)
             .style(Style::default().fg(Color::Gray))
+            .wrap(ratatui::widgets::Wrap { trim: true })
             .block(Block::default().borders(Borders::ALL));
 
         frame.render_widget(footer, area);
@@ -765,80 +971,102 @@ impl App {
     }
 
     fn render_daq_view(&self, frame: &mut Frame, area: Rect) {
+        // Try to get measurement names - use blocking lock since this is a sync function
+        let (selected_names, available_count, selected_count) = if let Ok(daq_manager) = self.daq_manager.try_lock() {
+            let names: Vec<String> = daq_manager.selected_measurements()
+                .iter()
+                .map(|m| m.name.clone())
+                .collect();
+            (names, daq_manager.available_count(), daq_manager.selected_count())
+        } else {
+            (vec![], 0, 0)
+        };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(5), Constraint::Min(0)])
+            .constraints([Constraint::Length(6), Constraint::Min(0)])
             .split(area);
 
         // Status panel
-        let status_text = if self.daq_running {
-            vec![
-                Line::from(vec![
-                    Span::styled("Status: ", Style::default().fg(Color::Cyan)),
+        let mut status_lines = vec![
+            Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(Color::Cyan)),
+                if self.daq_running {
                     Span::styled(
                         "RUNNING",
                         Style::default()
                             .fg(Color::Green)
                             .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("Output: ", Style::default().fg(Color::Cyan)),
-                    Span::raw("daq_data.csv"),
-                ]),
-            ]
-        } else {
-            vec![Line::from(vec![
-                Span::styled("Status: ", Style::default().fg(Color::Cyan)),
-                Span::styled("STOPPED", Style::default().fg(Color::Red)),
-            ])]
-        };
+                    )
+                } else {
+                    Span::styled("STOPPED", Style::default().fg(Color::Red))
+                },
+            ]),
+            Line::from(vec![
+                Span::styled("Selected: ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!("{}/{}", selected_count, available_count)),
+            ]),
+        ];
 
-        let status = Paragraph::new(status_text)
+        // Show measurement names
+        if !selected_names.is_empty() {
+            let names_text = selected_names.join(", ");
+            status_lines.push(Line::from(vec![
+                Span::styled("Measurements: ", Style::default().fg(Color::Cyan)),
+                Span::raw(names_text),
+            ]));
+        } else {
+            status_lines.push(Line::from(vec![
+                Span::styled("Measurements: ", Style::default().fg(Color::Cyan)),
+                Span::styled("None selected! Press 'm' to select.", Style::default().fg(Color::Yellow)),
+            ]));
+        }
+
+        let status = Paragraph::new(status_lines)
             .block(Block::default().title(" DAQ Status ").borders(Borders::ALL));
 
         frame.render_widget(status, chunks[0]);
 
         // Data panel
-        let mut data_lines: Vec<Line> = vec![Line::from(vec![
-            Span::styled("Counter: ", Style::default().fg(Color::Yellow)),
-            Span::raw(
-                self.daq_samples
-                    .last()
-                    .and_then(|s| s.counter.map(|c| c.to_string()))
-                    .unwrap_or_else(|| "N/A".to_string()),
-            ),
-            Span::styled("    Const data: ", Style::default().fg(Color::Red)),
-            Span::raw(
-                self.daq_samples
-                    .last()
-                    .and_then(|s| s.const_data.map(|c| c.to_string()))
-                    .unwrap_or_else(|| "N/A".to_string()),
-            ),
-        ])];
+        let mut data_lines: Vec<Line> = vec![];
+
+        // Show latest values for each selected measurement
+        if let Some(last_sample) = self.daq_samples.last() {
+            data_lines.push(Line::styled("Latest values:", Style::default().fg(Color::Gray)));
+            for name in &selected_names {
+                let value = last_sample.get(name)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "N/A".to_string());
+                data_lines.push(Line::from(vec![
+                    Span::styled(format!("  {}: ", name), Style::default().fg(Color::Yellow)),
+                    Span::raw(value),
+                ]));
+            }
+        }
 
         // Show last few samples
-        data_lines.push(Line::from(""));
-        data_lines.push(Line::styled(
-            "Recent samples:",
-            Style::default().fg(Color::Gray),
-        ));
+        if !self.daq_samples.is_empty() {
+            data_lines.push(Line::from(""));
+            data_lines.push(Line::styled("Recent samples:", Style::default().fg(Color::Gray)));
 
-        for sample in self.daq_samples.iter().rev().take(10) {
-            let counter = sample
-                .counter
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let const_data = sample
-                .const_data
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            data_lines.push(Line::from(format!("  Counter: {} | Data: {}", counter, const_data)));
+            for (i, sample) in self.daq_samples.iter().rev().take(5).enumerate() {
+                let mut sample_text = format!("  [{}] ", i + 1);
+                for (j, name) in selected_names.iter().enumerate() {
+                    if j > 0 {
+                        sample_text.push_str(" | ");
+                    }
+                    let value = sample.get(name)
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    sample_text.push_str(&format!("{}: {}", name, value));
+                }
+                data_lines.push(Line::from(sample_text));
+            }
         }
 
         let data = Paragraph::new(data_lines).block(
             Block::default()
-                .title(" Live Data (s: start/stop, c: clear, q: back) ")
+                .title(" Live Data (s: start/stop, c: clear, m: select measurements, q: back) ")
                 .borders(Borders::ALL),
         );
 
@@ -868,21 +1096,107 @@ impl App {
         frame.render_widget(help, input_area[1]);
     }
 
-    fn render_error(&self, frame: &mut Frame, area: Rect) {
-        let error_area = Layout::default()
+    fn render_select_a2l(&self, frame: &mut Frame, area: Rect) {
+        let input_area = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(5)])
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(area);
 
-        let error = Paragraph::new(self.error.as_deref().unwrap_or(""))
+        let prompt = Paragraph::new(self.input.value())
+            .style(Style::default().fg(Color::White))
+            .block(
+                Block::default()
+                    .title(" A2L File Path ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Green)),
+            );
+
+        frame.render_widget(prompt, input_area[0]);
+
+        let help = Paragraph::new(
+            "Enter path to A2L file (e.g., hello_xcp.a2l)\nPress Enter to load, Esc to cancel"
+        )
+            .style(Style::default().fg(Color::Gray));
+
+        frame.render_widget(help, input_area[1]);
+    }
+
+    fn render_daq_select(&self, frame: &mut Frame, area: Rect) {
+        // Get measurements info - use try_lock since this is a sync function
+        let (all_measurements, selected_indices) = if let Ok(daq_manager) = self.daq_manager.try_lock() {
+            let all: Vec<(String, u32, u8)> = daq_manager.all_measurements()
+                .iter()
+                .map(|m| (m.name.clone(), m.address, m.address_ext))
+                .collect();
+            let selected: Vec<usize> = daq_manager.selected_indices().to_vec();
+            (all, selected)
+        } else {
+            (vec![], vec![])
+        };
+
+        if all_measurements.is_empty() {
+            let empty = Paragraph::new("No measurements available. Load an A2L file first.")
+                .style(Style::default().fg(Color::Yellow))
+                .block(Block::default().title(" Select DAQ Measurements ").borders(Borders::ALL));
+            frame.render_widget(empty, area);
+            return;
+        }
+
+        // Build list items
+        let items: Vec<ListItem> = all_measurements
+            .iter()
+            .enumerate()
+            .map(|(i, (name, addr, ext))| {
+                let is_selected = selected_indices.contains(&i);
+                let style = if i == self.daq_meas_selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_selected {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+
+                let marker = if is_selected { "[x]" } else { "[ ]" };
+                let text = format!("  {} {:<30} 0x{:08X} (ext: {})  ", marker, name, addr, ext);
+                ListItem::new(text).style(style)
+            })
+            .collect();
+
+        let selected_count = selected_indices.len();
+        let title = format!(
+            " Select DAQ Measurements (j/k: navigate, Space/Enter: toggle, a: all, d: none, q: back) - {}/{} selected ",
+            selected_count,
+            all_measurements.len()
+        );
+
+        let list = List::new(items)
+            .block(Block::default().title(title).borders(Borders::ALL));
+
+        frame.render_widget(list, area);
+    }
+
+    fn render_error(&self, frame: &mut Frame, area: Rect) {
+        // Calculate dynamic height based on error message length (max 15 lines)
+        let error_text = self.error.as_deref().unwrap_or("");
+        let line_count = error_text.lines().count().max(3).min(15) as u16;
+
+        let error_area = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(line_count + 2)])
+            .split(area);
+
+        let error = Paragraph::new(error_text)
             .style(
                 Style::default()
                     .fg(Color::Red)
                     .add_modifier(Modifier::BOLD),
             )
+            .wrap(ratatui::widgets::Wrap { trim: true })
             .block(
                 Block::default()
-                    .title(" Error ")
+                    .title(" Error (press any key to dismiss) ")
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Red)),
             );

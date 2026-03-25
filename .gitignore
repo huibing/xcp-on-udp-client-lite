@@ -17,3 +17,6 @@ Thumbs.db
 
 # DAQ output
 daq_data.csv
+
+*.a2l
+*.aml

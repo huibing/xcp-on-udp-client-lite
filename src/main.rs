@@ -26,12 +26,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init()
         .ok();
 
-    // Create application state
+    // Default A2L file path
+    let a2l_path = "hello_xcp.a2l".to_string();
+
+    // Create application state with default managers
     let client = XcpClient::new();
     let cal_manager = CalibrationManager::new();
     let daq_manager = DaqManager::new();
 
-    let mut app = App::new(client, cal_manager, daq_manager);
+    let mut app = App::new(client, cal_manager, daq_manager, a2l_path);
 
     // Setup terminal
     let mut tui = Tui::new()?;

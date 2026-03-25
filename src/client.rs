@@ -1,11 +1,20 @@
-//! XCP Client Core
+//! XCP Client Core v2 - with unified CTO/DAQ message routing
+//!
+//! This version uses a MessageRouter to separate CTO responses and DAQ packets:
+//! - All packets from slave are received by MessageRouter
+//! - PID >= 0xFC: CTO (command responses) -> cto_rx channel
+//! - PID < 0xFC: DTO (DAQ data) -> dto_rx channel
+//!
+//! This allows concurrent DAQ reception and command sending
 
 use crate::protocol::{
-    ConnectInfo, ErrorCode, Mta, Response, commands, parse_connect_response, parse_get_id_response, parse_response
+    commands, parse_connect_response, parse_get_id_response, parse_response,
+    ConnectInfo, ErrorCode, Mta, Response,
 };
-use crate::transport::{UdpTransport, TransportError};
+use crate::transport::{MessageRouter, TransportError, UdpTransport, XcpMessage};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::time::{timeout, Duration};
 
 /// XCP Client Error
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +39,9 @@ pub enum XcpError {
 
     #[error("DAQ error: {0}")]
     DaqError(String),
+
+    #[error("Timeout waiting for response")]
+    ResponseTimeout,
 }
 
 /// XCP Client State
@@ -38,26 +50,6 @@ pub struct ClientState {
     pub connected: bool,
     pub connect_info: Option<ConnectInfo>,
     pub slave_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DAQResolutionInfo {
-    /// GET_DAQ_RESOLUTION_INFO
-    pub odt_entry_granularity_daq: u8,
-    pub max_odt_entry_size_daq: u8,
-    pub odt_entry_granularity_stim: u8,
-    pub max_odt_entry_size_stim: u8,
-    pub timestamp_mode: u8,
-    pub timestamp_ticks: u16
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DAQProcessorInfo {
-    pub daq_properties: u8,
-    pub max_daq: u16,
-    pub max_event_channel: u16,
-    pub min_daq: u8,
-    pub daq_key_byte: u8,
 }
 
 impl Default for ClientState {
@@ -70,10 +62,32 @@ impl Default for ClientState {
     }
 }
 
-/// XCP Master Client
+#[derive(Debug, Clone, Copy)]
+pub struct DAQResolutionInfo {
+    pub odt_entry_granularity_daq: u8,
+    pub max_odt_entry_size_daq: u8,
+    pub odt_entry_granularity_stim: u8,
+    pub max_odt_entry_size_stim: u8,
+    pub timestamp_mode: u8,
+    pub timestamp_ticks: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DAQProcessorInfo {
+    pub daq_properties: u8,
+    pub max_daq: u16,
+    pub max_event_channel: u16,
+    pub min_daq: u8,
+    pub daq_key_byte: u8,
+}
+
+/// XCP Master Client v2 - with message routing
 pub struct XcpClient {
     transport: Option<Arc<UdpTransport>>,
+    router: Option<Arc<MessageRouter>>,
     state: Arc<RwLock<ClientState>>,
+    /// Channel for CTO responses (used by commands)
+    cto_rx: Option<Arc<Mutex<mpsc::Receiver<XcpMessage>>>>,
 }
 
 impl XcpClient {
@@ -81,11 +95,13 @@ impl XcpClient {
     pub fn new() -> Self {
         Self {
             transport: None,
+            router: None,
             state: Arc::new(RwLock::new(ClientState::default())),
+            cto_rx: None,
         }
     }
 
-    /// Connect to XCP slave
+    /// Connect to XCP slave and start message router
     pub async fn connect(&mut self, addr: &str) -> Result<ConnectInfo, XcpError> {
         // Check if already connected
         {
@@ -98,8 +114,37 @@ impl XcpClient {
         // Create transport
         let transport = Arc::new(UdpTransport::connect(addr).await?);
 
-        // Send CONNECT command
-        let response = transport.send_command(&commands::connect()).await?;
+        // Create message router
+        let router = Arc::new(MessageRouter::new(100));
+
+        // Reset counter tracking for new connection
+        router.reset_counter().await;
+
+        // Get channels
+        let cto_rx = router.get_cto_receiver();
+        let _dto_rx = router.get_dto_receiver();
+
+        // Clone for router task
+        let router_clone = router.clone();
+        let transport_for_router = transport.clone();
+
+        // Start message router task
+        tokio::spawn(async move {
+            router_clone.start(transport_for_router).await;
+        });
+
+        // Give router task time to start receiving
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Store references
+        self.transport = Some(transport);
+        self.router = Some(router);
+        self.cto_rx = Some(cto_rx);
+
+        // Send CONNECT command using new mechanism
+        let connect_cmd = commands::connect();
+        let response = self.send_command_and_wait(&connect_cmd).await?;
+
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         let res_data = match parsed {
@@ -117,29 +162,65 @@ impl XcpClient {
             state.connect_info = Some(connect_info.clone());
         }
 
-        // Reset slave counter tracking on new connection
-        transport.reset_slave_counter().await;
-
-        self.transport = Some(transport);
-
         // Try to get slave ID
-        let _ = self.get_id(0).await; // Ignore errors for optional command
+        let _ = self.get_id(0).await;
 
         Ok(connect_info)
     }
 
+    /// Send command and wait for CTO response
+    async fn send_command_and_wait(&self, command: &[u8]) -> Result<Vec<u8>, XcpError> {
+        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
+        let cto_rx = self.cto_rx.as_ref().ok_or(XcpError::NotConnected)?;
+
+        // Send command only (response will be received by MessageRouter)
+        transport.send_command_only(command).await?;
+
+        // Wait for response (filter for matching counter if needed)
+        let mut rx = cto_rx.lock().await;
+
+        match timeout(Duration::from_secs(1), rx.recv()).await {
+            Ok(Some(msg)) => {
+                // msg.data already contains complete XCP packet (4-byte transport header + payload)
+                // Return as-is for backward compatibility with existing response parsers
+                Ok(msg.data)
+            }
+            Ok(None) => Err(XcpError::NotConnected),
+            Err(_) => Err(XcpError::ResponseTimeout),
+        }
+    }
+
+    /// Get DTO receiver for DAQ manager
+    pub fn get_dto_receiver(&self) -> Option<Arc<Mutex<mpsc::Receiver<XcpMessage>>>> {
+        self.router.as_ref().map(|r| r.get_dto_receiver())
+    }
+
+    /// Receive a DAQ/DTO packet from the dedicated channel
+    /// This is the preferred way for DAQ manager to receive data
+    pub async fn recv_daq_packet(&self) -> Result<Vec<u8>, XcpError> {
+        let router = self.router.as_ref().ok_or(XcpError::NotConnected)?;
+        let dto_rx = router.get_dto_receiver();
+
+        let mut rx = dto_rx.lock().await;
+
+        match timeout(Duration::from_secs(30), rx.recv()).await {
+            Ok(Some(msg)) => {
+                // msg.data already contains complete XCP packet (4-byte transport header + payload)
+                Ok(msg.data)
+            }
+            Ok(None) => Err(XcpError::NotConnected),
+            Err(_) => Err(XcpError::ResponseTimeout),
+        }
+    }
+
     /// Disconnect from XCP slave
     pub async fn disconnect(&mut self) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
         // Send DISCONNECT command
-        let response = transport.send_command(&commands::disconnect()).await?;
-        let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
+        let _ = self.send_command_and_wait(&commands::disconnect()).await;
 
-        match parsed {
-            Response::Res(_) => {}
-            Response::Err(err) => return Err(XcpError::Protocol(err)),
-            _ => return Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
+        // Stop router
+        if let Some(router) = &self.router {
+            router.stop().await;
         }
 
         // Update state
@@ -151,15 +232,15 @@ impl XcpClient {
         }
 
         self.transport = None;
+        self.router = None;
+        self.cto_rx = None;
 
         Ok(())
     }
 
     /// Get identification from slave
     pub async fn get_id(&self, id_type: u8) -> Result<String, XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::get_id(id_type)).await?;
+        let response = self.send_command_and_wait(&commands::get_id(id_type)).await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         let res_data = match parsed {
@@ -181,9 +262,7 @@ impl XcpClient {
 
     /// Read memory from slave using SHORT_UPLOAD
     pub async fn read_memory(&self, mta: Mta, length: u8) -> Result<Vec<u8>, XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::short_upload(mta, length)).await?;
+        let response = self.send_command_and_wait(&commands::short_upload(mta, length)).await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -195,9 +274,7 @@ impl XcpClient {
 
     /// Write memory to slave using SHORT_DOWNLOAD
     pub async fn write_memory(&self, mta: Mta, data: &[u8]) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::short_download(mta, data)).await?;
+        let response = self.send_command_and_wait(&commands::short_download(mta, data)).await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -209,9 +286,7 @@ impl XcpClient {
 
     /// Set MTA for subsequent UPLOAD/DOWNLOAD operations
     pub async fn set_mta(&self, mta: Mta) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::set_mta(mta)).await?;
+        let response = self.send_command_and_wait(&commands::set_mta(mta)).await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -223,9 +298,7 @@ impl XcpClient {
 
     /// Upload (read) data using current MTA
     pub async fn upload(&self, length: u8) -> Result<Vec<u8>, XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::upload(length)).await?;
+        let response = self.send_command_and_wait(&commands::upload(length)).await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -237,9 +310,7 @@ impl XcpClient {
 
     /// Download (write) data to current MTA
     pub async fn download(&self, data: &[u8]) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::download(data)).await?;
+        let response = self.send_command_and_wait(&commands::download(data)).await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -308,70 +379,79 @@ impl XcpClient {
         Ok(())
     }
 
+    /// Get DAQ resolution info
     pub async fn get_daq_resolution_info(&self) -> Result<DAQResolutionInfo, XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-        let repsonse = transport.send_command(&commands::get_daq_resolution_info()).await?;
-        let parsed = parse_response(&repsonse).map_err(XcpError::ParseError)?;
+        let response = self.send_command_and_wait(&commands::get_daq_resolution_info()).await?;
+        let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
+
         match parsed {
-            Response::Res(data) if data.len() == 7=> {
-                let odt_entry_granularity_daq= data[0];
-                let max_odt_entry_size_daq= data[1];
-                let odt_entry_granularity_stim= data[2];
-                let max_odt_entry_size_stim= data[3];
-                let timestamp_mode= data[4];
-                let timestamp_ticks= u16::from_le_bytes([data[5], data[6]]);
+            Response::Res(data) if data.len() == 7 => {
                 Ok(DAQResolutionInfo {
-                    odt_entry_granularity_daq,
-                    max_odt_entry_size_daq,
-                    odt_entry_granularity_stim,
-                    max_odt_entry_size_stim,
-                    timestamp_mode,
-                    timestamp_ticks
+                    odt_entry_granularity_daq: data[0],
+                    max_odt_entry_size_daq: data[1],
+                    odt_entry_granularity_stim: data[2],
+                    max_odt_entry_size_stim: data[3],
+                    timestamp_mode: data[4],
+                    timestamp_ticks: u16::from_le_bytes([data[5], data[6]]),
                 })
-            },
-            Response::Res(data) => {
-                Err(XcpError::InvalidResponse(format!("Invalid response length: {}", data.len())))
-            },
-            Response:: Err(err) => {
-                Err(XcpError::Protocol(err))
-            },
-            _ => {
-                Err(XcpError::InvalidResponse("Unexpected response type".to_string()))
             }
+            Response::Res(data) => Err(XcpError::InvalidResponse(format!(
+                "Invalid response length: {}",
+                data.len()
+            ))),
+            Response::Err(err) => Err(XcpError::Protocol(err)),
+            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
         }
-        
     }
 
+    /// Get DAQ processor info
     pub async fn get_daq_processor_info(&self) -> Result<DAQProcessorInfo, XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-        let repsonse = transport.send_command(&commands::get_daq_processor_info()).await?;
-        let parsed = parse_response(&repsonse).map_err(XcpError::ParseError)?;
+        let response = self.send_command_and_wait(&commands::get_daq_processor_info()).await?;
+        let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
+
         match parsed {
-            Response::Res(data) if data.len() == 7=> {
-                let daq_properties= data[0];
-                let max_daq = u16::from_le_bytes([data[1], data[2]]);
-                let max_event_channel = u16::from_le_bytes([data[3], data[4]]);
-                let min_daq = data[5];
-                let daq_key_byte = data[6];
+            Response::Res(data) if data.len() == 7 => {
                 Ok(DAQProcessorInfo {
-                    daq_properties,
-                    max_daq,
-                    max_event_channel,
-                    min_daq,
-                    daq_key_byte
+                    daq_properties: data[0],
+                    max_daq: u16::from_le_bytes([data[1], data[2]]),
+                    max_event_channel: u16::from_le_bytes([data[3], data[4]]),
+                    min_daq: data[5],
+                    daq_key_byte: data[6],
                 })
-            },
-            _ => {
-                return Err(XcpError::InvalidResponse("Invalid response length".to_string()));
             }
+            _ => Err(XcpError::InvalidResponse("Invalid response length".to_string())),
+        }
+    }
+
+    /// Get DAQ clock (32-bit timestamp from slave)
+    /// Response format: 8 bytes total (including PID)
+    /// - Byte 0: 0xFF (positive response, stripped by parse_response)
+    /// - Byte 1-3: reserved (3 bytes)
+    /// - Byte 4-7: timestamp (4 bytes, little-endian, u32)
+    /// Note: The timestamp's 0 point is not UTC epoch time, so it's just a raw u32 value
+    pub async fn get_daq_clock(&self) -> Result<u32, XcpError> {
+        let response = self.send_command_and_wait(&commands::get_daq_clock()).await?;
+        let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
+
+        match parsed {
+            Response::Res(data) if data.len() >= 7 => {
+                // Response data (PID stripped): [reserved(3 bytes), timestamp(4 bytes)]
+                // Timestamp is in the last 4 bytes (data[3..7]), little-endian
+                let ts = u32::from_le_bytes([data[3], data[4], data[5], data[6]]);
+                Ok(ts)
+            }
+            Response::Res(data) => Err(XcpError::InvalidResponse(format!(
+                "Invalid DAQ clock response length: {}",
+                data.len()
+            ))),
+            Response::Err(err) => Err(XcpError::Protocol(err)),
+            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
         }
     }
 
     /// Free DAQ resources
     pub async fn free_daq(&self) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::free_daq()).await?;
+        let response = self.send_command_and_wait(&commands::free_daq()).await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -383,9 +463,7 @@ impl XcpClient {
 
     /// Allocate DAQ lists
     pub async fn alloc_daq(&self, daq_count: u16) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::alloc_daq(daq_count)).await?;
+        let response = self.send_command_and_wait(&commands::alloc_daq(daq_count)).await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -397,9 +475,9 @@ impl XcpClient {
 
     /// Allocate ODTs
     pub async fn alloc_odt(&self, daq_list: u16, odt_count: u8) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::alloc_odt(daq_list, odt_count)).await?;
+        let response = self
+            .send_command_and_wait(&commands::alloc_odt(daq_list, odt_count))
+            .await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -410,10 +488,15 @@ impl XcpClient {
     }
 
     /// Allocate ODT entries
-    pub async fn alloc_odt_entry(&self, daq_list: u16, odt: u8, entry_count: u8) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::alloc_odt_entry(daq_list, odt, entry_count)).await?;
+    pub async fn alloc_odt_entry(
+        &self,
+        daq_list: u16,
+        odt: u8,
+        entry_count: u8,
+    ) -> Result<(), XcpError> {
+        let response = self
+            .send_command_and_wait(&commands::alloc_odt_entry(daq_list, odt, entry_count))
+            .await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -425,9 +508,9 @@ impl XcpClient {
 
     /// Set DAQ pointer
     pub async fn set_daq_ptr(&self, daq_list: u16, odt: u8, entry: u8) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::set_daq_ptr(daq_list, odt, entry)).await?;
+        let response = self
+            .send_command_and_wait(&commands::set_daq_ptr(daq_list, odt, entry))
+            .await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -439,9 +522,9 @@ impl XcpClient {
 
     /// Write DAQ entry configuration
     pub async fn write_daq(&self, bit_offset: u8, mta: Mta, data_size: u8) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::write_daq(bit_offset, mta, data_size)).await?;
+        let response = self
+            .send_command_and_wait(&commands::write_daq(bit_offset, mta, data_size))
+            .await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -460,12 +543,11 @@ impl XcpClient {
         prescaler: u8,
         priority: u8,
     ) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::set_daq_list_mode(
-            mode, daq_list, event_channel, prescaler, priority,
-        ))
-        .await?;
+        let response = self
+            .send_command_and_wait(&commands::set_daq_list_mode(
+                mode, daq_list, event_channel, prescaler, priority,
+            ))
+            .await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -476,11 +558,10 @@ impl XcpClient {
     }
 
     /// Start or stop a DAQ list
-    /// mode: 0 = stop, 1 = start, 2 = start selected
     pub async fn start_stop_daq_list(&self, mode: u8, daq_list: u16) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::start_stop_daq_list(mode, daq_list)).await?;
+        let response = self
+            .send_command_and_wait(&commands::start_stop_daq_list(mode, daq_list))
+            .await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -490,10 +571,11 @@ impl XcpClient {
         }
     }
 
+    /// Start/stop synch
     pub async fn start_stop_synch(&self, mode: u8) -> Result<(), XcpError> {
-        let transport = self.transport.as_ref().ok_or(XcpError::NotConnected)?;
-
-        let response = transport.send_command(&commands::start_stop_synch(mode)).await?;
+        let response = self
+            .send_command_and_wait(&commands::start_stop_synch(mode))
+            .await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
 
         match parsed {
@@ -501,11 +583,6 @@ impl XcpClient {
             Response::Err(err) => Err(XcpError::Protocol(err)),
             _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
         }
-    }
-
-    /// Get transport for DAQ reception
-    pub fn transport(&self) -> Option<Arc<UdpTransport>> {
-        self.transport.clone()
     }
 
     /// Get client state

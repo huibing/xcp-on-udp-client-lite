@@ -1,7 +1,9 @@
 //! Calibration Parameter Management
 
-use crate::client_v2::XcpClient;
+use crate::a2l_reader::{A2lCharacteristic, A2lDataType, A2lReader};
+use crate::client::XcpClient;
 use crate::protocol::Mta;
+use std::path::Path;
 
 /// Calibration parameter types
 #[derive(Debug, Clone)]
@@ -155,14 +157,66 @@ pub struct CalibrationManager {
 }
 
 impl CalibrationManager {
-    /// Create calibration manager with parameters from the A2L file
+    /// Create calibration manager with hardcoded default parameters
     pub fn new() -> Self {
         Self {
             params: Self::get_default_params(),
         }
     }
 
-    /// Get parameters defined in hello_xcp.a2l
+    /// Create calibration manager from an A2L file
+    pub fn from_a2l<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        let reader = A2lReader::load(path)?;
+        let characteristics = reader.get_characteristics();
+
+        let params = characteristics
+            .into_iter()
+            .filter_map(|ch| Self::convert_characteristic(ch))
+            .collect();
+
+        Ok(Self { params })
+    }
+
+    /// Convert A2L characteristic to CalibrationParam
+    fn convert_characteristic(ch: A2lCharacteristic) -> Option<CalibrationParam> {
+        let data_type = Self::convert_data_type(&ch.data_type)?;
+
+        let mut param = CalibrationParam::new(
+            &ch.name,
+            ch.address,
+            ch.address_ext,
+            data_type,
+        )
+        .with_description(&ch.description)
+        .with_range(ch.min, ch.max);
+
+        if let Some(unit) = ch.unit {
+            param = param.with_unit(&unit);
+        }
+
+        Some(param)
+    }
+
+    /// Convert A2L data type to CalibrationType
+    fn convert_data_type(a2l_type: &A2lDataType) -> Option<CalibrationType> {
+        match a2l_type {
+            A2lDataType::U8 => Some(CalibrationType::U8),
+            A2lDataType::U16 => Some(CalibrationType::U16),
+            A2lDataType::U32 => Some(CalibrationType::U32),
+            A2lDataType::U64 => Some(CalibrationType::U64),
+            A2lDataType::I8 => Some(CalibrationType::I8),
+            A2lDataType::I16 => Some(CalibrationType::I16),
+            A2lDataType::I32 => Some(CalibrationType::I32),
+            A2lDataType::I64 => Some(CalibrationType::I64),
+            A2lDataType::F32 => Some(CalibrationType::F32),
+            A2lDataType::F64 => Some(CalibrationType::F64),
+            A2lDataType::Bool => Some(CalibrationType::Bool),
+            A2lDataType::U8Array(n) => Some(CalibrationType::U8Array(*n)),
+            A2lDataType::U8Matrix(rows, cols) => Some(CalibrationType::U8Matrix(*rows, *cols)),
+        }
+    }
+
+    /// Get parameters defined in hello_xcp.a2l (fallback when A2L file is not available)
     fn get_default_params() -> Vec<CalibrationParam> {
         vec![
             CalibrationParam::new("my_params.counter_max", 0x80010000, 0, CalibrationType::U32)
@@ -189,6 +243,16 @@ impl CalibrationManager {
     /// Get parameter by name
     pub fn get_param(&self, name: &str) -> Option<&CalibrationParam> {
         self.params.iter().find(|p| p.name == name)
+    }
+
+    /// Add a parameter
+    pub fn add_param(&mut self, param: CalibrationParam) {
+        self.params.push(param);
+    }
+
+    /// Clear all parameters
+    pub fn clear_params(&mut self) {
+        self.params.clear();
     }
 
     /// Read parameter value from XCP slave
