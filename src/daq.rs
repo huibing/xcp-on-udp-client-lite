@@ -133,8 +133,18 @@ impl CompuMethod {
                 }
             }
             A2lDataType::Bool => (bytes.first().copied().unwrap_or(0) != 0) as u8 as f64,
-            A2lDataType::U8Array(_) | A2lDataType::U8Matrix(_, _) => {
-                // For arrays, just use first element
+            A2lDataType::U8Array(_) | A2lDataType::U8Matrix(_, _) |
+            A2lDataType::U16Array(_) | A2lDataType::U16Matrix(_, _) |
+            A2lDataType::U32Array(_) | A2lDataType::U32Matrix(_, _) |
+            A2lDataType::U64Array(_) | A2lDataType::U64Matrix(_, _) |
+            A2lDataType::I8Array(_) | A2lDataType::I8Matrix(_, _) |
+            A2lDataType::I16Array(_) | A2lDataType::I16Matrix(_, _) |
+            A2lDataType::I32Array(_) | A2lDataType::I32Matrix(_, _) |
+            A2lDataType::I64Array(_) | A2lDataType::I64Matrix(_, _) |
+            A2lDataType::F32Array(_) | A2lDataType::F32Matrix(_, _) |
+            A2lDataType::F64Array(_) | A2lDataType::F64Matrix(_, _) |
+            A2lDataType::BoolArray(_) | A2lDataType::BoolMatrix(_, _) => {
+                // For arrays/matrices, just use first element
                 bytes.first().copied().unwrap_or(0) as f64
             }
         };
@@ -426,6 +436,7 @@ pub struct DaqManager {
     /// Slave address for DAQ connection
     slave_addr: String,
     /// Number of DAQ lists configured
+    #[allow(dead_code)]
     daq_list_count: u16,
     /// Event channel for DAQ trigger
     event_channel: u16,
@@ -593,53 +604,60 @@ impl DaqManager {
         }
     }
 
-    /// Calculate ODT allocation based on slave limits
-    /// Returns (daq_list_count, odt_count_per_list, daq_lists_allocation)
-    /// where daq_lists_allocation[daq_list][odt] = Vec<measurement_indices>
-    /// This ensures we don't exceed max_odt_entry_size_daq
-    fn calculate_odt_allocation(&self, max_odt_entry_size: u8) -> (u16, Vec<u8>, Vec<Vec<Vec<usize>>>) {
+    /// DAQ Constraints:
+    /// - Each ODT: max 255 entries
+    /// - Each DAQ list: max 252 ODTs
+    /// - DAQ lists: max 0xFFFF (65535)
+    /// - Each entry: max max_odt_entry_size bytes (checked individually)
+    fn calculate_odt_allocation(&self, max_odt_entry_size: u8) -> Result<(u16, Vec<u8>, Vec<Vec<Vec<usize>>>), String> {
+        const MAX_ODT_ENTRIES: usize = 255;
+        const MAX_ODTS_PER_LIST: usize = 252;
+        const MAX_DAQ_LISTS: usize = 0xFFFF;
+
         let selected = self.selected_measurements();
         if selected.is_empty() {
-            return (0, Vec::new(), Vec::new());
+            return Ok((0, Vec::new(), Vec::new()));
         }
 
-        // Convert max entry size from granularity units to bytes
-        let max_bytes = max_odt_entry_size as usize;
+        // Check each measurement size against max_odt_entry_size
+        for (_idx, meas) in selected.iter().enumerate() {
+            if meas.size > max_odt_entry_size as usize {
+                return Err(format!(
+                    "Measurement '{}' size ({} bytes) exceeds max ODT entry size ({} bytes). Please deselect this measurement or reduce data type size.",
+                    meas.name, meas.size, max_odt_entry_size
+                ));
+            }
+        }
 
         // Group measurements into ODTs
-        // Each ODT can hold up to max_bytes bytes
+        // Each ODT can hold up to MAX_ODT_ENTRIES entries
         let mut daq_lists: Vec<Vec<Vec<usize>>> = Vec::new(); // [daq_list][odt][entry_indices]
         let mut current_list: Vec<Vec<usize>> = Vec::new();
         let mut current_odt: Vec<usize> = Vec::new();
-        let mut current_odt_size: usize = 0;
 
-        for (idx, meas) in selected.iter().enumerate() {
-            let meas_size = meas.size;
-
-            // Check if this measurement fits in current ODT
-            if current_odt_size + meas_size > max_bytes && !current_odt.is_empty() {
-                // Finish current ODT
+        for (idx, _meas) in selected.iter().enumerate() {
+            // Check if current ODT is full (255 entries max)
+            if current_odt.len() >= MAX_ODT_ENTRIES && !current_odt.is_empty() {
                 current_list.push(current_odt);
                 current_odt = Vec::new();
-                current_odt_size = 0;
             }
 
-            // Check if we need a new DAQ list (arbitrary limit: 255 ODTs per list)
-            if current_list.len() >= 255 {
+            // Check if we need a new DAQ list (252 ODTs max per list)
+            if current_list.len() >= MAX_ODTS_PER_LIST {
                 daq_lists.push(current_list);
                 current_list = Vec::new();
             }
 
+            // Check DAQ list limit
+            if daq_lists.len() >= MAX_DAQ_LISTS {
+                return Err(format!(
+                    "DAQ configuration exceeds maximum number of DAQ lists ({}). Please select fewer measurements.",
+                    MAX_DAQ_LISTS
+                ));
+            }
+
             // Add measurement to current ODT
             current_odt.push(idx);
-            current_odt_size += meas_size;
-
-            // Check if ODT is full
-            if current_odt_size >= max_bytes {
-                current_list.push(current_odt);
-                current_odt = Vec::new();
-                current_odt_size = 0;
-            }
         }
 
         // Don't forget the last ODT
@@ -650,11 +668,19 @@ impl DaqManager {
             daq_lists.push(current_list);
         }
 
+        // Final validation
+        if daq_lists.len() > MAX_DAQ_LISTS {
+            return Err(format!(
+                "DAQ configuration requires {} DAQ lists, but maximum is {}. Please select fewer measurements.",
+                daq_lists.len(), MAX_DAQ_LISTS
+            ));
+        }
+
         // Convert to return format
         let daq_list_count = daq_lists.len() as u16;
         let odt_count_per_list: Vec<u8> = daq_lists.iter().map(|l| l.len() as u8).collect();
 
-        (daq_list_count, odt_count_per_list, daq_lists)
+        Ok((daq_list_count, odt_count_per_list, daq_lists))
     }
 
     /// Select all measurements (with restart flag)
@@ -830,11 +856,7 @@ impl DaqManager {
 
         // Calculate how many ODTs and DAQ lists we need
         let (daq_list_count, odt_count_per_list, daq_lists_allocation) =
-            self.calculate_odt_allocation(max_odt_entry_size);
-
-        if daq_list_count == 0 {
-            return Err("Failed to calculate ODT allocation".to_string());
-        }
+            self.calculate_odt_allocation(max_odt_entry_size)?;
 
         tracing::info!("ODT allocation: {} DAQ lists", daq_list_count);
         for (list_idx, odt_count) in odt_count_per_list.iter().enumerate() {

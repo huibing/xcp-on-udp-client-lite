@@ -554,6 +554,7 @@ impl App {
         use xcp_client::{CalibrationParam, CalibrationType};
 
         let data_type = match ch.data_type {
+            // Scalar types
             xcp_client::A2lDataType::U8 => CalibrationType::U8,
             xcp_client::A2lDataType::U16 => CalibrationType::U16,
             xcp_client::A2lDataType::U32 => CalibrationType::U32,
@@ -565,8 +566,30 @@ impl App {
             xcp_client::A2lDataType::F32 => CalibrationType::F32,
             xcp_client::A2lDataType::F64 => CalibrationType::F64,
             xcp_client::A2lDataType::Bool => CalibrationType::Bool,
+            // Array types
             xcp_client::A2lDataType::U8Array(n) => CalibrationType::U8Array(n),
+            xcp_client::A2lDataType::U16Array(n) => CalibrationType::U16Array(n),
+            xcp_client::A2lDataType::U32Array(n) => CalibrationType::U32Array(n),
+            xcp_client::A2lDataType::U64Array(n) => CalibrationType::U64Array(n),
+            xcp_client::A2lDataType::I8Array(n) => CalibrationType::I8Array(n),
+            xcp_client::A2lDataType::I16Array(n) => CalibrationType::I16Array(n),
+            xcp_client::A2lDataType::I32Array(n) => CalibrationType::I32Array(n),
+            xcp_client::A2lDataType::I64Array(n) => CalibrationType::I64Array(n),
+            xcp_client::A2lDataType::F32Array(n) => CalibrationType::F32Array(n),
+            xcp_client::A2lDataType::F64Array(n) => CalibrationType::F64Array(n),
+            xcp_client::A2lDataType::BoolArray(n) => CalibrationType::BoolArray(n),
+            // Matrix types
             xcp_client::A2lDataType::U8Matrix(rows, cols) => CalibrationType::U8Matrix(rows, cols),
+            xcp_client::A2lDataType::U16Matrix(rows, cols) => CalibrationType::U16Matrix(rows, cols),
+            xcp_client::A2lDataType::U32Matrix(rows, cols) => CalibrationType::U32Matrix(rows, cols),
+            xcp_client::A2lDataType::U64Matrix(rows, cols) => CalibrationType::U64Matrix(rows, cols),
+            xcp_client::A2lDataType::I8Matrix(rows, cols) => CalibrationType::I8Matrix(rows, cols),
+            xcp_client::A2lDataType::I16Matrix(rows, cols) => CalibrationType::I16Matrix(rows, cols),
+            xcp_client::A2lDataType::I32Matrix(rows, cols) => CalibrationType::I32Matrix(rows, cols),
+            xcp_client::A2lDataType::I64Matrix(rows, cols) => CalibrationType::I64Matrix(rows, cols),
+            xcp_client::A2lDataType::F32Matrix(rows, cols) => CalibrationType::F32Matrix(rows, cols),
+            xcp_client::A2lDataType::F64Matrix(rows, cols) => CalibrationType::F64Matrix(rows, cols),
+            xcp_client::A2lDataType::BoolMatrix(rows, cols) => CalibrationType::BoolMatrix(rows, cols),
         };
 
         let mut param = CalibrationParam::new(&ch.name, ch.address, ch.address_ext, data_type)
