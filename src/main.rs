@@ -14,6 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging to file
     let log_file = OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .open("xcp_client.log")?;
 

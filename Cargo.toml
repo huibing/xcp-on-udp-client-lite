@@ -18,6 +18,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 tui-input = "0.11"
 tokio-util = "0.7"
 bitflags = "2.4"
+regex = "1"
 a2lfile = { git = "https://github.com/DanielT/a2lfile.git" }
 
 [profile.release]
