@@ -11,14 +11,46 @@ use crate::protocol::Mta;
 // Note: chrono not used - timestamps are raw slave clock values, not UTC time
 use serde::Serialize;
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
 use std::fs::OpenOptions;
+use std::io::{Cursor, Read};
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+
+/// ODT Entry allocation - represents a single measurement entry in an ODT
+#[derive(Debug, Clone)]
+pub struct OdtEntryAllocation {
+    /// Index into the selected_measurements array
+    pub measurement_idx: usize,
+}
+
+/// ODT allocation - contains multiple entries
+#[derive(Debug, Clone)]
+pub struct OdtAllocation {
+    /// Entries in this ODT (measurement indices)
+    pub entries: Vec<OdtEntryAllocation>,
+}
+
+/// DAQ List allocation - contains multiple ODTs
+#[derive(Debug, Clone)]
+pub struct DaqListAllocation {
+    /// ODTs in this DAQ list
+    pub odts: Vec<OdtAllocation>,
+}
+
+/// Complete DAQ-ODT-ODTEntry allocation result
+#[derive(Debug, Clone)]
+pub struct DaqAllocation {
+    /// Number of DAQ lists
+    pub daq_list_count: u16,
+    /// Number of ODTs per DAQ list
+    pub odt_count_per_list: Vec<u8>,
+    /// DAQ list allocations
+    pub daq_lists: Vec<DaqListAllocation>,
+}
 
 /// COMPU_METHOD for converting raw values to physical values
 #[derive(Debug, Clone)]
@@ -63,58 +95,12 @@ impl CompuMethod {
     }
 
     /// Convert raw bytes based on data type
+    /// For integer types: parse as raw value, then apply COMPU_METHOD
+    /// For float types: parse directly as physical value (no COMPU_METHOD conversion)
     pub fn convert_bytes(&self, data_type: &A2lDataType, bytes: &[u8]) -> f64 {
-        let raw = match data_type {
-            A2lDataType::U8 => bytes.first().copied().unwrap_or(0) as f64,
-            A2lDataType::U16 => {
-                if bytes.len() >= 2 {
-                    u16::from_le_bytes([bytes[0], bytes[1]]) as f64
-                } else {
-                    0.0
-                }
-            }
-            A2lDataType::U32 => {
-                if bytes.len() >= 4 {
-                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
-                } else {
-                    0.0
-                }
-            }
-            A2lDataType::U64 => {
-                if bytes.len() >= 8 {
-                    u64::from_le_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3],
-                        bytes[4], bytes[5], bytes[6], bytes[7],
-                    ]) as f64
-                } else {
-                    0.0
-                }
-            }
-            A2lDataType::I8 => bytes.first().copied().unwrap_or(0) as i8 as f64,
-            A2lDataType::I16 => {
-                if bytes.len() >= 2 {
-                    i16::from_le_bytes([bytes[0], bytes[1]]) as f64
-                } else {
-                    0.0
-                }
-            }
-            A2lDataType::I32 => {
-                if bytes.len() >= 4 {
-                    i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
-                } else {
-                    0.0
-                }
-            }
-            A2lDataType::I64 => {
-                if bytes.len() >= 8 {
-                    i64::from_le_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3],
-                        bytes[4], bytes[5], bytes[6], bytes[7],
-                    ]) as f64
-                } else {
-                    0.0
-                }
-            }
+        // For floating point types, the raw bytes directly represent the physical value
+        // COMPU_METHOD should NOT be applied to float values
+        match data_type {
             A2lDataType::F32 => {
                 if bytes.len() >= 4 {
                     f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
@@ -132,23 +118,80 @@ impl CompuMethod {
                     0.0
                 }
             }
-            A2lDataType::Bool => (bytes.first().copied().unwrap_or(0) != 0) as u8 as f64,
-            A2lDataType::U8Array(_) | A2lDataType::U8Matrix(_, _) |
-            A2lDataType::U16Array(_) | A2lDataType::U16Matrix(_, _) |
-            A2lDataType::U32Array(_) | A2lDataType::U32Matrix(_, _) |
-            A2lDataType::U64Array(_) | A2lDataType::U64Matrix(_, _) |
-            A2lDataType::I8Array(_) | A2lDataType::I8Matrix(_, _) |
-            A2lDataType::I16Array(_) | A2lDataType::I16Matrix(_, _) |
-            A2lDataType::I32Array(_) | A2lDataType::I32Matrix(_, _) |
-            A2lDataType::I64Array(_) | A2lDataType::I64Matrix(_, _) |
-            A2lDataType::F32Array(_) | A2lDataType::F32Matrix(_, _) |
-            A2lDataType::F64Array(_) | A2lDataType::F64Matrix(_, _) |
-            A2lDataType::BoolArray(_) | A2lDataType::BoolMatrix(_, _) => {
-                // For arrays/matrices, just use first element
-                bytes.first().copied().unwrap_or(0) as f64
+            // For integer types, parse raw value then apply COMPU_METHOD
+            _ => {
+                let raw = match data_type {
+                    A2lDataType::U8 => bytes.first().copied().unwrap_or(0) as f64,
+                    A2lDataType::U16 => {
+                        if bytes.len() >= 2 {
+                            u16::from_le_bytes([bytes[0], bytes[1]]) as f64
+                        } else {
+                            0.0
+                        }
+                    }
+                    A2lDataType::U32 => {
+                        if bytes.len() >= 4 {
+                            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
+                        } else {
+                            0.0
+                        }
+                    }
+                    A2lDataType::U64 => {
+                        if bytes.len() >= 8 {
+                            u64::from_le_bytes([
+                                bytes[0], bytes[1], bytes[2], bytes[3],
+                                bytes[4], bytes[5], bytes[6], bytes[7],
+                            ]) as f64
+                        } else {
+                            0.0
+                        }
+                    }
+                    A2lDataType::I8 => bytes.first().copied().unwrap_or(0) as i8 as f64,
+                    A2lDataType::I16 => {
+                        if bytes.len() >= 2 {
+                            i16::from_le_bytes([bytes[0], bytes[1]]) as f64
+                        } else {
+                            0.0
+                        }
+                    }
+                    A2lDataType::I32 => {
+                        if bytes.len() >= 4 {
+                            i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
+                        } else {
+                            0.0
+                        }
+                    }
+                    A2lDataType::I64 => {
+                        if bytes.len() >= 8 {
+                            i64::from_le_bytes([
+                                bytes[0], bytes[1], bytes[2], bytes[3],
+                                bytes[4], bytes[5], bytes[6], bytes[7],
+                            ]) as f64
+                        } else {
+                            0.0
+                        }
+                    }
+                    A2lDataType::Bool => (bytes.first().copied().unwrap_or(0) != 0) as u8 as f64,
+                    A2lDataType::U8Array(_) | A2lDataType::U8Matrix(_, _) |
+                    A2lDataType::U16Array(_) | A2lDataType::U16Matrix(_, _) |
+                    A2lDataType::U32Array(_) | A2lDataType::U32Matrix(_, _) |
+                    A2lDataType::U64Array(_) | A2lDataType::U64Matrix(_, _) |
+                    A2lDataType::I8Array(_) | A2lDataType::I8Matrix(_, _) |
+                    A2lDataType::I16Array(_) | A2lDataType::I16Matrix(_, _) |
+                    A2lDataType::I32Array(_) | A2lDataType::I32Matrix(_, _) |
+                    A2lDataType::I64Array(_) | A2lDataType::I64Matrix(_, _) |
+                    A2lDataType::F32Array(_) | A2lDataType::F32Matrix(_, _) |
+                    A2lDataType::F64Array(_) | A2lDataType::F64Matrix(_, _) |
+                    A2lDataType::BoolArray(_) | A2lDataType::BoolMatrix(_, _) => {
+                        // For arrays/matrices, just use first element
+                        bytes.first().copied().unwrap_or(0) as f64
+                    }
+                    // F32/F64 already handled above, never reach here
+                    A2lDataType::F32 | A2lDataType::F64 => unreachable!(),
+                };
+                self.convert(raw)
             }
-        };
-        self.convert(raw)
+        }
     }
 }
 
@@ -461,14 +504,12 @@ pub struct DaqManager {
 impl DaqManager {
     /// Create a new DAQ manager with default hardcoded measurements
     pub fn new() -> Self {
-        let default_measurements = vec![
-            Measurement::new("const_data", 0xFFFC, 2, 4),
-            Measurement::new("counter", 0xFFF8, 2, 4),
-        ];
-        let selected_indices = (0..default_measurements.len()).collect();
+        // No default measurements - must be loaded from A2L file
+        let all_measurements: Vec<Measurement> = Vec::new();
+        let selected_indices: Vec<usize> = Vec::new();
 
         Self {
-            all_measurements: default_measurements,
+            all_measurements,
             selected_indices,
             running: Arc::new(AtomicBool::new(false)),
             task_handle: Arc::new(RwLock::new(None)),
@@ -495,7 +536,7 @@ impl DaqManager {
 
         let all_measurements: Vec<Measurement> = a2l_measurements
             .into_iter()
-            .filter_map(|m| Self::convert_measurement(m))
+            .filter_map(Self::convert_measurement)
             .collect();
 
         // By default, select first 8 measurements or all if less than 8
@@ -609,18 +650,22 @@ impl DaqManager {
     /// - Each DAQ list: max 252 ODTs
     /// - DAQ lists: max 0xFFFF (65535)
     /// - Each entry: max max_odt_entry_size bytes (checked individually)
-    fn calculate_odt_allocation(&self, max_odt_entry_size: u8) -> Result<(u16, Vec<u8>, Vec<Vec<Vec<usize>>>), String> {
+    fn calculate_odt_allocation(&self, max_odt_entry_size: u8) -> Result<DaqAllocation, String> {
         const MAX_ODT_ENTRIES: usize = 255;
         const MAX_ODTS_PER_LIST: usize = 252;
         const MAX_DAQ_LISTS: usize = 0xFFFF;
 
         let selected = self.selected_measurements();
         if selected.is_empty() {
-            return Ok((0, Vec::new(), Vec::new()));
+            return Ok(DaqAllocation {
+                daq_list_count: 0,
+                odt_count_per_list: Vec::new(),
+                daq_lists: Vec::new(),
+            });
         }
 
         // Check each measurement size against max_odt_entry_size
-        for (_idx, meas) in selected.iter().enumerate() {
+        for meas in selected.iter() {
             if meas.size > max_odt_entry_size as usize {
                 return Err(format!(
                     "Measurement '{}' size ({} bytes) exceeds max ODT entry size ({} bytes). Please deselect this measurement or reduce data type size.",
@@ -631,20 +676,22 @@ impl DaqManager {
 
         // Group measurements into ODTs
         // Each ODT can hold up to MAX_ODT_ENTRIES entries
-        let mut daq_lists: Vec<Vec<Vec<usize>>> = Vec::new(); // [daq_list][odt][entry_indices]
-        let mut current_list: Vec<Vec<usize>> = Vec::new();
-        let mut current_odt: Vec<usize> = Vec::new();
+        let mut daq_lists: Vec<DaqListAllocation> = Vec::new();
+        let mut current_list: Vec<OdtAllocation> = Vec::new();
+        let mut current_odt: Vec<OdtEntryAllocation> = Vec::new();
 
         for (idx, _meas) in selected.iter().enumerate() {
             // Check if current ODT is full (255 entries max)
             if current_odt.len() >= MAX_ODT_ENTRIES && !current_odt.is_empty() {
-                current_list.push(current_odt);
+                current_list.push(OdtAllocation {
+                    entries: current_odt,
+                });
                 current_odt = Vec::new();
             }
 
             // Check if we need a new DAQ list (252 ODTs max per list)
             if current_list.len() >= MAX_ODTS_PER_LIST {
-                daq_lists.push(current_list);
+                daq_lists.push(DaqListAllocation { odts: current_list });
                 current_list = Vec::new();
             }
 
@@ -657,15 +704,17 @@ impl DaqManager {
             }
 
             // Add measurement to current ODT
-            current_odt.push(idx);
+            current_odt.push(OdtEntryAllocation { measurement_idx: idx });
         }
 
         // Don't forget the last ODT
         if !current_odt.is_empty() {
-            current_list.push(current_odt);
+            current_list.push(OdtAllocation {
+                entries: current_odt,
+            });
         }
         if !current_list.is_empty() {
-            daq_lists.push(current_list);
+            daq_lists.push(DaqListAllocation { odts: current_list });
         }
 
         // Final validation
@@ -678,9 +727,13 @@ impl DaqManager {
 
         // Convert to return format
         let daq_list_count = daq_lists.len() as u16;
-        let odt_count_per_list: Vec<u8> = daq_lists.iter().map(|l| l.len() as u8).collect();
+        let odt_count_per_list: Vec<u8> = daq_lists.iter().map(|l| l.odts.len() as u8).collect();
 
-        Ok((daq_list_count, odt_count_per_list, daq_lists))
+        Ok(DaqAllocation {
+            daq_list_count,
+            odt_count_per_list,
+            daq_lists,
+        })
     }
 
     /// Select all measurements (with restart flag)
@@ -786,7 +839,7 @@ impl DaqManager {
         let timestamp_unit = (timestamp_mode & 0b1111_0000) >> 4;
         self.timestamp_unit = TimestampUnit::from_u8(timestamp_unit);
         tracing::debug!("Timestamp tick: {:?}", self.timestamp_unit);
-        return Ok(());
+        Ok(())
     }
 
     pub async fn get_daq_processor_info(&self, client: &XcpClient) -> Result<IdentificationFieldType, String> { 
@@ -798,23 +851,23 @@ impl DaqManager {
         match bits {
             0 => {
                 tracing::debug!("abosulte odt is used");
-                return Ok(IdentificationFieldType::AbosulteODT)
+                Ok(IdentificationFieldType::AbosulteODT)
             }
             1  => {
                 tracing::debug!("releative odt is used");
-                return Ok(IdentificationFieldType::RelatetiveODTBYTE)
+                Ok(IdentificationFieldType::RelatetiveODTBYTE)
             }
             2 => {
                 tracing::debug!("releative odt is used");
-                return Ok(IdentificationFieldType::RelatetiveODTWORD)
+                Ok(IdentificationFieldType::RelatetiveODTWORD)
             }
             3 => {
                 tracing::debug!("releative odt is used");
-                return Ok(IdentificationFieldType::RelatetiveODTWORDAlign)
+                Ok(IdentificationFieldType::RelatetiveODTWORDAlign)
             }
             _ => {
                 tracing::error!("IDENTIFICATION FIELD NOT ALLOWED: {}", bits);
-                return Err("IDENTIFICATION FIELD NOT ALLOWED".to_string())
+                Err("IDENTIFICATION FIELD NOT ALLOWED".to_string())
             }
         }
     }
@@ -839,7 +892,7 @@ impl DaqManager {
         // Get DAQ resolution info for ODT entry limits
         let daq_resolution = client.get_daq_resolution_info().await
             .map_err(|e| format!("GET_DAQ_RESOLUTION_INFO failed: {}", e))?;
-        self.daq_resolution = Some(daq_resolution.clone());
+        self.daq_resolution = Some(daq_resolution);
 
         let max_odt_entry_size = daq_resolution.max_odt_entry_size_daq;
         let odt_granularity = daq_resolution.odt_entry_granularity_daq;
@@ -855,11 +908,10 @@ impl DaqManager {
         }
 
         // Calculate how many ODTs and DAQ lists we need
-        let (daq_list_count, odt_count_per_list, daq_lists_allocation) =
-            self.calculate_odt_allocation(max_odt_entry_size)?;
+        let allocation = self.calculate_odt_allocation(max_odt_entry_size)?;
 
-        tracing::info!("ODT allocation: {} DAQ lists", daq_list_count);
-        for (list_idx, odt_count) in odt_count_per_list.iter().enumerate() {
+        tracing::info!("ODT allocation: {} DAQ lists", allocation.daq_list_count);
+        for (list_idx, odt_count) in allocation.odt_count_per_list.iter().enumerate() {
             tracing::info!("  DAQ list {}: {} ODTs", list_idx, odt_count);
         }
 
@@ -875,22 +927,22 @@ impl DaqManager {
             config.odt_entry_granularity = odt_granularity;
             config.identification_type = identification_field_type.clone();
             config.timestamp_size = self.timestamp_size.unwrap_or(0);
-            config.timestamp_unit = self.timestamp_unit.clone();
-            config.daq_list_count = daq_list_count;
-            config.odt_count_per_list = odt_count_per_list.clone();
+            config.timestamp_unit = self.timestamp_unit;
+            config.daq_list_count = allocation.daq_list_count;
+            config.odt_count_per_list = allocation.odt_count_per_list.clone();
         }
 
         // 2. ALLOC_DAQ - Allocate DAQ lists
-        tracing::debug!("ALLOC_DAQ: {} lists", daq_list_count);
+        tracing::debug!("ALLOC_DAQ: {} lists", allocation.daq_list_count);
         client
-            .alloc_daq(daq_list_count)
+            .alloc_daq(allocation.daq_list_count)
             .await
             .map_err(|e| format!("ALLOC_DAQ failed: {}", e))?;
 
         // 3-7. For each DAQ list, allocate ODTs and configure entries
         let mut global_entry_idx: usize = 0;
 
-        for (daq_list_idx, odt_count) in odt_count_per_list.iter().enumerate() {
+        for (daq_list_idx, odt_count) in allocation.odt_count_per_list.iter().enumerate() {
             let daq_list = daq_list_idx as u16;
 
             // ALLOC_ODT - Allocate ODTs for this DAQ list
@@ -901,12 +953,12 @@ impl DaqManager {
                 .map_err(|e| format!("ALLOC_ODT failed for list {}: {}", daq_list, e))?;
 
             // Get the allocation for this DAQ list
-            let list_allocation = &daq_lists_allocation[daq_list_idx];
+            let list_allocation = &allocation.daq_lists[daq_list_idx];
 
             // For each ODT in this DAQ list
-            for (odt_idx, entry_indices) in list_allocation.iter().enumerate() {
+            for (odt_idx, odt_allocation) in list_allocation.odts.iter().enumerate() {
                 let odt = odt_idx as u8;
-                let entry_count = entry_indices.len() as u8;
+                let entry_count = odt_allocation.entries.len() as u8;
 
                 // ALLOC_ODT_ENTRY - Allocate entries in this ODT
                 tracing::debug!("ALLOC_ODT_ENTRY: DAQ list {}, ODT {}, {} entries",
@@ -919,7 +971,8 @@ impl DaqManager {
                 // SET_DAQ_PTR + WRITE_DAQ - Configure each entry
                 let mut byte_offset: usize = 0;
 
-                for (entry_idx, &meas_idx) in entry_indices.iter().enumerate() {
+                for (entry_idx, entry_allocation) in odt_allocation.entries.iter().enumerate() {
+                    let meas_idx = entry_allocation.measurement_idx;
                     let meas = &selected_measurements[meas_idx];
 
                     tracing::debug!(
@@ -935,8 +988,7 @@ impl DaqManager {
 
                     // Write DAQ entry configuration
                     // Ensure size is aligned to granularity
-                    let aligned_size = ((meas.size + odt_granularity as usize - 1)
-                        / odt_granularity as usize) * odt_granularity as usize;
+                    let aligned_size = meas.size.div_ceil(odt_granularity as usize) * odt_granularity as usize;
                     client
                         .write_daq(0, meas.mta(), aligned_size as u8)
                         .await
@@ -1069,7 +1121,7 @@ impl DaqManager {
         let timestamp_size = self.timestamp_size.unwrap_or(0);
         let iden_field_type = self.indentification_field_type.clone();
         let base_timestamp = self.base_timestamp;
-        let _timestamp_unit = self.timestamp_unit.clone();
+        let _timestamp_unit = self.timestamp_unit;
         let use_slave_timestamp = base_timestamp.is_some();
         let selection_changed = self.selection_changed.clone();
 
