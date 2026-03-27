@@ -45,21 +45,11 @@ pub enum XcpError {
 }
 
 /// XCP Client State
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClientState {
     pub connected: bool,
     pub connect_info: Option<ConnectInfo>,
     pub slave_id: Option<String>,
-}
-
-impl Default for ClientState {
-    fn default() -> Self {
-        Self {
-            connected: false,
-            connect_info: None,
-            slave_id: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -182,11 +172,79 @@ impl XcpClient {
         match timeout(Duration::from_secs(1), rx.recv()).await {
             Ok(Some(msg)) => {
                 // msg.data already contains complete XCP packet (4-byte transport header + payload)
+                // Parse response to check for negative response
+                if let Ok(Response::Err(err_code)) = parse_response(&msg.data) {
+                    // Log negative response with command details
+                    let cmd_code = command.get(4).copied().unwrap_or(0xFF); // Command code is at byte 4 (after 4-byte TL header)
+                    let err_raw = msg.data.get(5).copied().unwrap_or(0xFF); // Error code is at byte 5 (after TL header + ERR PID)
+                    let raw_bytes: Vec<String> = msg.data.iter().map(|b| format!("{:02X}", b)).collect();
+                    tracing::error!(
+                        "XCP Negative Response: cmd=0x{:02X} ({}), err=0x{:02X} ({}), raw=[{}]",
+                        cmd_code,
+                        Self::command_name(cmd_code),
+                        err_raw,
+                        err_code,
+                        raw_bytes.join(" ")
+                    );
+                }
                 // Return as-is for backward compatibility with existing response parsers
                 Ok(msg.data)
             }
             Ok(None) => Err(XcpError::NotConnected),
             Err(_) => Err(XcpError::ResponseTimeout),
+        }
+    }
+
+    /// Get human-readable command name from command code
+    fn command_name(cmd_code: u8) -> &'static str {
+        match cmd_code {
+            0xFF => "CONNECT",
+            0xFE => "DISCONNECT",
+            0xFD => "GET_STATUS",
+            0xFC => "SYNCH",
+            0xFB => "GET_COMM_MODE_INFO",
+            0xFA => "GET_ID",
+            0xF9 => "SET_REQUEST",
+            0xF8 => "GET_SEED",
+            0xF7 => "UNLOCK",
+            0xF6 => "SET_MTA",
+            0xF5 => "UPLOAD",
+            0xF4 => "SHORT_UPLOAD",
+            0xF3 => "BUILD_CHECKSUM",
+            0xF2 => "TRANSPORT_LAYER_CMD",
+            0xF1 => "USER_CMD",
+            0xF0 => "DOWNLOAD",
+            0xEF => "DOWNLOAD_NEXT",
+            0xEE => "DOWNLOAD_MAX",
+            0xED => "SHORT_DOWNLOAD",
+            0xEC => "MODIFY_BITS",
+            0xEB => "SET_CAL_PAGE",
+            0xEA => "GET_CAL_PAGE",
+            0xE9 => "COPY_CAL_PAGE",
+            0xE4 => "GET_DAQ_EVENT_INFO",
+            0xE2 => "SET_DAQ_PTR",
+            0xE1 => "WRITE_DAQ",
+            0xE0 => "SET_DAQ_LIST_MODE",
+            0xDF => "GET_DAQ_LIST_MODE",
+            0xDE => "START_STOP_DAQ_LIST",
+            0xDD => "START_STOP_SYNCH",
+            0xDC => "GET_DAQ_CLOCK",
+            0xDB => "READ_DAQ",
+            0xDA => "GET_DAQ_PROCESSOR_INFO",
+            0xD9 => "GET_DAQ_RESOLUTION_INFO",
+            0xD8 => "GET_DAQ_LIST_INFO",
+            0xD6 => "FREE_DAQ",
+            0xD5 => "ALLOC_DAQ",
+            0xD4 => "ALLOC_ODT",
+            0xD3 => "ALLOC_ODT_ENTRY",
+            0xD2 => "PROGRAM_START",
+            0xD1 => "PROGRAM_CLEAR",
+            0xD0 => "PROGRAM",
+            0xCF => "PROGRAM_RESET",
+            0xCE => "GET_PGM_PROCESSOR_INFO",
+            0xC6 => "TIME_CORRELATION_PROPERTIES",
+            0xC4 => "DAQ_MULTIPLE",
+            _ => "UNKNOWN",
         }
     }
 
@@ -428,7 +486,7 @@ impl XcpClient {
     /// - Byte 0: 0xFF (positive response, stripped by parse_response)
     /// - Byte 1-3: reserved (3 bytes)
     /// - Byte 4-7: timestamp (4 bytes, little-endian, u32)
-    /// Note: The timestamp's 0 point is not UTC epoch time, so it's just a raw u32 value
+    ///   Note: The timestamp's 0 point is not UTC epoch time, so it's just a raw u32 value
     pub async fn get_daq_clock(&self) -> Result<u32, XcpError> {
         let response = self.send_command_and_wait(&commands::get_daq_clock()).await?;
         let parsed = parse_response(&response).map_err(XcpError::ParseError)?;
