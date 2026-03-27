@@ -280,16 +280,11 @@ pub enum AddressGranularity {
 }
 
 /// Byte Order
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ByteOrder {
+    #[default]
     MsbLast,  // Big-endian
     MsbFirst, // Little-endian
-}
-
-impl Default for ByteOrder {
-    fn default() -> Self {
-        Self::MsbLast // A2L specifies MSB_LAST
-    }
 }
 
 /// Convert u32 from little-endian bytes
