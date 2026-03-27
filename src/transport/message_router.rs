@@ -242,13 +242,20 @@ impl MessageRouter {
                 // Receive packet from transport
                 match transport.recv_daq_packet().await {
                     Ok(packet) => {
+                        tracing::debug!("Received UDP packet: {} bytes", packet.len());
                         // Parse all XCP packets from the UDP packet
                         let messages = XcpMessage::parse_packets(packet);
+                        tracing::debug!("Parsed {} XCP messages from UDP packet", messages.len());
 
                         for msg in messages {
                             // Check counter for each XCP packet (in transport header bytes 2-3)
                             if msg.data.len() >= 4 {
                                 let counter = u16::from_le_bytes([msg.data[2], msg.data[3]]);
+                                let pid = msg.data.get(4).copied().unwrap_or(0xFF);
+                                tracing::debug!(
+                                    "Routing XCP message: type={:?}, counter={}, pid=0x{:02X}, len={}",
+                                    msg.packet_type, counter, pid, msg.data.len()
+                                );
                                 let mut tracker = counter_tracker.write().await;
                                 if let Some(warning) = tracker.check_and_update(counter) {
                                     tracing::warn!(
