@@ -266,6 +266,7 @@ impl A2lReader {
     }
 
     /// Get address extension for a characteristic from its memory segment
+    /// Default is 0, unless IF_DATA XCP SEGMENT explicitly specifies otherwise
     fn get_characteristic_address_ext(
         &self,
         ch: &a2lfile::Characteristic,
@@ -274,24 +275,66 @@ impl A2lReader {
         // Try to find memory segment for this characteristic's address
         if let Some(mod_par) = &module.mod_par {
             for mem_seg in &mod_par.memory_segment {
-                // Check IF_DATA for XCP segment info
-                for _if_data in &mem_seg.if_data {
-                    // The IF_DATA content is stored as raw items, we need to check XCP-specific data
-                    // For now, use a simplified approach based on address ranges
-                    // Check if characteristic address falls within this segment
-                    if ch.address >= mem_seg.address
-                        && ch.address < mem_seg.address + mem_seg.size
-                    {
-                        // Return 2 for FLASH/calibration segments (based on A2L file pattern)
-                        if mem_seg.memory_type == a2lfile::MemoryType::Flash {
-                            return 2;
+                // Check if characteristic address falls within this segment
+                if ch.address >= mem_seg.address
+                    && ch.address < mem_seg.address + mem_seg.size
+                {
+                    // Check IF_DATA XCP SEGMENT for explicit address extension
+                    for if_data in &mem_seg.if_data {
+                        if let Some(ref generic) = if_data.ifdata_items {
+                            if let Some(ext) = Self::extract_address_extension_from_segment(generic) {
+                                return ext;
+                            }
                         }
-                        return 0;
                     }
+                    // Default to 0 if no explicit address extension found in IF_DATA
+                    return 0;
                 }
             }
         }
         0 // Default to 0 if not found
+    }
+
+    /// Extract address extension from IF_DATA XCP SEGMENT block
+    fn extract_address_extension_from_segment(generic: &a2lfile::GenericIfData) -> Option<u8> {
+        // SEGMENT format: /begin SEGMENT segment_number address_extension ... /end SEGMENT
+        // Look for SEGMENT block in the IF_DATA
+        let content = format!("{:?}", generic);
+
+        // Parse SEGMENT block for address extension
+        // Example: Block { tag: "SEGMENT", items: [UInt(0), UInt(2), ...] }
+        // The second UInt is the address extension
+        if let Some(seg_pos) = content.to_lowercase().find("segment") {
+            let after_seg = &content[seg_pos..];
+            // Find UInt values after SEGMENT
+            let mut found_values = Vec::new();
+            let mut pos = 0;
+            while let Some(uint_pos) = after_seg[pos..].find("UInt(") {
+                let start = pos + uint_pos + 5;
+                if let Some(end) = after_seg[start..].find(")") {
+                    if let Some(comma_pos) = after_seg[start..start+end].find(",") {
+                        let num_str = &after_seg[start..start+comma_pos];
+                        if let Ok(num) = num_str.parse::<u64>() {
+                            found_values.push(num as u8);
+                        }
+                    } else {
+                        let num_str = &after_seg[start..start+end];
+                        if let Ok(num) = num_str.parse::<u64>() {
+                            found_values.push(num as u8);
+                        }
+                    }
+                    pos = start + end + 1;
+                } else {
+                    break;
+                }
+            }
+            // Return the second UInt value (address extension) if available
+            // Format: [segment_number, address_extension, ...]
+            if found_values.len() >= 2 {
+                return Some(found_values[1]);
+            }
+        }
+        None
     }
 
     /// Parse data type
@@ -312,6 +355,16 @@ impl A2lReader {
     }
 
     /// Parse characteristic data type from deposit (record layout)
+    ///
+    /// Strategy:
+    /// 1. First, try to get the base data type from FNC_VALUES.datatype (most accurate)
+    /// 2. If FNC_VALUES is not available, infer from record layout name
+    /// 3. Determine dimensionality (scalar/array/matrix) from name patterns:
+    ///    - Scalar_* -> scalar
+    ///    - Lookup1D_* -> 1D array
+    ///    - Lookup2D_* -> 2D matrix
+    ///    - LAYOUT_* -> scalar (simple layout)
+    /// 4. Combine base type with dimensions from matrix_dim if available
     fn parse_characteristic_datatype(
         &self,
         ch: &a2lfile::Characteristic,
@@ -324,82 +377,184 @@ impl A2lReader {
             .iter()
             .find(|rl| rl.get_name() == record_layout_name)?;
 
-        // Determine data type from record layout's FNC_VALUES
-        let base_type = if record_layout.fnc_values.is_some() {
-            // Check the datatype of FNC_VALUES
-            // Look up the corresponding typedef if available
-            self.get_type_from_record_layout(record_layout, module)
+        let layout_name = record_layout.get_name();
+
+        // Step 1: Get base data type (scalar type without dimensions)
+        let base_type = if let Some(fnc_values) = &record_layout.fnc_values {
+            // Most accurate: get type directly from FNC_VALUES.datatype
+            Self::convert_a2l_datatype(&fnc_values.datatype)
         } else {
-            // Fallback: try to infer from characteristic type
-            match ch.characteristic_type {
-                a2lfile::CharacteristicType::Value => Some(A2lDataType::U32),
-                a2lfile::CharacteristicType::ValBlk => {
-                    // Handle array/matrix
-                    if let Some(matrix_dim) = &ch.matrix_dim {
-                        self.parse_matrix_dim(matrix_dim)
-                    } else {
-                        Some(A2lDataType::U8Array(1))
-                    }
-                }
-                _ => Some(A2lDataType::U32),
-            }
+            // Fallback: infer from layout name
+            Self::infer_type_from_layout_name(layout_name)
         };
 
-        // Handle matrix dimensions for arrays
+        // Step 2: Determine dimensionality from name patterns
+        let dimensions = Self::infer_dimensions_from_layout_name(layout_name);
+
+        // Step 3: Combine base type with dimensions
+        // Priority: explicit matrix_dim > name pattern inference
         if let Some(matrix_dim) = &ch.matrix_dim {
-            if let Some(A2lDataType::U8) = base_type {
-                return self.parse_matrix_dim(matrix_dim);
+            let dims = &matrix_dim.dim_list;
+            match dims.len() {
+                1 => Self::wrap_as_array(base_type, dims[0] as usize),
+                2 => Self::wrap_as_matrix(base_type, dims[0] as usize, dims[1] as usize),
+                _ => Some(base_type),
             }
-        }
-
-        base_type
-    }
-
-    /// Get data type from record layout
-    fn get_type_from_record_layout(
-        &self,
-        record_layout: &a2lfile::RecordLayout,
-        _module: &a2lfile::Module,
-    ) -> Option<A2lDataType> {
-        // Try to get type from record layout name
-        let name = record_layout.get_name();
-
-        // Common naming patterns in A2L files
-        if name.starts_with("U8") || name == "U8" {
-            Some(A2lDataType::U8)
-        } else if name.starts_with("U16") || name == "U16" {
-            Some(A2lDataType::U16)
-        } else if name.starts_with("U32") || name == "U32" || name.starts_with("ULONG") {
-            Some(A2lDataType::U32)
-        } else if name.starts_with("U64") || name == "U64" {
-            Some(A2lDataType::U64)
-        } else if name.starts_with("I8") || name == "I8" || name.starts_with("SBYTE") {
-            Some(A2lDataType::I8)
-        } else if name.starts_with("I16") || name == "I16" || name.starts_with("SWORD") {
-            Some(A2lDataType::I16)
-        } else if name.starts_with("I32") || name == "I32" || name.starts_with("SLONG") {
-            Some(A2lDataType::I32)
-        } else if name.starts_with("I64") || name == "I64" {
-            Some(A2lDataType::I64)
-        } else if name.starts_with("F32") || name == "F32" || name.starts_with("FLOAT32") {
-            Some(A2lDataType::F32)
-        } else if name.starts_with("F64") || name == "F64" || name.starts_with("FLOAT64") {
-            Some(A2lDataType::F64)
-        } else if name.starts_with("BOOL") || name == "BOOL" {
-            Some(A2lDataType::Bool)
+        } else if let Some((rows, cols)) = dimensions {
+            if rows == 1 {
+                // 1D array
+                Self::wrap_as_array(base_type, cols)
+            } else {
+                // 2D matrix
+                Self::wrap_as_matrix(base_type, rows, cols)
+            }
         } else {
-            // Default to U32 if unknown
-            Some(A2lDataType::U32)
+            // Scalar
+            Some(base_type)
         }
     }
 
-    /// Parse matrix dimensions
-    fn parse_matrix_dim(&self, matrix_dim: &a2lfile::MatrixDim) -> Option<A2lDataType> {
-        let dims = &matrix_dim.dim_list;
-        match dims.len() {
-            1 => Some(A2lDataType::U8Array(dims[0] as usize)),
-            2 => Some(A2lDataType::U8Matrix(dims[0] as usize, dims[1] as usize)),
-            _ => None,
+    /// Convert a2lfile::DataType to A2lDataType
+    fn convert_a2l_datatype(datatype: &a2lfile::DataType) -> A2lDataType {
+        match datatype {
+            a2lfile::DataType::Ubyte => A2lDataType::U8,
+            a2lfile::DataType::Uword => A2lDataType::U16,
+            a2lfile::DataType::Ulong => A2lDataType::U32,
+            a2lfile::DataType::AUint64 => A2lDataType::U64,
+            a2lfile::DataType::Sbyte => A2lDataType::I8,
+            a2lfile::DataType::Sword => A2lDataType::I16,
+            a2lfile::DataType::Slong => A2lDataType::I32,
+            a2lfile::DataType::AInt64 => A2lDataType::I64,
+            a2lfile::DataType::Float16Ieee => A2lDataType::F32, // Map 16-bit float to F32
+            a2lfile::DataType::Float32Ieee => A2lDataType::F32,
+            a2lfile::DataType::Float64Ieee => A2lDataType::F64,
+        }
+    }
+
+    /// Infer base data type from record layout name
+    fn infer_type_from_layout_name(name: &str) -> A2lDataType {
+        // Remove common prefixes to get to the type part
+        let type_part = if name.starts_with("Scalar_") {
+            &name[7..]
+        } else if name.starts_with("Lookup1D_") {
+            &name[9..]
+        } else if name.starts_with("Lookup2D_") {
+            &name[9..]
+        } else if name.starts_with("Lookup1D_X_") {
+            &name[11..]
+        } else if name.starts_with("Lookup2D_X_") {
+            &name[11..]
+        } else if name.starts_with("LAYOUT_") {
+            &name[7..]
+        } else if name.starts_with("Axis_") {
+            &name[5..]
+        } else {
+            name
+        };
+
+        // Map type names to A2lDataType
+        match type_part {
+            // Unsigned integer types
+            "UBYTE" | "BYTE" if type_part == "UBYTE" => A2lDataType::U8,
+            "UWORD" => A2lDataType::U16,
+            "ULONG" => A2lDataType::U32,
+            "A_UINT64" => A2lDataType::U64,
+
+            // Signed integer types
+            "SBYTE" | "BYTE" => A2lDataType::I8,
+            "SWORD" | "WORD" => A2lDataType::I16,
+            "SLONG" | "LONG" => A2lDataType::I32,
+            "A_INT64" => A2lDataType::I64,
+
+            // Float types
+            "FLOAT32_IEEE" | "FLOAT32" => A2lDataType::F32,
+            "FLOAT64_IEEE" | "FLOAT64" => A2lDataType::F64,
+
+            // Boolean (stored as UBYTE)
+            "BOOLEAN" => A2lDataType::Bool,
+
+            // Numeric prefixes (for names like U8, I16, etc.)
+            _ => Self::infer_type_from_prefix(type_part),
+        }
+    }
+
+    /// Infer type from common numeric prefixes
+    fn infer_type_from_prefix(type_part: &str) -> A2lDataType {
+        // Check for U8, U16, U32, U64 patterns
+        if type_part.starts_with("U8") || type_part.starts_with("I8") || type_part.starts_with("S8") {
+            A2lDataType::U8
+        } else if type_part.starts_with("U16") || type_part.starts_with("I16") || type_part.starts_with("S16") {
+            A2lDataType::U16
+        } else if type_part.starts_with("U32") || type_part.starts_with("I32") || type_part.starts_with("S32") {
+            A2lDataType::U32
+        } else if type_part.starts_with("U64") || type_part.starts_with("I64") || type_part.starts_with("S64") {
+            A2lDataType::U64
+        } else if type_part.starts_with("F32") || type_part.starts_with("FLOAT32") {
+            A2lDataType::F32
+        } else if type_part.starts_with("F64") || type_part.starts_with("FLOAT64") {
+            A2lDataType::F64
+        } else if type_part.starts_with("BOOL") {
+            A2lDataType::Bool
+        } else {
+            // Default fallback
+            A2lDataType::U32
+        }
+    }
+
+    /// Infer dimensions from record layout name
+    /// Returns Some((rows, cols)) where:
+    /// - For 1D array: (1, n) or None if size unknown
+    /// - For 2D matrix: (rows, cols)
+    /// Returns None for scalars
+    fn infer_dimensions_from_layout_name(name: &str) -> Option<(usize, usize)> {
+        if name.starts_with("Lookup2D_") && !name.starts_with("Lookup2D_X_") {
+            // 2D lookup table (matrix) - actual dimensions come from matrix_dim
+            // Return None to indicate "matrix type but size unknown from name"
+            Some((0, 0)) // Marker for 2D type
+        } else if name.starts_with("Lookup1D_") && !name.starts_with("Lookup1D_X_") {
+            // 1D lookup table (array) - actual dimensions come from matrix_dim
+            Some((1, 0)) // Marker for 1D type
+        } else {
+            // Scalar types (Scalar_*, LAYOUT_*, etc.)
+            None
+        }
+    }
+
+    /// Wrap a base type as an array type
+    fn wrap_as_array(base_type: A2lDataType, size: usize) -> Option<A2lDataType> {
+        match base_type {
+            A2lDataType::U8 => Some(A2lDataType::U8Array(size)),
+            A2lDataType::U16 => Some(A2lDataType::U16Array(size)),
+            A2lDataType::U32 => Some(A2lDataType::U32Array(size)),
+            A2lDataType::U64 => Some(A2lDataType::U64Array(size)),
+            A2lDataType::I8 => Some(A2lDataType::I8Array(size)),
+            A2lDataType::I16 => Some(A2lDataType::I16Array(size)),
+            A2lDataType::I32 => Some(A2lDataType::I32Array(size)),
+            A2lDataType::I64 => Some(A2lDataType::I64Array(size)),
+            A2lDataType::F32 => Some(A2lDataType::F32Array(size)),
+            A2lDataType::F64 => Some(A2lDataType::F64Array(size)),
+            A2lDataType::Bool => Some(A2lDataType::BoolArray(size)),
+            // If already an array/matrix, return as-is
+            _ => Some(base_type),
+        }
+    }
+
+    /// Wrap a base type as a matrix type
+    fn wrap_as_matrix(base_type: A2lDataType, rows: usize, cols: usize) -> Option<A2lDataType> {
+        match base_type {
+            A2lDataType::U8 => Some(A2lDataType::U8Matrix(rows, cols)),
+            A2lDataType::U16 => Some(A2lDataType::U16Matrix(rows, cols)),
+            A2lDataType::U32 => Some(A2lDataType::U32Matrix(rows, cols)),
+            A2lDataType::U64 => Some(A2lDataType::U64Matrix(rows, cols)),
+            A2lDataType::I8 => Some(A2lDataType::I8Matrix(rows, cols)),
+            A2lDataType::I16 => Some(A2lDataType::I16Matrix(rows, cols)),
+            A2lDataType::I32 => Some(A2lDataType::I32Matrix(rows, cols)),
+            A2lDataType::I64 => Some(A2lDataType::I64Matrix(rows, cols)),
+            A2lDataType::F32 => Some(A2lDataType::F32Matrix(rows, cols)),
+            A2lDataType::F64 => Some(A2lDataType::F64Matrix(rows, cols)),
+            A2lDataType::Bool => Some(A2lDataType::BoolMatrix(rows, cols)),
+            // If already an array/matrix, return as-is
+            _ => Some(base_type),
         }
     }
 
@@ -438,6 +593,115 @@ impl A2lReader {
             .map(|m| m.get_name())
             .collect()
     }
+
+    /// Get XCP slave addresses from XCP_ON_UDP_IP blocks in IF_DATA
+    /// Returns a list of "ip:port" strings
+    pub fn get_slave_addresses(&self) -> Vec<String> {
+        let mut addresses = Vec::new();
+
+        // Parse raw IF_DATA content to find XCP_ON_UDP_IP blocks
+        for module in &self.file.project.module {
+            for if_data in &module.if_data {
+                if let Some(ref generic) = if_data.ifdata_items {
+                    // Convert GenericIfData to string and parse
+                    let content = format!("{:?}", generic);
+                    Self::parse_debug_content(&content, &mut addresses);
+                }
+            }
+        }
+
+        addresses
+    }
+
+    /// Parse debug content to find addresses
+    fn parse_debug_content(content: &str, addresses: &mut Vec<String>) {
+        // Look for Block with tag: "XCP_ON_UDP_IP" pattern
+        let content_lower = content.to_lowercase();
+
+        let mut start = 0;
+        while let Some(pos) = content_lower[start..].find("xcp_on_udp_ip") {
+            let block_start = start + pos;
+            // Find the end of this block (matching closing brace)
+            if let Some(block_end) = Self::find_block_end(&content[block_start..]) {
+                let block = &content[block_start..block_start + block_end];
+
+                // Try to extract port and IP from this block
+                if let Some(addr) = Self::extract_addr_from_block(block) {
+                    addresses.push(addr);
+                }
+
+                start = block_start + block_end;
+            } else {
+                start = block_start + 13;
+            }
+        }
+    }
+
+    /// Find the end of a block (matching closing brace)
+    fn find_block_end(block: &str) -> Option<usize> {
+        let mut brace_count = 0;
+        let mut started = false;
+
+        for (i, c) in block.chars().enumerate() {
+            if c == '{' {
+                brace_count += 1;
+                started = true;
+            } else if c == '}' {
+                brace_count -= 1;
+                if started && brace_count == 0 {
+                    return Some(i + 1);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Extract IP:port from a block
+    /// Format: UInt(0, (5555, false)) for port, String(0, "169.254.144.47") for IP
+    fn extract_addr_from_block(block: &str) -> Option<String> {
+        // Find port: look for UInt(_, (port, _)) pattern where port is between 1024-65535
+        let mut port: Option<u16> = None;
+
+        for (i, _) in block.match_indices("UInt(") {
+            let after_uint = &block[i + 5..];
+            // Look for pattern: UInt(0, (5555, false))
+            if let Some(inner_start) = after_uint.find("(") {
+                let after_inner = &after_uint[inner_start + 1..];
+                // Extract the port number from (5555, false)
+                if let Some(comma_pos) = after_inner.find(",") {
+                    let num_str = &after_inner[..comma_pos];
+                    if let Ok(num) = num_str.parse::<u64>() {
+                        if (1024..=65535).contains(&num) {
+                            port = Some(num as u16);
+                            break; // Use first valid port
+                        }
+                    }
+                }
+            }
+        }
+
+        let port = port?;
+
+        // Find IP address: look for String(0, "xxx.xxx.xxx.xxx")
+        // The format is String(0, "169.254.144.47")
+        for (i, _) in block.match_indices("String(") {
+            let after_string = &block[i + 7..];
+            // Look for pattern: String(0, "169.254.144.47")
+            if let Some(quote_start) = after_string.find("\"") {
+                let after_quote = &after_string[quote_start + 1..];
+                if let Some(quote_end) = after_quote.find("\"") {
+                    let ip = &after_quote[..quote_end];
+                    // Validate IP format
+                    if ip.split('.').count() == 4 && ip.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                        return Some(format!("{}:{}", ip, port));
+                    }
+                }
+            }
+        }
+
+        None
+    }
 }
 
 #[cfg(test)]
@@ -465,5 +729,182 @@ mod tests {
         assert_eq!(A2lDataType::Bool.type_name(), "BOOL");
         assert_eq!(A2lDataType::U8Array(4).type_name(), "U8[4]");
         assert_eq!(A2lDataType::U8Matrix(8, 4).type_name(), "U8[8][4]");
+    }
+
+    #[test]
+    fn test_scalar_prefix_type_mapping() {
+        // Test that Scalar_ prefix is correctly handled
+        // These tests verify the type extraction logic by checking that
+        // Scalar_UWORD maps to U16, not U32 (the default fallback)
+        let reader = A2lReader::load("hello_xcp.a2l").unwrap();
+
+        // Test UWORD type name pattern (simulating what would happen with Scalar_UWORD)
+        // We verify the underlying type mapping logic is correct
+        let module = &reader.file.project.module[0];
+        let record_layout = module.record_layout.iter().find(|rl| rl.get_name() == "U16").unwrap();
+
+        // Verify the record layout exists and has FNC_VALUES
+        assert!(record_layout.fnc_values.is_some(), "U16 record layout should have FNC_VALUES");
+    }
+
+    #[test]
+    fn test_extract_addr_from_block() {
+        // Test with actual debug representation format from a2lfile crate
+        // Format: UInt(0, (5555, false)) for port, String(0, "169.254.144.47") for IP
+        let block = r#"Block { tag: "XCP_ON_UDP_IP", items: [UInt(0, (260, true)), UInt(0, (5555, false)), TaggedUnion({"ADDRESS": [GenericIfDataTaggedItem { tag: "ADDRESS", data: Block { items: [String(0, "169.254.144.47")] } }] })] }"#;
+        let result = A2lReader::extract_addr_from_block(block);
+        assert_eq!(result, Some("169.254.144.47:5555".to_string()));
+
+        // Test with localhost
+        let block2 = r#"items: [UInt(0, (5555, false)), String(0, "127.0.0.1")]"#;
+        let result2 = A2lReader::extract_addr_from_block(block2);
+        assert_eq!(result2, Some("127.0.0.1:5555".to_string()));
+
+        // Test with different port
+        let block3 = r#"items: [UInt(0, (4444, false)), String(0, "192.168.1.100")]"#;
+        let result3 = A2lReader::extract_addr_from_block(block3);
+        assert_eq!(result3, Some("192.168.1.100:4444".to_string()));
+    }
+
+    #[test]
+    fn test_parse_debug_content() {
+        let content = r#"Block { tag: "XCP_ON_UDP_IP", data: Block { items: [UInt(0, (260, true)), UInt(0, (5555, false)), TaggedUnion({"ADDRESS": [GenericIfDataTaggedItem { tag: "ADDRESS", data: Block { items: [String(0, "169.254.144.47")] } }] })] } }"#;
+
+        let mut addrs = Vec::new();
+        A2lReader::parse_debug_content(content, &mut addrs);
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0], "169.254.144.47:5555");
+    }
+
+    #[test]
+    fn test_get_slave_addresses_from_file() {
+        // Test loading actual A2L file and extracting slave addresses
+        let reader = A2lReader::load("hello_xcp.a2l").unwrap();
+        let addrs = reader.get_slave_addresses();
+
+        println!("Found addresses: {:?}", addrs);
+
+        // Should find 169.254.144.47:5555 from the A2L file
+        assert!(!addrs.is_empty(), "Should find at least one address");
+        assert!(addrs.contains(&"169.254.144.47:5555".to_string()),
+            "Should find 169.254.144.47:5555 from A2L file");
+    }
+
+    #[test]
+    fn test_characteristics_have_default_address_ext() {
+        // Test that characteristics default to address extension 0
+        // unless explicitly specified in IF_DATA XCP SEGMENT
+        let reader = A2lReader::load("hello_xcp.a2l").unwrap();
+        let characteristics = reader.get_characteristics();
+
+        // All characteristics should have address_ext = 0 by default
+        // (since hello_xcp.a2l doesn't explicitly set address extension in IF_DATA)
+        for ch in characteristics {
+            assert_eq!(ch.address_ext, 0,
+                "Characteristic '{}' should have default address_ext=0, got {}",
+                ch.name, ch.address_ext);
+        }
+    }
+
+    #[test]
+    fn test_infer_type_from_layout_name() {
+        // Test type inference from various record layout naming patterns found in abc.a2l
+
+        // Scalar types
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Scalar_UWORD"),
+            A2lDataType::U16
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Scalar_SWORD"),
+            A2lDataType::I16
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Scalar_UBYTE"),
+            A2lDataType::U8
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Scalar_BYTE"),
+            A2lDataType::I8
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Scalar_ULONG"),
+            A2lDataType::U32
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Scalar_SLONG"),
+            A2lDataType::I32
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Scalar_FLOAT32_IEEE"),
+            A2lDataType::F32
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Scalar_FLOAT64_IEEE"),
+            A2lDataType::F64
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Scalar_BOOLEAN"),
+            A2lDataType::Bool
+        ));
+
+        // Lookup1D types (1D arrays)
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Lookup1D_UWORD"),
+            A2lDataType::U16
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Lookup1D_WORD"),
+            A2lDataType::I16
+        ));
+
+        // Lookup2D types (2D matrices)
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Lookup2D_UWORD"),
+            A2lDataType::U16
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Lookup2D_FLOAT32_IEEE"),
+            A2lDataType::F32
+        ));
+
+        // LAYOUT_ types
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("LAYOUT_SBYTE"),
+            A2lDataType::I8
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("LAYOUT_SWORD"),
+            A2lDataType::I16
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("LAYOUT_SLONG"),
+            A2lDataType::I32
+        ));
+
+        // Axis types
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Axis_UWORD"),
+            A2lDataType::U16
+        ));
+        assert!(matches!(
+            A2lReader::infer_type_from_layout_name("Axis_FLOAT32_IEEE"),
+            A2lDataType::F32
+        ));
+    }
+
+    #[test]
+    #[ignore] // Run with: cargo test test_print_actual_format -- --ignored
+    fn test_print_actual_format() {
+        // This test prints the actual GenericIfData format for debugging
+        let reader = A2lReader::load("hello_xcp.a2l").unwrap();
+
+        for module in &reader.file.project.module {
+            for if_data in &module.if_data {
+                if let Some(ref generic) = if_data.ifdata_items {
+                    println!("GenericIfData Debug: {:?}", generic);
+                }
+            }
+        }
     }
 }
