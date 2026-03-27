@@ -271,10 +271,11 @@ pub struct CalibrationManager {
 }
 
 impl CalibrationManager {
-    /// Create calibration manager with hardcoded default parameters
+    /// Create calibration manager with empty parameters list
+    /// Parameters must be loaded from A2L file
     pub fn new() -> Self {
         Self {
-            params: Self::get_default_params(),
+            params: Vec::new(),
         }
     }
 
@@ -285,7 +286,7 @@ impl CalibrationManager {
 
         let params = characteristics
             .into_iter()
-            .filter_map(|ch| Self::convert_characteristic(ch))
+            .filter_map(Self::convert_characteristic)
             .collect();
 
         Ok(Self { params })
@@ -353,25 +354,6 @@ impl CalibrationManager {
         }
     }
 
-    /// Get parameters defined in hello_xcp.a2l (fallback when A2L file is not available)
-    fn get_default_params() -> Vec<CalibrationParam> {
-        vec![
-            CalibrationParam::new("my_params.counter_max", 0x80010000, 0, CalibrationType::U32)
-                .with_description("Max counter value")
-                .with_range(0.0, 1023.0),
-            CalibrationParam::new("my_params.counter_on", 0x8001002C, 0, CalibrationType::Bool)
-                .with_description("Start/stop counter"),
-            CalibrationParam::new("my_params.delay", 0x80010004, 0, CalibrationType::U32)
-                .with_description("Task delay time in us")
-                .with_unit("us")
-                .with_range(0.00001, 2.0),
-            CalibrationParam::new("my_params.array", 0x80010008, 0, CalibrationType::U8Array(4))
-                .with_description("Demo array"),
-            CalibrationParam::new("my_params.matrix", 0x8001000C, 0, CalibrationType::U8Matrix(8, 4))
-                .with_description("Demo matrix"),
-        ]
-    }
-
     /// Get all parameters
     pub fn params(&self) -> &[CalibrationParam] {
         &self.params
@@ -406,7 +388,7 @@ impl CalibrationManager {
 
         // Parse based on type
         let value = match &param.data_type {
-            CalibrationType::U8 => CalibrationValue::U8(data.get(0).copied().unwrap_or(0)),
+            CalibrationType::U8 => CalibrationValue::U8(data.first().copied().unwrap_or(0)),
             CalibrationType::U16 => {
                 CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]]))
             }
@@ -441,7 +423,7 @@ impl CalibrationManager {
                     data[4], data[5], data[6], data[7],
                 ]))
             }
-            CalibrationType::Bool => CalibrationValue::Bool(data.get(0).copied().unwrap_or(0) != 0),
+            CalibrationType::Bool => CalibrationValue::Bool(data.first().copied().unwrap_or(0) != 0),
             // Array types
             CalibrationType::U8Array(n) => {
                 CalibrationValue::U8Array(data.iter().take(*n).copied().collect())
