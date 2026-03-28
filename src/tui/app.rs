@@ -1423,7 +1423,7 @@ impl App {
 
     /// Render the application
     pub fn render(&mut self, frame: &mut Frame) {
-        let area = frame.area();
+        let area = frame.size();
 
         // Create main layout
         let chunks = Layout::default()

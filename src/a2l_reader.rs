@@ -147,7 +147,8 @@ impl A2lReader {
     /// Load and parse an A2L file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let path = path.as_ref();
-        let (file, errors) = a2lfile::load(path, None, true).map_err(|e| {
+        let mut errors = Vec::new();
+        let file = a2lfile::load(path, None, &mut errors, true).map_err(|e| {
             format!("Failed to load A2L file '{}': {:?}", path.display(), e)
         })?;
 
