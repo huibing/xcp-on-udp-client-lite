@@ -27,7 +27,7 @@ enum Mode {
     /// Run Web UI
     Web {
         /// Host address to bind to
-        #[arg(short = 'H', long, default_value = "0.0.0.0")]
+        #[arg(short = 'H', long, default_value = "localhost")]
         host: String,
         /// Port to listen on
         #[arg(short, long, default_value = "8080")]

@@ -9,6 +9,7 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 - **Calibration**: Read/write calibration parameters with multiple data types
 - **DAQ (Data Acquisition)**: Configure and run DAQ lists for measurement
 - **A2L Integration**: Support for calibration parameters defined in A2L files
+- **Web UI**: Browser-based interface for remote access (single-user)
 
 ## Supported Data Types
 
@@ -22,7 +23,7 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 ## Architecture
 
 ```
-main.rs (CLI Application)
+main.rs (Application Entry)
     │
 lib.rs → client.rs (XcpClient - Main API)
     │
@@ -36,7 +37,13 @@ lib.rs → client.rs (XcpClient - Main API)
     │
     ├── calibration.rs     # Calibration parameter management
     │
-    └── daq.rs             # DAQ management
+    ├── daq.rs             # DAQ management
+    │
+    └── web/               # Web UI Module
+        ├── server.rs      # Axum HTTP server
+        ├── auth.rs        # Session authentication
+        ├── routes.rs      # HTTP route handlers
+        └── templates.rs   # HTML templates
 ```
 
 ## Requirements
@@ -56,7 +63,7 @@ cargo build --release
 
 ## Usage
 
-### Run Interactive CLI
+### Run Interactive CLI (TUI)
 
 ```bash
 cargo run
@@ -75,6 +82,31 @@ XCP Client Menu:
 7. Stop DAQ
 8. Exit
 ```
+
+### Run Web UI
+
+```bash
+# Run with default settings (localhost:8080)
+cargo run -- web
+
+# Run with custom host and port (allow external access)
+cargo run -- web --host 0.0.0.0 --port 8080
+```
+
+The Web UI provides browser-based access with the following features:
+
+- **Dashboard**: View connection status and system overview
+- **Connect**: Connect/disconnect to XCP slaves
+- **Calibration**: Browse, read, and write calibration parameters
+- **DAQ**: Select measurements and monitor real-time data
+- **A2L**: Load A2L files for calibration and measurement definitions
+
+#### Authentication
+
+- **Username**: `admin`
+- **Password**: `admin`
+
+Note: The Web UI supports only a single concurrent user. If a user is already logged in, subsequent login attempts will be rejected until the current user logs out or the session expires (30 minutes).
 
 ### Default Configuration
 
@@ -107,46 +139,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## XCP Protocol Details
+## XCP Protocol Reference
 
-### Transport Layer Header (XCP on Ethernet)
+For detailed XCP protocol specifications, please refer to the official ASAM documentation:
 
-```
-+--------+--------+--------+--------+------------------+
-| LEN_L  | LEN_H  | CNT_L  | CNT_H  | XCP Packet...    |
-+--------+--------+--------+--------+------------------+
-   0-1      2-3      4-5      6-7         8+
-```
-
-- **LEN**: Length of XCP packet (little-endian)
-- **COUNTER**: Packet sequence counter (0-65535, wraps)
-
-### Supported Commands
-
-| Command | Code | Description |
-|---------|------|-------------|
-| CONNECT | 0xFF | Establish connection to slave |
-| DISCONNECT | 0xFE | Terminate connection |
-| GET_ID | 0xFA | Get slave identification |
-| SET_MTA | 0xF6 | Set Memory Transfer Address |
-| UPLOAD | 0xF5 | Upload data from slave |
-| SHORT_UPLOAD | 0xF4 | Upload up to 7 bytes |
-| DOWNLOAD | 0xF0 | Download data to slave |
-| SHORT_DOWNLOAD | 0xEF | Download up to 7 bytes |
-| FREE_DAQ | 0xD6 | Free DAQ lists |
-| ALLOC_DAQ | 0xD5 | Allocate DAQ list |
-| ALLOC_ODT | 0xD4 | Allocate ODT |
-| ALLOC_ODT_ENTRY | 0xD3 | Allocate ODT entry |
-| SET_DAQ_PTR | 0xE2 | Set DAQ pointer |
-| WRITE_DAQ | 0xDA | Write DAQ entry |
-| SET_DAQ_LIST_MODE | 0xDE | Set DAQ list mode |
-| START_STOP_DAQ_LIST | 0xDD | Start/stop DAQ list |
-
-### Byte Order
-
-- **A2L File**: `BYTE_ORDER MSB_LAST` (big-endian)
-- **XCP Commands**: Little-endian for addresses
-- Data conversion handled automatically
+- [ASAM MCD-1 XCP Protocol Specification](https://www.asam.net/standards/detail/mcd-1-xcp/)
 
 ## Calibration Parameters
 
@@ -179,12 +176,13 @@ Defined in `hello_xcp.a2l`:
 | csv | 1 | CSV file output for DAQ |
 | chrono | 0.4 | Timestamp handling |
 | serde | 1 | Serialization |
+| axum | 0.7 | Web framework |
+| tower-http | 0.5 | HTTP middleware |
+| clap | 4 | CLI argument parsing |
 
 ## Reference Documentation
 
-- [ASAM MCD-1 XCP Protocol Layer Specification](https://www.asam.net/standards/detail/mcd-1-xcp/)
-- `ASAM_AE_MCD-1-XCP_BS_Protocol-Layer_V1-5-0.pdf` - Protocol specification
-- `ASAM_AE_MCD-1-XCP_AS_Ethernet-Transport-Layer_V1-5-0.pdf` - Ethernet transport specification
+- [ASAM XCP Protocol Specification](https://www.asam.net/standards/detail/xcp/)
 
 ## Testing
 
