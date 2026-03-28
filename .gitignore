@@ -7,6 +7,7 @@ Cargo.lock
 .idea/
 .vscode/
 *.iml
+CLAUDE.md
 
 # OS files
 .DS_Store
