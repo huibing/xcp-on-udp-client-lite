@@ -797,6 +797,14 @@ impl DaqManager {
         self.slave_addr = addr;
     }
 
+    /// Clear the latest DAQ sample
+    pub fn clear_samples(&mut self) {
+        // Note: This is a synchronous method, so we use try_write or blocking_lock
+        if let Ok(mut guard) = self.latest_sample.try_write() {
+            *guard = None;
+        }
+    }
+
     /// Get count of all available measurements
     pub fn available_count(&self) -> usize {
         self.all_measurements.len()
