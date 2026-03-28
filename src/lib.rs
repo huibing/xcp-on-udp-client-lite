@@ -8,6 +8,7 @@ pub mod client;
 pub mod calibration;
 pub mod daq;
 pub mod a2l_reader;
+pub mod web;
 
 pub use client::XcpClient;
 pub use calibration::{CalibrationParam, CalibrationValue, CalibrationType, CalibrationManager};
