@@ -387,38 +387,71 @@ pub fn login_page(error: Option<&str>) -> String {
 
 /// Dashboard page template
 pub fn dashboard_page(
-    connected: bool,
-    slave_addr: &str,
-    a2l_path: &str,
-    cal_count: usize,
-    meas_count: usize,
+    slaves: &[(String, String, bool, usize, usize)], // (id, name, connected, cal_count, meas_count)
+    current_slave: Option<&(String, String)>,        // (id, name)
+    connected_count: usize,
+    total_cal: usize,
+    total_meas: usize,
     daq_running: bool,
 ) -> String {
-    let conn_status = if connected {
-        format!(
-            r#"<span class="tag connected">Connected</span> to {}"#,
-            escape_html(slave_addr)
-        )
-    } else {
-        r#"<span class="tag disconnected">Disconnected</span>"#.to_string()
-    };
-
     let daq_status = if daq_running {
         r#"<span class="tag running">Running</span>"#
     } else {
         r#"<span class="tag stopped">Stopped</span>"#
     };
 
+    // Build slave list
+    let slaves_html: String = if slaves.is_empty() {
+        r#"<p style="color: #666;">No slaves connected</p>"#.to_string()
+    } else {
+        slaves.iter().map(|(id, name, connected, cal_count, meas_count)| {
+            let status_class = if *connected { "connected" } else { "disconnected" };
+            let status_text = if *connected { "Connected" } else { "Disconnected" };
+            let is_current = current_slave.map_or(false, |s| s.0 == *id);
+
+            format!(
+                r#"
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: {}; margin-bottom: 0.5rem; border-radius: 4px;">
+                    <div>
+                        <strong>{}</strong> {}
+                        <span class="tag {}">{}</span>
+                        <br>
+                        <small style="color: #888;">{} cal, {} meas</small>
+                    </div>
+                    <div class="btn-group">
+                        {}
+                    </div>
+                </div>
+                "#,
+                if is_current { "#0f3460" } else { "#1a1a2e" },
+                escape_html(name),
+                if is_current { "<span style='color: #00ff88;'>(current)</span>" } else { "" },
+                status_class,
+                status_text,
+                cal_count,
+                meas_count,
+                if is_current {
+                    r#"<button class="secondary" onclick="location.href='/api/disconnect'">Disconnect</button>"#.to_string()
+                } else {
+                    format!(
+                        r#"<button onclick="location.href='/api/slave/select/{}'">Select</button>
+                           <button class="secondary" onclick="location.href='/api/disconnect/{}'">Disconnect</button>"#,
+                        id, id
+                    )
+                }
+            )
+        }).collect()
+    };
+
     let content = format!(
         r#"
         <div class="grid">
             <div class="card">
-                <h2>Connection Status</h2>
-                <p>{}</p>
+                <h2>Slaves ({})</h2>
+                {}
                 <br>
-                <div class="btn-group">
-                    {}
-                </div>
+                <button onclick="location.href='/connect'">Connect New Slave</button>
+                {}
             </div>
             <div class="card">
                 <h2>DAQ Status</h2>
@@ -429,19 +462,19 @@ pub fn dashboard_page(
                 </div>
             </div>
             <div class="card">
-                <h2>A2L File</h2>
-                <p>{}</p>
-                <br>
+                <h2>Summary</h2>
+                <p><span class="tag connected">{}</span> connected</p>
                 <p>{} calibration parameters</p>
                 <p>{} measurements</p>
             </div>
         </div>
         "#,
-        conn_status,
-        if connected {
-            r#"<button onclick="location.href='/api/disconnect'" class="danger">Disconnect</button>"#
+        slaves.len(),
+        slaves_html,
+        if slaves.len() > 1 {
+            r#"<br><button class="secondary" onclick="location.href='/slaves'">Manage Slaves</button>"#
         } else {
-            r#"<button onclick="location.href='/connect'">Connect</button>"#
+            ""
         },
         daq_status,
         if daq_running {
@@ -449,9 +482,9 @@ pub fn dashboard_page(
         } else {
             r#"<button onclick="location.href='/api/daq/start'">Start DAQ</button>"#
         },
-        escape_html(a2l_path),
-        cal_count,
-        meas_count,
+        connected_count,
+        total_cal,
+        total_meas,
     );
 
     page("Dashboard", &content, None, None)
@@ -475,6 +508,10 @@ pub fn connect_page(addresses: &[String]) -> String {
         <div class="card" style="max-width: 500px;">
             <h2>Connect to XCP Slave</h2>
             <form method="POST" action="/api/connect">
+                <div class="form-group">
+                    <label for="name">Slave Name</label>
+                    <input type="text" name="name" id="name" placeholder="ECU1" required>
+                </div>
                 <div class="form-group">
                     <label for="address">Slave Address</label>
                     <select name="address" id="address">
@@ -503,38 +540,41 @@ pub fn connect_page(addresses: &[String]) -> String {
 }
 
 /// Calibration list page template
+/// params: (slave_name, idx, param_name, type_name, address, value)
 pub fn calibration_page(
-    params: &[(usize, String, String, u32, Option<String>)],
-    selected: usize,
+    params: &[(String, usize, String, String, u32, Option<String>)],
+    _selected: usize,
 ) -> String {
     let rows: String = params
         .iter()
-        .map(|(idx, name, type_name, address, value)| {
+        .map(|(slave_name, idx, name, type_name, address, value)| {
             let value_str = value.as_ref()
                 .map(|v| format!(r#"<span class="value-display">{}</span>"#, escape_html(v)))
                 .unwrap_or_else(|| "-".to_string());
 
             format!(
                 r#"
-                <tr {}>
-                    <td>{}</td>
+                <tr>
+                    <td><span style="color: #888; font-size: 0.85em;">[{}]</span><br>{}</td>
                     <td>{}</td>
                     <td>0x{:08X}</td>
                     <td>{}</td>
                     <td>
                         <div class="btn-group">
-                            <button onclick="location.href='/api/cal/read/{}'" title="Read">R</button>
-                            <button onclick="location.href='/cal/write/{}'" title="Write">W</button>
+                            <button onclick="location.href='/api/cal/read/{}/{}'" title="Read">R</button>
+                            <button onclick="location.href='/cal/write/{}/{}'" title="Write">W</button>
                         </div>
                     </td>
                 </tr>
                 "#,
-                if *idx == selected { r#"style="background: #0f3460;""# } else { "" },
+                escape_html(slave_name),
                 escape_html(name),
                 escape_html(type_name),
                 address,
                 value_str,
+                slave_name.split(':').next().unwrap_or(slave_name), // Use slave ID prefix
                 idx,
+                slave_name.split(':').next().unwrap_or(slave_name),
                 idx
             )
         })
@@ -545,13 +585,16 @@ pub fn calibration_page(
         <div class="card">
             <h2>Calibration Parameters</h2>
             <form method="GET" action="/calibration" class="search-box">
-                <input type="text" name="search" placeholder="Search parameters..." autofocus>
+                <div style="display: flex; gap: 0.5rem;">
+                    <input type="text" name="search" placeholder="Search parameters..." autofocus style="flex: 2;">
+                    <input type="text" name="slave" placeholder="Filter by slave..." style="flex: 1;">
+                </div>
                 <button type="submit" style="margin-top: 0.5rem;">Search</button>
             </form>
             <table>
                 <thead>
                     <tr>
-                        <th>Name</th>
+                        <th>Device / Name</th>
                         <th>Type</th>
                         <th>Address</th>
                         <th>Value</th>
@@ -565,7 +608,7 @@ pub fn calibration_page(
         </div>
         "#,
         if rows.is_empty() {
-            r#"<tr><td colspan="5" style="text-align: center; color: #666;">No parameters loaded</td></tr>"#.to_string()
+            r#"<tr><td colspan="5" style="text-align: center; color: #666;">No parameters loaded. Load an A2L file first.</td></tr>"#.to_string()
         } else {
             rows
         }
@@ -575,17 +618,18 @@ pub fn calibration_page(
 }
 
 /// Calibration write page template
-pub fn cal_write_page(idx: usize, name: &str, current_value: Option<&str>) -> String {
+pub fn cal_write_page(slave_id: &str, idx: usize, name: &str, current_value: Option<&str>) -> String {
     let current = current_value.unwrap_or("Not read yet");
 
     let content = format!(
         r#"
         <div class="card" style="max-width: 500px;">
             <h2>Write Calibration Parameter</h2>
+            <p><strong>Device:</strong> {}</p>
             <p><strong>Parameter:</strong> {}</p>
             <p><strong>Current Value:</strong> {}</p>
             <br>
-            <form method="POST" action="/api/cal/write/{}">
+            <form method="POST" action="/api/cal/write/{}/{}">
                 <div class="form-group">
                     <label for="value">New Value</label>
                     <input type="text" name="value" id="value" required autofocus>
@@ -597,8 +641,10 @@ pub fn cal_write_page(idx: usize, name: &str, current_value: Option<&str>) -> St
             </form>
         </div>
         "#,
+        escape_html(slave_id),
         escape_html(name),
         escape_html(current),
+        escape_html(slave_id),
         idx
     );
 
@@ -606,29 +652,55 @@ pub fn cal_write_page(idx: usize, name: &str, current_value: Option<&str>) -> St
 }
 
 /// DAQ page template
+/// measurements: (slave_id, idx, name, is_selected)
 pub fn daq_page(
-    measurements: &[(usize, String, bool)],
+    measurements: &[(String, usize, String, bool)],
     selected_indices: &[usize],
     daq_running: bool,
     latest_values: &[(String, f64)],
+    slaves: &[(String, String, bool, usize, usize)],
+    current_slave_id: Option<&str>,
 ) -> String {
-    let meas_list: String = measurements
-        .iter()
-        .map(|(idx, name, is_selected)| {
-            format!(
-                r#"
-                <div class="daq-value">
-                    <label class="checkbox">
-                        <input type="checkbox" name="meas" value="{}" {} onchange="toggleMeas({})">
-                        <span>{}</span>
-                    </label>
-                </div>
-                "#,
-                idx,
-                if *is_selected { "checked" } else { "" },
-                idx,
-                escape_html(name)
-            )
+    // Group measurements by slave
+    let mut slave_measurements: std::collections::HashMap<&str, Vec<&(String, usize, String, bool)>> = std::collections::HashMap::new();
+    for m in measurements {
+        slave_measurements.entry(&m.0).or_default().push(m);
+    }
+
+    let meas_list: String = slave_measurements.iter()
+        .map(|(slave_id, meas)| {
+            let slave_name = slaves.iter()
+                .find(|(id, _, _, _, _)| id == *slave_id)
+                .map(|(_, name, _, _, _)| name.as_str())
+                .unwrap_or(slave_id);
+
+            let slave_section = format!(
+                r#"<div style="background: #0f3460; padding: 0.5rem; margin-bottom: 0.5rem; border-radius: 4px;">
+                    <strong style="color: #00ff88;">[{}]</strong>
+                </div>"#,
+                escape_html(slave_name)
+            );
+
+            let meas_html: String = meas.iter().map(|(slave_id, idx, name, is_selected)| {
+                format!(
+                    r#"
+                    <div class="daq-value">
+                        <label class="checkbox">
+                            <input type="checkbox" name="meas_{}_{}" {} onchange="toggleMeas('{}', {})">
+                            <span>{}</span>
+                        </label>
+                    </div>
+                    "#,
+                    escape_html(slave_id),
+                    idx,
+                    if *is_selected { "checked" } else { "" },
+                    escape_html(slave_id),
+                    idx,
+                    escape_html(name)
+                )
+            }).collect();
+
+            format!("{}{}", slave_section, meas_html)
         })
         .collect();
 
@@ -636,6 +708,19 @@ pub fn daq_page(
         latest_values
             .iter()
             .map(|(name, value)| {
+                // Parse device prefix if present
+                let display_name = if let Some(end) = name.find(']') {
+                    let device = &name[1..end];
+                    let var_name = &name[end+2..];
+                    format!(
+                        r#"<span style="color: #888; font-size: 0.85em;">[{}]</span> {}"#,
+                        escape_html(device),
+                        escape_html(var_name)
+                    )
+                } else {
+                    escape_html(name)
+                };
+
                 format!(
                     r#"
                     <div class="daq-value">
@@ -643,7 +728,7 @@ pub fn daq_page(
                         <span class="value">{:.6}</span>
                     </div>
                     "#,
-                    escape_html(name),
+                    display_name,
                     value
                 )
             })
@@ -652,11 +737,49 @@ pub fn daq_page(
         r#"<p style="color: #666; text-align: center;">No data (DAQ not running)</p>"#.to_string()
     };
 
+    // Slave selector
+    let slave_selector = if slaves.len() > 1 {
+        let options: String = slaves.iter().map(|(id, name, connected, _, _)| {
+            let status = if *connected { "●" } else { "○" };
+            let selected = current_slave_id.map_or(false, |cid| cid == id);
+            format!(
+                r#"<option value="{}" {}>{} {}</option>"#,
+                id,
+                if selected { "selected" } else { "" },
+                status,
+                escape_html(name)
+            )
+        }).collect();
+
+        format!(
+            r#"
+            <div class="form-group" style="margin-bottom: 1rem;">
+                <label>Current Slave</label>
+                <select onchange="selectSlave(this.value)">
+                    <option value="">All Slaves</option>
+                    {}
+                </select>
+            </div>
+            <script>
+                function selectSlave(id) {{
+                    if (id) {{
+                        location.href = '/api/slave/select/' + id;
+                    }}
+                }}
+            </script>
+            "#,
+            options
+        )
+    } else {
+        String::new()
+    };
+
     let content = format!(
         r#"
         <div class="grid">
             <div class="card">
                 <h2>Measurements ({})</h2>
+                {}
                 <form id="measForm" method="POST" action="/api/daq/select">
                     <div style="max-height: 400px; overflow-y: auto;">
                         {}
@@ -676,13 +799,11 @@ pub fn daq_page(
             </div>
         </div>
         <script>
-            function toggleMeas(idx) {{
-                const form = document.getElementById('measForm');
-                const formData = new FormData(form);
+            function toggleMeas(slaveId, idx) {{
                 fetch('/api/daq/toggle', {{
                     method: 'POST',
                     headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
-                    body: 'idx=' + idx
+                    body: 'slave_id=' + encodeURIComponent(slaveId) + '&idx=' + idx
                 }});
             }}
             // Auto-refresh live data every 500ms
@@ -696,8 +817,9 @@ pub fn daq_page(
         </script>
         "#,
         selected_indices.len(),
+        slave_selector,
         if meas_list.is_empty() {
-            r#"<p style="color: #666;">No measurements loaded</p>"#.to_string()
+            r#"<p style="color: #666;">No measurements loaded. Load A2L files first.</p>"#.to_string()
         } else {
             meas_list
         },
@@ -728,6 +850,10 @@ pub fn a2l_page(current_path: &str) -> String {
             <br>
             <form method="POST" action="/api/a2l/load" enctype="multipart/form-data">
                 <div class="form-group">
+                    <label for="slave_id">Target Slave (optional)</label>
+                    <input type="text" name="slave_id" id="slave_id" placeholder="Slave ID (leave empty for current)">
+                </div>
+                <div class="form-group">
                     <label for="path">Load A2L File</label>
                     <input type="text" name="path" id="path" placeholder="path/to/file.a2l" required>
                 </div>
@@ -739,6 +865,89 @@ pub fn a2l_page(current_path: &str) -> String {
     );
 
     page("A2L", &content, None, None)
+}
+
+/// Slaves management page
+pub fn slaves_page(
+    slaves: &[(String, String, bool, usize, usize)], // (id, name, connected, cal_count, meas_count)
+    current_id: Option<crate::slave::SlaveId>,
+) -> String {
+    let rows: String = slaves
+        .iter()
+        .map(|(id, name, connected, cal_count, meas_count)| {
+            let status_class = if *connected { "connected" } else { "disconnected" };
+            let status_text = if *connected { "Connected" } else { "Disconnected" };
+            let is_current = current_id.map_or(false, |cid| cid.0.to_string() == *id);
+
+            format!(
+                r#"
+                <tr>
+                    <td>
+                        {}
+                        <span class="tag {}">{}</span>
+                    </td>
+                    <td>{}</td>
+                    <td>{}</td>
+                    <td>{}</td>
+                    <td>
+                        <div class="btn-group">
+                            {}
+                            <button class="secondary" onclick="location.href='/api/disconnect/{}'">Disconnect</button>
+                        </div>
+                    </td>
+                </tr>
+                "#,
+                if is_current {
+                    format!("<strong>{}</strong> <span style='color: #00ff88;'>(current)</span>", escape_html(name))
+                } else {
+                    escape_html(name)
+                },
+                status_class,
+                status_text,
+                cal_count,
+                meas_count,
+                escape_html(&id[..8.min(id.len())]),
+                if is_current {
+                    r#"<button disabled>Selected</button>"#.to_string()
+                } else {
+                    format!(r#"<button onclick="location.href='/api/slave/select/{}'">Select</button>"#, id)
+                },
+                id
+            )
+        })
+        .collect();
+
+    let content = format!(
+        r#"
+        <div class="card">
+            <h2>Connected Slaves ({})</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Cal Params</th>
+                        <th>Measurements</th>
+                        <th>ID</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {}
+                </tbody>
+            </table>
+            <br>
+            <button onclick="location.href='/connect'">Connect New Slave</button>
+        </div>
+        "#,
+        slaves.len(),
+        if rows.is_empty() {
+            r#"<tr><td colspan="5" style="text-align: center; color: #666;">No slaves connected</td></tr>"#.to_string()
+        } else {
+            rows
+        }
+    );
+
+    page("Slaves", &content, None, None)
 }
 
 /// DAQ data partial (for AJAX updates)

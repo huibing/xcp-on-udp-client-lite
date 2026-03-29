@@ -1,15 +1,17 @@
 # XCP Client
 
-A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Master client for automotive ECU development. This client communicates with XCP slaves (ECUs) over UDP.
+A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Master client for automotive ECU development. Supports multiple slave connections with independent A2L data management.
 
 ## Features
 
+- **Multi-Slave Support**: Connect to multiple XCP slaves simultaneously
 - **Connection Management**: CONNECT, DISCONNECT, GET_ID commands
 - **Memory Access**: UPLOAD, DOWNLOAD, SHORT_UPLOAD, SHORT_DOWNLOAD
-- **Calibration**: Read/write calibration parameters with multiple data types
-- **DAQ (Data Acquisition)**: Configure and run DAQ lists for measurement
-- **A2L Integration**: Support for calibration parameters defined in A2L files
-- **Web UI**: Browser-based interface for remote access (single-user)
+- **Calibration**: Read/write calibration parameters with device association
+- **DAQ (Data Acquisition)**: Configure and run DAQ lists per slave
+- **A2L Integration**: Each slave has independent A2L calibration/measurement data
+- **Web UI**: Browser-based interface with multi-slave management
+- **Transport Abstraction**: UDP support with CAN reserved for future extension
 
 ## Supported Data Types
 
@@ -25,31 +27,35 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 ```
 main.rs (Application Entry)
     │
-lib.rs → client.rs (XcpClient - Main API)
+lib.rs → client.rs (XcpClient - Multi-Slave Manager)
     │
     ├── protocol/          # XCP Protocol Layer
     │   ├── types.rs       # Command codes, error codes, MTA, ConnectInfo
     │   ├── commands.rs    # Command builders
     │   └── responses.rs   # Response parsers
     │
-    ├── transport/         # Transport Layer
-    │   └── udp.rs         # UDP transport (XCP-on-UDP/IP)
+    ├── transport/         # Transport Abstraction Layer
+    │   ├── transport.rs   # Transport trait and factory
+    │   ├── udp.rs         # UDP transport (XCP-on-UDP/IP)
+    │   └── can.rs         # CAN transport (reserved)
     │
+    ├── slave.rs           # XcpSlave - Individual slave context
     ├── calibration.rs     # Calibration parameter management
-    │
     ├── daq.rs             # DAQ management
+    ├── variable.rs        # Device-associated variables
     │
     └── web/               # Web UI Module
         ├── server.rs      # Axum HTTP server
         ├── auth.rs        # Session authentication
         ├── routes.rs      # HTTP route handlers
+        ├── state.rs       # Multi-slave state management
         └── templates.rs   # HTML templates
 ```
 
 ## Requirements
 
 - Rust 1.70 or later
-- XCP slave (ECU simulator) running on target address
+- One or more XCP slaves (ECU simulators) running on target addresses
 
 ## Build
 
@@ -63,13 +69,76 @@ cargo build --release
 
 ## Usage
 
+### Run Web UI
+
+```bash
+# Run with default settings (localhost:8080)
+cargo run --release -- web
+
+# Run with custom host and port (allow external access)
+cargo run --release -- web --host 0.0.0.0 --port 8080
+```
+
+The Web UI provides browser-based access with the following features:
+
+- **Dashboard**: View all connected slaves and system overview
+- **Connect**: Connect to multiple XCP slaves with custom names
+- **Slaves**: Manage connected slaves (select/disconnect)
+- **Calibration**: Browse, read, and write calibration parameters with device association
+- **DAQ**: Select measurements per slave and monitor real-time data
+- **A2L**: Load A2L files for each slave independently
+
+#### Authentication
+
+- **Username**: `admin`
+- **Password**: `admin`
+
+Note: The Web UI supports only a single concurrent user. If a user is already logged in, subsequent login attempts will be rejected until the current user logs out or the session expires (30 minutes).
+
+#### Multi-Slave Workflow
+
+1. **Login**: Access http://localhost:8080/login
+   - Username: `admin`, Password: `admin`
+
+2. **Connect First Slave**:
+   - Click "Connect New Slave"
+   - Name: `ECU1`
+   - Address: `127.0.0.1:5555`
+   - Click Connect
+
+3. **Load A2L**:
+   - Navigate to `/a2l`
+   - Enter A2L file path: `hello_xcp.a2l`
+   - Click Load
+
+4. **View Calibration Variables**:
+   - Navigate to `/calibration`
+   - Variables displayed as: `[ECU1] variable_name`
+
+5. **Start DAQ**:
+   - Navigate to `/daq`
+   - Select measurements for current slave
+   - Click Start
+
+6. **Connect Additional Slaves**:
+   - Repeat steps 2-5 for each slave
+   - Each slave gets independent A2L data
+
+7. **Switch Between Slaves**:
+   - On Dashboard, click "Select" to switch current slave
+   - Or use slave selector in DAQ page
+
+8. **Disconnect Slaves**:
+   - Click "Disconnect" to disconnect specific slave
+   - Or use main Disconnect to disconnect current slave
+
 ### Run Interactive CLI (TUI)
 
 ```bash
 cargo run
 ```
 
-The CLI provides an interactive menu:
+The CLI provides an interactive menu for single-device debugging:
 
 ```
 XCP Client Menu:
@@ -83,57 +152,45 @@ XCP Client Menu:
 8. Exit
 ```
 
-### Run Web UI
-
-```bash
-# Run with default settings (localhost:8080)
-cargo run -- web
-
-# Run with custom host and port (allow external access)
-cargo run -- web --host 0.0.0.0 --port 8080
-```
-
-The Web UI provides browser-based access with the following features:
-
-- **Dashboard**: View connection status and system overview
-- **Connect**: Connect/disconnect to XCP slaves
-- **Calibration**: Browse, read, and write calibration parameters
-- **DAQ**: Select measurements and monitor real-time data
-- **A2L**: Load A2L files for calibration and measurement definitions
-
-#### Authentication
-
-- **Username**: `admin`
-- **Password**: `admin`
-
-Note: The Web UI supports only a single concurrent user. If a user is already logged in, subsequent login attempts will be rejected until the current user logs out or the session expires (30 minutes).
-
-### Default Configuration
-
-- **Slave Address**: `127.0.0.1:5555` (localhost)
-- **Timeout**: 1000ms (XCP T1 parameter)
-- **Max DTO Size**: 1496 bytes
-
 ### Library Usage
 
 ```rust
 use xcp_client::{XcpClient, CalibrationManager, DaqManager};
+use xcp_client::transport::TransportConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create and connect client
-    let mut client = XcpClient::new("127.0.0.1:5555");
-    client.connect().await?;
+    // Create multi-slave client
+    let mut client = XcpClient::new();
 
-    // Read memory
-    let data = client.read_memory(0xFFF8, 2, 4).await?;
+    // Connect first slave
+    let slave1 = client.connect_slave(
+        "ECU1",
+        TransportConfig::Udp { addr: "127.0.0.1:5555".to_string() }
+    ).await?;
+
+    // Connect second slave
+    let slave2 = client.connect_slave(
+        "ECU2",
+        TransportConfig::Udp { addr: "127.0.0.1:5556".to_string() }
+    ).await?;
+
+    // Load A2L for first slave
+    client.load_a2l_for_slave(slave1, "ecu1.a2l").await?;
+
+    // Load A2L for second slave
+    client.load_a2l_for_slave(slave2, "ecu2.a2l").await?;
+
+    // Switch to first slave and read memory
+    client.set_current_slave(slave1)?;
+    let data = client.read_memory(mta, 4).await?;
     println!("Value: {:?}", data);
 
-    // Write memory
-    client.write_memory(0x80010000, 2, &[0x01, 0x02, 0x03, 0x04]).await?;
+    // Disconnect specific slave
+    client.disconnect_slave(slave1).await?;
 
-    // Disconnect
-    client.disconnect().await?;
+    // Disconnect all
+    client.disconnect_all().await?;
 
     Ok(())
 }
@@ -147,7 +204,7 @@ For detailed XCP protocol specifications, please refer to the official ASAM docu
 
 ## Calibration Parameters
 
-Defined in `hello_xcp.a2l`:
+Example parameters from `hello_xcp.a2l`:
 
 | Parameter | Address | Extension | Type |
 |-----------|---------|-----------|------|
@@ -164,6 +221,42 @@ Defined in `hello_xcp.a2l`:
 | counter | 0xFFF8 | 2 |
 | const_data | 0xFFFC | 2 |
 
+## Web UI Multi-Slave Features
+
+### Device-Associated Variables
+
+Variables are displayed with device prefix to distinguish between slaves:
+
+```
+[ECU1] engineSpeed      1500 rpm    (F32)
+[ECU1] throttlePosition   45.2 %    (F32)
+[ECU2] batteryVoltage     12.4 V    (F32)
+[ECU2] coolantTemp        85.0 °C   (F32)
+```
+
+### Per-Slave A2L Data
+
+Each slave maintains independent:
+- Calibration parameters
+- DAQ measurement definitions
+- A2L file path reference
+
+### Dashboard Overview
+
+```
+┌─ Slaves (2) ───────────────────────────────┐
+│ ECU1 [Connected]                           │
+│   5 calibration parameters                 │
+│   8 measurements                           │
+│   [Select] [Disconnect]                    │
+├────────────────────────────────────────────┤
+│ ECU2 [Connected]                           │
+│   3 calibration parameters                 │
+│   4 measurements                           │
+│   [Select] [Disconnect]                    │
+└────────────────────────────────────────────┘
+```
+
 ## Dependencies
 
 | Crate | Version | Purpose |
@@ -179,10 +272,8 @@ Defined in `hello_xcp.a2l`:
 | axum | 0.7 | Web framework |
 | tower-http | 0.5 | HTTP middleware |
 | clap | 4 | CLI argument parsing |
-
-## Reference Documentation
-
-- [ASAM XCP Protocol Specification](https://www.asam.net/standards/detail/xcp/)
+| uuid | 1.6 | Slave ID generation |
+| async-trait | 0.1 | Transport abstraction |
 
 ## Testing
 
@@ -192,6 +283,44 @@ cargo test
 
 # Run with output
 cargo test -- --nocapture
+
+# Run specific test
+cargo test test_name -- --nocapture
+```
+
+### Test Coverage
+
+- **Transport Layer**: UDP transport, message routing
+- **Protocol Layer**: Command builders, response parsers
+- **Slave Management**: Multi-slave connection, state management
+- **Calibration**: Parameter read/write, A2L parsing
+- **DAQ**: DAQ list configuration, data acquisition
+- **Web UI**: Authentication, routes, state management
+
+## Project Structure
+
+```
+.
+├── Cargo.toml           # Project configuration
+├── README.md            # This file
+├── CLAUDE.md            # Development guide
+├── docs/                # Documentation
+│   ├── multi-slave-refactor-plan.md
+│   └── specs/
+├── src/
+│   ├── main.rs          # Application entry
+│   ├── lib.rs           # Library exports
+│   ├── client.rs        # Multi-slave XcpClient
+│   ├── slave.rs         # Individual slave context
+│   ├── calibration.rs   # Calibration management
+│   ├── daq.rs           # DAQ management
+│   ├── variable.rs      # Device-associated variables
+│   ├── a2l_reader.rs    # A2L file parsing
+│   ├── protocol/        # XCP protocol implementation
+│   ├── transport/       # Transport abstraction
+│   ├── tui/             # Terminal UI (single-device)
+│   └── web/             # Web UI (multi-device)
+└── hello_xcp.a2l        # Example A2L file
 ```
 
 ## License
@@ -201,3 +330,14 @@ This project is provided as-is for educational and development purposes.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit pull requests.
+
+## Recent Changes
+
+### Multi-Slave Support (v0.2.0)
+
+- ✅ Connect to multiple XCP slaves simultaneously
+- ✅ Each slave has independent A2L data
+- ✅ Device-associated variable display
+- ✅ Web UI multi-slave management
+- ✅ Transport abstraction layer (UDP/CAN)
+- ✅ Backward-compatible single-device API

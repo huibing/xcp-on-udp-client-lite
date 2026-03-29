@@ -9,7 +9,7 @@
 //! - PID >= 0xFC: CTO responses (ERR, EV, SERV, RES)
 //! - PID < 0xFC: DAQ packets (DTO)
 
-use crate::transport::UdpTransport;
+use crate::transport::Transport;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -223,7 +223,7 @@ impl MessageRouter {
     }
 
     /// Start the router task that receives from transport and routes messages
-    pub async fn start(&self, transport: Arc<UdpTransport>) {
+    pub async fn start(&self, transport: Arc<dyn Transport>) {
         if self.running.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
@@ -240,7 +240,7 @@ impl MessageRouter {
 
             while running.load(std::sync::atomic::Ordering::SeqCst) {
                 // Receive packet from transport
-                match transport.recv_daq_packet().await {
+                match transport.recv_packet().await {
                     Ok(packet) => {
                         tracing::debug!("Received UDP packet: {} bytes", packet.len());
                         // Parse all XCP packets from the UDP packet

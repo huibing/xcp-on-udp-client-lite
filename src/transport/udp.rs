@@ -4,6 +4,8 @@
 //! - LEN (2 bytes, little-endian): Length of XCP packet (command/response data)
 //! - PACKET_COUNTER (2 bytes, little-endian): Counter for packet sequence (0-65535, wraps)
 
+use super::transport::{Transport, TransportError, TransportType};
+use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
@@ -187,6 +189,43 @@ impl UdpTransport {
     }
 }
 
+#[async_trait]
+impl Transport for UdpTransport {
+    async fn send_command_only(&self, command: &[u8]) -> Result<(), TransportError> {
+        self.send_command_only(command).await
+    }
+
+    async fn send_command(&self, command: &[u8]) -> Result<Vec<u8>, TransportError> {
+        self.send_command(command).await
+    }
+
+    async fn recv_packet(&self) -> Result<Vec<u8>, TransportError> {
+        self.recv_daq_packet().await
+    }
+
+    async fn try_recv_packet(&self, timeout_ms: u64) -> Result<Option<Vec<u8>>, TransportError> {
+        self.try_recv_daq_packet(timeout_ms).await
+    }
+
+    async fn close(&self) -> Result<(), TransportError> {
+        // UDP is connectionless, just log the close operation
+        tracing::debug!("Closing UDP transport to {}", self.remote_addr);
+        Ok(())
+    }
+
+    fn transport_type(&self) -> TransportType {
+        TransportType::Udp
+    }
+
+    fn target_addr(&self) -> String {
+        self.remote_addr.to_string()
+    }
+
+    fn current_counter(&self) -> u16 {
+        self.current_counter()
+    }
+}
+
 /// Get human-readable command name from command code
 fn command_name(cmd_code: u8) -> &'static str {
     match cmd_code {
@@ -240,27 +279,3 @@ fn command_name(cmd_code: u8) -> &'static str {
     }
 }
 
-/// Transport errors
-#[derive(Debug, thiserror::Error)]
-pub enum TransportError {
-    #[error("Invalid address: {0}")]
-    InvalidAddress(String),
-
-    #[error("Failed to bind socket: {0}")]
-    BindFailed(String),
-
-    #[error("Failed to connect: {0}")]
-    ConnectFailed(String),
-
-    #[error("Failed to send: {0}")]
-    SendFailed(String),
-
-    #[error("Failed to receive: {0}")]
-    RecvFailed(String),
-
-    #[error("Timeout")]
-    Timeout,
-
-    #[error("Socket error: {0}")]
-    SocketError(String),
-}

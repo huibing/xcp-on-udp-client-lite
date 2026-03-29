@@ -42,7 +42,11 @@ impl WebServer {
         let listener = tokio::net::TcpListener::bind(self.addr).await?;
         tracing::info!("Web server listening on http://{}", self.addr);
 
-        axum::serve(listener, app).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -55,19 +59,27 @@ impl WebServer {
             // Protected routes
             .route("/", get(routes::dashboard))
             .route("/logout", get(routes::logout))
+            // Slave management
+            .route("/slaves", get(routes::slaves_page))
+            .route("/api/slave/select/:id", get(routes::select_slave_api))
+            .route("/api/disconnect/:id", get(routes::disconnect_slave_api))
+            // Connection
             .route("/connect", get(routes::connect_page))
             .route("/api/connect", post(routes::connect_api))
             .route("/api/disconnect", get(routes::disconnect_api))
+            // Calibration (with slave ID)
             .route("/calibration", get(routes::calibration_page))
-            .route("/api/cal/read/:idx", get(routes::cal_read))
-            .route("/cal/write/:idx", get(routes::cal_write_page))
-            .route("/api/cal/write/:idx", post(routes::cal_write_api))
+            .route("/api/cal/read/:slave_id/:idx", get(routes::cal_read))
+            .route("/cal/write/:slave_id/:idx", get(routes::cal_write_page))
+            .route("/api/cal/write/:slave_id/:idx", post(routes::cal_write_api))
+            // DAQ
             .route("/daq", get(routes::daq_page))
             .route("/api/daq/start", get(routes::daq_start))
             .route("/api/daq/stop", get(routes::daq_stop))
             .route("/api/daq/toggle", post(routes::daq_toggle))
             .route("/api/daq/clear", get(routes::daq_clear))
             .route("/api/daq/data", get(routes::daq_data))
+            // A2L
             .route("/a2l", get(routes::a2l_page))
             .route("/api/a2l/load", post(routes::a2l_load))
             // State and middleware

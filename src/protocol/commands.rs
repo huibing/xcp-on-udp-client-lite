@@ -254,3 +254,251 @@ pub fn build_checksum(block_size: u32) -> Vec<u8> {
     cmd.extend_from_slice(&block_size.to_le_bytes());
     cmd
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connect_command() {
+        let cmd = connect();
+        assert_eq!(cmd.len(), 2);
+        assert_eq!(cmd[0], CommandCode::Connect as u8);
+        assert_eq!(cmd[1], 0x00);
+    }
+
+    #[test]
+    fn test_disconnect_command() {
+        let cmd = disconnect();
+        assert_eq!(cmd.len(), 2);
+        assert_eq!(cmd[0], CommandCode::Disconnect as u8);
+        assert_eq!(cmd[1], 0x00);
+    }
+
+    #[test]
+    fn test_set_mta_command() {
+        let mta = Mta::new(0x12345678, 0x02);
+        let cmd = set_mta(mta);
+        assert_eq!(cmd.len(), 8);
+        assert_eq!(cmd[0], CommandCode::SetMta as u8);
+        assert_eq!(cmd[1], 0x00);
+        assert_eq!(cmd[2], 0x00);
+        assert_eq!(cmd[3], 0x02); // extension
+        // Address in little-endian: 0x12345678 -> [0x78, 0x56, 0x34, 0x12]
+        assert_eq!(cmd[4], 0x78);
+        assert_eq!(cmd[5], 0x56);
+        assert_eq!(cmd[6], 0x34);
+        assert_eq!(cmd[7], 0x12);
+    }
+
+    #[test]
+    fn test_upload_command() {
+        let cmd = upload(255);
+        assert_eq!(cmd.len(), 2);
+        assert_eq!(cmd[0], CommandCode::Upload as u8);
+        assert_eq!(cmd[1], 255);
+    }
+
+    #[test]
+    fn test_short_upload_command() {
+        let mta = Mta::new(0xABCDEF00, 0x00);
+        let cmd = short_upload(mta, 7);
+        assert_eq!(cmd.len(), 8);
+        assert_eq!(cmd[0], CommandCode::ShortUpload as u8);
+        assert_eq!(cmd[1], 7);
+        assert_eq!(cmd[2], 0x00);
+        assert_eq!(cmd[3], 0x00);
+        // Address in little-endian
+        assert_eq!(cmd[4], 0x00);
+        assert_eq!(cmd[5], 0xEF);
+        assert_eq!(cmd[6], 0xCD);
+        assert_eq!(cmd[7], 0xAB);
+    }
+
+    #[test]
+    fn test_download_command() {
+        let data = vec![0x01, 0x02, 0x03, 0x04];
+        let cmd = download(&data);
+        assert_eq!(cmd.len(), 6);
+        assert_eq!(cmd[0], CommandCode::Download as u8);
+        assert_eq!(cmd[1], 4);
+        assert_eq!(&cmd[2..], &data[..]);
+    }
+
+    #[test]
+    fn test_short_download_command() {
+        let mta = Mta::new(0x1000, 0x00);
+        let data = vec![0xAA, 0xBB];
+        let cmd = short_download(mta, &data);
+        assert_eq!(cmd.len(), 10);
+        assert_eq!(cmd[0], CommandCode::ShortDownload as u8);
+        assert_eq!(cmd[1], 2);
+        assert_eq!(cmd[2], 0x00);
+        assert_eq!(cmd[3], 0x00);
+        // Address: 0x1000 -> [0x00, 0x10, 0x00, 0x00] in LE
+        assert_eq!(cmd[4], 0x00);
+        assert_eq!(cmd[5], 0x10);
+        assert_eq!(cmd[6], 0x00);
+        assert_eq!(cmd[7], 0x00);
+        assert_eq!(cmd[8], 0xAA);
+        assert_eq!(cmd[9], 0xBB);
+    }
+
+    #[test]
+    fn test_get_id_command() {
+        let cmd = get_id(1);
+        assert_eq!(cmd.len(), 2);
+        assert_eq!(cmd[0], CommandCode::GetId as u8);
+        assert_eq!(cmd[1], 1);
+    }
+
+    #[test]
+    fn test_free_daq_command() {
+        let cmd = free_daq();
+        assert_eq!(cmd.len(), 1);
+        assert_eq!(cmd[0], CommandCode::FreeDaq as u8);
+    }
+
+    #[test]
+    fn test_alloc_daq_command() {
+        let cmd = alloc_daq(10);
+        assert_eq!(cmd.len(), 4);
+        assert_eq!(cmd[0], CommandCode::AllocDaq as u8);
+        assert_eq!(cmd[1], 0x00);
+        // 10 in little-endian: [0x0A, 0x00]
+        assert_eq!(cmd[2], 0x0A);
+        assert_eq!(cmd[3], 0x00);
+    }
+
+    #[test]
+    fn test_alloc_odt_command() {
+        let cmd = alloc_odt(5, 8);
+        assert_eq!(cmd.len(), 5);
+        assert_eq!(cmd[0], CommandCode::AllocOdt as u8);
+        assert_eq!(cmd[1], 0x00);
+        // DAQ list 5 in LE
+        assert_eq!(cmd[2], 0x05);
+        assert_eq!(cmd[3], 0x00);
+        assert_eq!(cmd[4], 8);
+    }
+
+    #[test]
+    fn test_alloc_odt_entry_command() {
+        let cmd = alloc_odt_entry(3, 2, 4);
+        assert_eq!(cmd.len(), 6);
+        assert_eq!(cmd[0], CommandCode::AllocOdtEntry as u8);
+        assert_eq!(cmd[1], 0x00);
+        // DAQ list 3 in LE
+        assert_eq!(cmd[2], 0x03);
+        assert_eq!(cmd[3], 0x00);
+        assert_eq!(cmd[4], 2);
+        assert_eq!(cmd[5], 4);
+    }
+
+    #[test]
+    fn test_set_daq_ptr_command() {
+        let cmd = set_daq_ptr(1, 2, 3);
+        assert_eq!(cmd.len(), 6);
+        assert_eq!(cmd[0], CommandCode::SetDaqPtr as u8);
+        assert_eq!(cmd[1], 0x00);
+        // DAQ list 1 in LE
+        assert_eq!(cmd[2], 0x01);
+        assert_eq!(cmd[3], 0x00);
+        assert_eq!(cmd[4], 2);
+        assert_eq!(cmd[5], 3);
+    }
+
+    #[test]
+    fn test_write_daq_command() {
+        let mta = Mta::new(0x2000, 0x00);
+        let cmd = write_daq(0, mta, 4);
+        assert_eq!(cmd.len(), 8);
+        assert_eq!(cmd[0], CommandCode::WriteDaq as u8);
+        assert_eq!(cmd[1], 0);
+        assert_eq!(cmd[2], 4);
+        assert_eq!(cmd[3], 0x00);
+        // Address: 0x2000 -> [0x00, 0x20, 0x00, 0x00] in LE
+        assert_eq!(cmd[4], 0x00);
+        assert_eq!(cmd[5], 0x20);
+        assert_eq!(cmd[6], 0x00);
+        assert_eq!(cmd[7], 0x00);
+    }
+
+    #[test]
+    fn test_set_daq_list_mode_command() {
+        let cmd = set_daq_list_mode(0x01, 0, 1, 1, 0);
+        assert_eq!(cmd.len(), 8);
+        assert_eq!(cmd[0], CommandCode::SetDaqListMode as u8);
+        assert_eq!(cmd[1], 0x01);
+        // DAQ list 0 in LE
+        assert_eq!(cmd[2], 0x00);
+        assert_eq!(cmd[3], 0x00);
+        // Event channel 1 in LE
+        assert_eq!(cmd[4], 0x01);
+        assert_eq!(cmd[5], 0x00);
+        assert_eq!(cmd[6], 1);
+        assert_eq!(cmd[7], 0);
+    }
+
+    #[test]
+    fn test_start_stop_daq_list_command() {
+        let cmd = start_stop_daq_list(1, 0);
+        assert_eq!(cmd.len(), 4);
+        assert_eq!(cmd[0], CommandCode::StartStopDaqList as u8);
+        assert_eq!(cmd[1], 1);
+        // DAQ list 0 in LE
+        assert_eq!(cmd[2], 0x00);
+        assert_eq!(cmd[3], 0x00);
+    }
+
+    #[test]
+    fn test_start_stop_synch_command() {
+        let cmd = start_stop_synch(1);
+        assert_eq!(cmd.len(), 2);
+        assert_eq!(cmd[0], CommandCode::StartStopSynch as u8);
+        assert_eq!(cmd[1], 1);
+    }
+
+    #[test]
+    fn test_get_daq_clock_command() {
+        let cmd = get_daq_clock();
+        assert_eq!(cmd.len(), 1);
+        assert_eq!(cmd[0], CommandCode::GetDaqClock as u8);
+    }
+
+    #[test]
+    fn test_get_daq_processor_info_command() {
+        let cmd = get_daq_processor_info();
+        assert_eq!(cmd.len(), 1);
+        assert_eq!(cmd[0], CommandCode::GetDaqProcessorInfo as u8);
+    }
+
+    #[test]
+    fn test_get_daq_resolution_info_command() {
+        let cmd = get_daq_resolution_info();
+        assert_eq!(cmd.len(), 1);
+        assert_eq!(cmd[0], CommandCode::GetDaqResolutionInfo as u8);
+    }
+
+    #[test]
+    fn test_build_checksum_command() {
+        let cmd = build_checksum(0x1000);
+        assert_eq!(cmd.len(), 6);
+        assert_eq!(cmd[0], CommandCode::BuildChecksum as u8);
+        assert_eq!(cmd[1], 0x00);
+        // Block size in little-endian
+        assert_eq!(cmd[2], 0x00);
+        assert_eq!(cmd[3], 0x10);
+        assert_eq!(cmd[4], 0x00);
+        assert_eq!(cmd[5], 0x00);
+    }
+
+    #[test]
+    fn test_download_max_command() {
+        let data = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let cmd = download_max(&data);
+        assert_eq!(cmd.len(), 9);
+        assert_eq!(cmd[0], CommandCode::DownloadMax as u8);
+        assert_eq!(&cmd[1..], &data[..]);
+    }
+}

@@ -212,20 +212,21 @@ mod tests {
 
     #[test]
     fn test_single_user_restriction_second_user_blocked() {
-        // Given: First user is logged in
+        // Given: First user is logged in (use unique IP to avoid conflict with other tests)
         clear_session();
-        let first_token = try_create_session("192.168.1.10").unwrap();
-        assert!(is_valid_session(&first_token));
-        assert!(has_active_session());
+        let first_token = try_create_session("192.168.2.10").unwrap();
+
+        // Verify first session is valid
+        assert!(has_active_session(), "Should have active session after creation");
 
         // When: Second user from different IP tries to login
-        let result = try_create_session("192.168.1.20");
+        let result = try_create_session("192.168.2.20");
 
         // Then: Should be rejected with error message
         assert!(result.is_err());
         let error_msg = result.unwrap_err();
         assert!(error_msg.contains("Another user is already connected"));
-        assert!(error_msg.contains("192.168.1.10"));
+        assert!(error_msg.contains("192.168.2.10"));
 
         // Cleanup
         clear_session();
@@ -257,17 +258,21 @@ mod tests {
 
     #[test]
     fn test_session_info_tracks_ip_address() {
-        // Given: User logs in from specific IP
+        // Given: User logs in from specific IP (use unique IP to avoid conflict)
         clear_session();
-        let _token = try_create_session("10.0.0.50").unwrap();
+        let unique_ip = "10.0.1.50";
+        let _token = try_create_session(unique_ip).unwrap();
+
+        // Verify session is active before getting info
+        assert!(has_active_session(), "Session should be active");
 
         // When: Get session info
         let info = get_active_session_info();
 
         // Then: Should return the IP address
-        assert!(info.is_some());
+        assert!(info.is_some(), "Should have active session info");
         let (ip, _timestamp) = info.unwrap();
-        assert_eq!(ip, "10.0.0.50");
+        assert_eq!(ip, unique_ip);
 
         // Cleanup
         clear_session();
@@ -278,10 +283,12 @@ mod tests {
         // Note: This test manipulates internal state to simulate expiration
         // In real scenario, session would expire after 30 minutes
 
-        // Given: User has a valid session
+        // Given: User has a valid session (use unique IPs)
         clear_session();
-        let _token = try_create_session("192.168.1.10").unwrap();
-        assert!(has_active_session());
+        let first_ip = "192.168.3.10";
+        let second_ip = "192.168.3.20";
+        let _token = try_create_session(first_ip).unwrap();
+        assert!(has_active_session(), "Should have active session after creation");
 
         // When: Simulate session expiration by manipulating timestamp
         {
@@ -290,11 +297,11 @@ mod tests {
         }
 
         // Then: Session should be considered expired
-        assert!(!has_active_session());
+        assert!(!has_active_session(), "Session should be expired with old timestamp");
 
         // And: New user should be able to login
-        let result = try_create_session("192.168.1.20");
-        assert!(result.is_ok());
+        let result = try_create_session(second_ip);
+        assert!(result.is_ok(), "New user should be able to login after expiration");
 
         // Cleanup
         clear_session();

@@ -465,6 +465,7 @@ pub struct DtoData {
 }
 
 /// DAQ Manager - implements Dynamic DAQ
+#[derive(Clone)]
 pub struct DaqManager {
     /// All available measurement definitions (from A2L)
     all_measurements: Vec<Measurement>,

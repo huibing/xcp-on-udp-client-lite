@@ -266,6 +266,7 @@ impl CalibrationParam {
 }
 
 /// Calibration manager
+#[derive(Clone)]
 pub struct CalibrationManager {
     params: Vec<CalibrationParam>,
 }
@@ -1214,5 +1215,210 @@ impl CalibrationManager {
 impl Default for CalibrationManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calibration_type_size() {
+        // Scalar types
+        assert_eq!(CalibrationType::U8.size(), 1);
+        assert_eq!(CalibrationType::I8.size(), 1);
+        assert_eq!(CalibrationType::Bool.size(), 1);
+        assert_eq!(CalibrationType::U16.size(), 2);
+        assert_eq!(CalibrationType::I16.size(), 2);
+        assert_eq!(CalibrationType::U32.size(), 4);
+        assert_eq!(CalibrationType::I32.size(), 4);
+        assert_eq!(CalibrationType::F32.size(), 4);
+        assert_eq!(CalibrationType::U64.size(), 8);
+        assert_eq!(CalibrationType::I64.size(), 8);
+        assert_eq!(CalibrationType::F64.size(), 8);
+    }
+
+    #[test]
+    fn test_calibration_type_array_size() {
+        assert_eq!(CalibrationType::U8Array(10).size(), 10);
+        assert_eq!(CalibrationType::U16Array(10).size(), 20);
+        assert_eq!(CalibrationType::U32Array(10).size(), 40);
+        assert_eq!(CalibrationType::U64Array(10).size(), 80);
+        assert_eq!(CalibrationType::F32Array(5).size(), 20);
+        assert_eq!(CalibrationType::F64Array(5).size(), 40);
+    }
+
+    #[test]
+    fn test_calibration_type_matrix_size() {
+        assert_eq!(CalibrationType::U8Matrix(3, 4).size(), 12);
+        assert_eq!(CalibrationType::U16Matrix(3, 4).size(), 24);
+        assert_eq!(CalibrationType::U32Matrix(3, 4).size(), 48);
+        assert_eq!(CalibrationType::F32Matrix(2, 2).size(), 16);
+    }
+
+    #[test]
+    fn test_calibration_type_name() {
+        assert_eq!(CalibrationType::U8.type_name(), "U8");
+        assert_eq!(CalibrationType::U32.type_name(), "U32");
+        assert_eq!(CalibrationType::F32.type_name(), "F32");
+        assert_eq!(CalibrationType::Bool.type_name(), "BOOL");
+        assert_eq!(CalibrationType::U8Array(10).type_name(), "U8[10]");
+        assert_eq!(CalibrationType::F32Array(5).type_name(), "F32[5]");
+        assert_eq!(CalibrationType::U16Matrix(3, 4).type_name(), "U16[3][4]");
+    }
+
+    #[test]
+    fn test_calibration_value_format_scalar() {
+        assert_eq!(CalibrationValue::U8(42).format(), "42");
+        assert_eq!(CalibrationValue::U32(12345).format(), "12345");
+        assert_eq!(CalibrationValue::I32(-100).format(), "-100");
+        assert_eq!(CalibrationValue::F32(3.14159).format(), "3.141590");
+        assert_eq!(CalibrationValue::F64(2.71828).format(), "2.718280");
+        assert_eq!(CalibrationValue::Bool(true).format(), "true");
+        assert_eq!(CalibrationValue::Bool(false).format(), "false");
+    }
+
+    #[test]
+    fn test_calibration_value_format_array() {
+        let arr = CalibrationValue::U8Array(vec![1, 2, 3, 4]);
+        assert_eq!(arr.format(), "[1, 2, 3, 4]");
+
+        let arr = CalibrationValue::U32Array(vec![100, 200, 300]);
+        assert_eq!(arr.format(), "[100, 200, 300]");
+    }
+
+    #[test]
+    fn test_calibration_param_creation() {
+        let param = CalibrationParam::new("test_param", 0x1000, 0x00, CalibrationType::U32);
+        assert_eq!(param.name, "test_param");
+        assert_eq!(param.address, 0x1000);
+        assert_eq!(param.address_ext, 0x00);
+        assert_eq!(param.data_type.size(), 4);
+        assert_eq!(param.description, "");
+        assert!(param.unit.is_none());
+        assert!(param.min.is_none());
+        assert!(param.max.is_none());
+    }
+
+    #[test]
+    fn test_calibration_param_builder() {
+        let param = CalibrationParam::new("test", 0x1000, 0x00, CalibrationType::F32)
+            .with_description("Test parameter")
+            .with_unit("Nm")
+            .with_range(0.0, 100.0);
+
+        assert_eq!(param.description, "Test parameter");
+        assert_eq!(param.unit, Some("Nm".to_string()));
+        assert_eq!(param.min, Some(0.0));
+        assert_eq!(param.max, Some(100.0));
+    }
+
+    #[test]
+    fn test_calibration_param_mta() {
+        let param = CalibrationParam::new("test", 0x12345678, 0x02, CalibrationType::U32);
+        let mta = param.mta();
+        assert_eq!(mta.address, 0x12345678);
+        assert_eq!(mta.extension, 0x02);
+    }
+
+    #[test]
+    fn test_calibration_manager_new() {
+        let manager = CalibrationManager::new();
+        assert_eq!(manager.params().len(), 0);
+    }
+
+    #[test]
+    fn test_calibration_manager_add_and_get() {
+        let mut manager = CalibrationManager::new();
+        let param1 = CalibrationParam::new("param1", 0x1000, 0x00, CalibrationType::U32);
+        let param2 = CalibrationParam::new("param2", 0x2000, 0x00, CalibrationType::F64);
+
+        manager.add_param(param1);
+        manager.add_param(param2);
+
+        assert_eq!(manager.params().len(), 2);
+
+        let p1 = manager.get_param("param1");
+        assert!(p1.is_some());
+        assert_eq!(p1.unwrap().address, 0x1000);
+
+        let p2 = manager.get_param("param2");
+        assert!(p2.is_some());
+        assert_eq!(p2.unwrap().data_type.size(), 8);
+
+        let p3 = manager.get_param("nonexistent");
+        assert!(p3.is_none());
+    }
+
+    #[test]
+    fn test_calibration_manager_clear() {
+        let mut manager = CalibrationManager::new();
+        let param = CalibrationParam::new("test", 0x1000, 0x00, CalibrationType::U32);
+        manager.add_param(param);
+
+        assert_eq!(manager.params().len(), 1);
+        manager.clear_params();
+        assert_eq!(manager.params().len(), 0);
+    }
+
+    #[test]
+    fn test_parse_value_scalar() {
+        let manager = CalibrationManager::new();
+
+        let param_u8 = CalibrationParam::new("u8_test", 0x1000, 0x00, CalibrationType::U8);
+        assert_eq!(manager.parse_value(&param_u8, "255").unwrap().format(), "255");
+        assert!(manager.parse_value(&param_u8, "256").is_err()); // overflow
+
+        let param_u32 = CalibrationParam::new("u32_test", 0x1000, 0x00, CalibrationType::U32);
+        assert_eq!(manager.parse_value(&param_u32, "12345").unwrap().format(), "12345");
+
+        let param_i32 = CalibrationParam::new("i32_test", 0x1000, 0x00, CalibrationType::I32);
+        assert_eq!(manager.parse_value(&param_i32, "-100").unwrap().format(), "-100");
+
+        let param_f32 = CalibrationParam::new("f32_test", 0x1000, 0x00, CalibrationType::F32);
+        assert_eq!(manager.parse_value(&param_f32, "3.14").unwrap().format(), "3.140000");
+
+        let param_bool = CalibrationParam::new("bool_test", 0x1000, 0x00, CalibrationType::Bool);
+        assert_eq!(manager.parse_value(&param_bool, "true").unwrap().format(), "true");
+        assert_eq!(manager.parse_value(&param_bool, "false").unwrap().format(), "false");
+    }
+
+    #[test]
+    fn test_parse_value_array() {
+        let manager = CalibrationManager::new();
+
+        let param = CalibrationParam::new("arr_test", 0x1000, 0x00, CalibrationType::U32Array(3));
+        let value = manager.parse_value(&param, "1, 2, 3").unwrap();
+        match value {
+            CalibrationValue::U32Array(arr) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], 1);
+                assert_eq!(arr[1], 2);
+                assert_eq!(arr[2], 3);
+            }
+            _ => panic!("Expected U32Array"),
+        }
+
+        // Wrong count should fail
+        assert!(manager.parse_value(&param, "1, 2").is_err());
+    }
+
+    #[test]
+    fn test_parse_value_matrix() {
+        let manager = CalibrationManager::new();
+
+        let param = CalibrationParam::new("mat_test", 0x1000, 0x00, CalibrationType::U16Matrix(2, 3));
+        let value = manager.parse_value(&param, "1, 2, 3, 4, 5, 6").unwrap();
+        match value {
+            CalibrationValue::U16Matrix(mat) => {
+                assert_eq!(mat.len(), 2);
+                assert_eq!(mat[0], vec![1, 2, 3]);
+                assert_eq!(mat[1], vec![4, 5, 6]);
+            }
+            _ => panic!("Expected U16Matrix"),
+        }
+
+        // Wrong count should fail
+        assert!(manager.parse_value(&param, "1, 2, 3").is_err());
     }
 }

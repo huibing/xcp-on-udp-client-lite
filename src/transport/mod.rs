@@ -1,7 +1,13 @@
 //! XCP Transport Layer
 
-mod udp;
+mod can;
 mod message_router;
+mod transport;
+mod udp;
 
-pub use udp::{UdpTransport, TransportError};
-pub use message_router::{MessageRouter, XcpMessage, PacketType};
+pub use can::CanTransport;
+pub use message_router::{MessageRouter, PacketType, XcpMessage};
+pub use transport::{
+    Transport, TransportConfig, TransportError, TransportFactory, TransportType,
+};
+pub use udp::UdpTransport;

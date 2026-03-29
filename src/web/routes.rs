@@ -1,6 +1,7 @@
 //! HTTP Routes
 //!
 //! All route handlers for the web interface.
+//! Multi-slave support: routes now handle multiple XCP slave connections.
 
 use axum::{
     extract::{Form, Path, Query, State},
@@ -10,11 +11,11 @@ use axum::{
 use std::collections::HashMap;
 
 use crate::calibration::{CalibrationManager, CalibrationValue};
-use crate::daq::DaqManager;
+use crate::slave::{SlaveId, SlaveInfo};
+use crate::transport::TransportConfig;
 use crate::web::auth::{clear_session, try_create_session, verify_credentials};
-use crate::web::state::AppState;
+use crate::web::state::{AppState, SlaveState};
 use crate::web::templates;
-use crate::XcpClient;
 
 /// Login page (GET /login)
 pub async fn login_page(Query(params): Query<HashMap<String, String>>) -> Html<String> {
@@ -65,23 +66,51 @@ pub async fn logout() -> impl IntoResponse {
 
 /// Dashboard page (GET /)
 pub async fn dashboard(State(state): State<AppState>) -> Html<String> {
-    let connected = *state.connected.read().await;
-    let slave_addr = state.slave_addr.read().await.clone();
-    let a2l_path = state.a2l_path.read().await.clone();
-    let daq_running = *state.daq_running.read().await;
+    let slaves = state.all_slaves().await;
+    let current_slave = state.current_slave().await;
+    let connected_count = state.connected_count().await;
+    let total_cal = state.total_cal_count().await;
+    let total_meas = state.total_meas_count().await;
 
-    let cal_count = state.cal_manager.read().await.params().len();
-    let meas_count = state.daq_manager.read().await.available_count();
+    // Check if any DAQ is running
+    let mut daq_running = false;
+    for slave in &slaves {
+        if *slave.daq_running.read().await {
+            daq_running = true;
+            break;
+        }
+    }
+
+    // Convert SlaveState to tuple format for template
+    let mut slaves_data: Vec<(String, String, bool, usize, usize)> = Vec::new();
+    for s in &slaves {
+        let cal_count = s.cal_manager.read().await.params().len();
+        let meas_count = s.daq_manager.read().await.available_count();
+        slaves_data.push((
+            s.id.to_string(),
+            s.display_name(),
+            s.is_connected(),
+            cal_count,
+            meas_count,
+        ));
+    }
+
+    // Convert current slave to tuple format
+    let current_data: Option<(String, String)> = if let Some(ref cs) = current_slave {
+        Some((cs.id.to_string(), cs.display_name()))
+    } else {
+        None
+    };
 
     let status = state.take_status().await;
     let error = state.take_error().await;
 
     let content = templates::dashboard_page(
-        connected,
-        &slave_addr,
-        &a2l_path,
-        cal_count,
-        meas_count,
+        &slaves_data,
+        current_data.as_ref(),
+        connected_count,
+        total_cal,
+        total_meas,
         daq_running,
     );
 
@@ -90,15 +119,23 @@ pub async fn dashboard(State(state): State<AppState>) -> Html<String> {
 
 /// Connect page (GET /connect)
 pub async fn connect_page(State(state): State<AppState>) -> Html<String> {
-    let daq_manager = state.daq_manager.read().await;
-    let slave_addrs: Vec<String> = daq_manager
-        .all_measurements()
+    // Get unique addresses from all loaded A2L files
+    let slaves = state.all_slaves().await;
+    let mut slave_addrs: Vec<String> = slaves
         .iter()
-        .filter_map(|m| {
-            // Get unique addresses from measurements
-            Some(format!("{}:5555", m.address))
+        .filter_map(|s| {
+            if s.is_connected() {
+                Some(s.info.addr_string())
+            } else {
+                None
+            }
         })
         .collect();
+
+    // Add default addresses
+    slave_addrs.push("127.0.0.1:5555".to_string());
+    slave_addrs.push("192.168.1.100:5555".to_string());
+    slave_addrs.dedup();
 
     Html(templates::connect_page(&slave_addrs))
 }
@@ -115,18 +152,40 @@ pub async fn connect_api(
         .cloned()
         .unwrap_or_else(|| "127.0.0.1:5555".to_string());
 
-    let mut client = state.client.write().await;
+    let slave_name = form
+        .get("name")
+        .cloned()
+        .unwrap_or_else(|| format!("Slave {}", address));
 
-    match client.connect(&address).await {
-        Ok(info) => {
-            *state.connected.write().await = true;
-            *state.slave_addr.write().await = address;
-            state
-                .set_status(format!(
-                    "Connected (max CTO={}, max DTO={})",
-                    info.max_cto, info.max_dto
-                ))
-                .await;
+    let mut client = state.client.lock().await;
+
+    let transport_config = TransportConfig::Udp { addr: address.clone() };
+
+    match client.connect_slave(&slave_name, transport_config).await {
+        Ok(slave_id) => {
+            // Get the slave info from the connected slave
+            if let Some(xcp_slave) = client.get_slave(slave_id) {
+                let xcp_slave_guard = xcp_slave.lock().await;
+                let info = xcp_slave_guard.info.clone();
+                let connect_info = xcp_slave_guard.info.connect_info.clone();
+                drop(xcp_slave_guard);
+
+                // Create slave state
+                let slave_state = SlaveState::new(slave_id, info);
+                state.add_slave_state(slave_state).await;
+                state.set_current_slave(Some(slave_id)).await;
+
+                if let Some(ref ci) = connect_info {
+                    state
+                        .set_status(format!(
+                            "Connected to {} (max CTO={}, max DTO={})",
+                            slave_name, ci.max_cto, ci.max_dto
+                        ))
+                        .await;
+                } else {
+                    state.set_status(format!("Connected to {}", slave_name)).await;
+                }
+            }
         }
         Err(e) => {
             state.set_error(format!("Connection failed: {}", e)).await;
@@ -137,17 +196,104 @@ pub async fn connect_api(
 }
 
 /// Disconnect API (GET /api/disconnect)
+/// Disconnects current slave
 pub async fn disconnect_api(State(state): State<AppState>) -> impl IntoResponse {
-    let mut client = state.client.write().await;
+    let current_id = *state.current_slave_id.read().await;
 
-    if let Err(e) = client.disconnect().await {
-        state.set_error(format!("Disconnect error: {}", e)).await;
+    if let Some(id) = current_id {
+        let mut client = state.client.lock().await;
+
+        if let Err(e) = client.disconnect_slave(id).await {
+            state.set_error(format!("Disconnect error: {}", e)).await;
+        } else {
+            state.remove_slave_state(id).await;
+
+            // Select another slave if available
+            let remaining = state.all_slaves().await;
+            if remaining.is_empty() {
+                state.set_current_slave(None).await;
+                state.set_status("All slaves disconnected".to_string()).await;
+            } else {
+                state.set_current_slave(Some(remaining[0].id)).await;
+                state.set_status(format!("Disconnected, now using {}", remaining[0].display_name())).await;
+            }
+        }
     } else {
-        *state.connected.write().await = false;
-        state.set_status("Disconnected".to_string()).await;
+        state.set_error("No slave selected".to_string()).await;
     }
 
     Redirect::to("/")
+}
+
+/// Disconnect specific slave API (GET /api/disconnect/:id)
+pub async fn disconnect_slave_api(
+    State(state): State<AppState>,
+    Path(id_str): Path<String>,
+) -> impl IntoResponse {
+    if let Ok(id) = uuid::Uuid::parse_str(&id_str) {
+        let slave_id = SlaveId(id);
+        let mut client = state.client.lock().await;
+
+        if let Err(e) = client.disconnect_slave(slave_id).await {
+            state.set_error(format!("Disconnect error: {}", e)).await;
+        } else {
+            state.remove_slave_state(slave_id).await;
+            state.set_status("Slave disconnected".to_string()).await;
+        }
+    } else {
+        state.set_error("Invalid slave ID".to_string()).await;
+    }
+
+    Redirect::to("/")
+}
+
+/// Select slave API (GET /api/slave/select/:id)
+pub async fn select_slave_api(
+    State(state): State<AppState>,
+    Path(id_str): Path<String>,
+) -> impl IntoResponse {
+    if let Ok(id) = uuid::Uuid::parse_str(&id_str) {
+        let slave_id = SlaveId(id);
+        if state.get_slave(slave_id).await.is_some() {
+            state.set_current_slave(Some(slave_id)).await;
+            if let Some(slave) = state.get_slave(slave_id).await {
+                state.set_status(format!("Selected: {}", slave.display_name())).await;
+            }
+        } else {
+            state.set_error("Slave not found".to_string()).await;
+        }
+    } else {
+        state.set_error("Invalid slave ID".to_string()).await;
+    }
+
+    Redirect::to("/")
+}
+
+/// Slaves list page (GET /slaves)
+pub async fn slaves_page(State(state): State<AppState>) -> Html<String> {
+    let slaves = state.all_slaves().await;
+    let current_id = *state.current_slave_id.read().await;
+
+    let status = state.take_status().await;
+    let error = state.take_error().await;
+
+    // Convert SlaveState to tuple format for template
+    let mut slaves_data = Vec::new();
+    for s in &slaves {
+        let cal_count = s.cal_manager.read().await.params().len();
+        let meas_count = s.daq_manager.read().await.available_count();
+        slaves_data.push((
+            s.id.to_string(),
+            s.display_name(),
+            s.is_connected(),
+            cal_count,
+            meas_count,
+        ));
+    }
+
+    let content = templates::slaves_page(&slaves_data, current_id);
+
+    Html(templates::page("Slaves", &content, status.as_deref(), error.as_deref()))
 }
 
 /// Calibration page (GET /calibration)
@@ -156,82 +302,206 @@ pub async fn calibration_page(
     Query(params): Query<HashMap<String, String>>,
 ) -> Html<String> {
     let search = params.get("search").cloned().unwrap_or_default();
-    let cal_manager = state.cal_manager.read().await;
-    let cal_values = state.cal_values.read().await;
+    let slave_filter = params.get("slave").cloned();
 
-    let params: Vec<_> = cal_manager
-        .params()
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| {
-            if search.is_empty() {
-                true
-            } else {
-                p.name.to_lowercase().contains(&search.to_lowercase())
+    let current_slave = state.current_slave().await;
+
+    let mut all_params: Vec<(String, usize, String, String, u32, Option<String>)> = Vec::new();
+
+    if let Some(slave) = current_slave {
+        // Show calibration for current slave
+        let cal_manager = slave.cal_manager.read().await;
+        let cal_values = slave.cal_values.read().await;
+
+        for (i, p) in cal_manager.params().iter().enumerate() {
+            if search.is_empty() || p.name.to_lowercase().contains(&search.to_lowercase()) {
+                let value = cal_values.get(&p.name).map(|v| v.format());
+                all_params.push((
+                    slave.display_name(),
+                    i,
+                    p.name.clone(),
+                    p.data_type.type_name(),
+                    p.address,
+                    value,
+                ));
             }
-        })
-        .map(|(i, p)| {
-            let value = cal_values.get(&p.name).map(|v| v.format());
-            (
-                i,
-                p.name.clone(),
-                p.data_type.type_name(),
-                p.address,
-                value,
-            )
-        })
-        .collect();
+        }
+    } else {
+        // Show calibration from all slaves
+        let slaves = state.all_slaves().await;
+        for slave in slaves {
+            let cal_manager = slave.cal_manager.read().await;
+            let cal_values = slave.cal_values.read().await;
 
-    Html(templates::calibration_page(&params, 0))
+            for (i, p) in cal_manager.params().iter().enumerate() {
+                let matches_search = search.is_empty()
+                    || p.name.to_lowercase().contains(&search.to_lowercase());
+                let matches_slave = slave_filter.as_ref().map_or(true, |s| {
+                    slave.display_name().to_lowercase().contains(&s.to_lowercase())
+                });
+
+                if matches_search && matches_slave {
+                    let value = cal_values.get(&p.name).map(|v| v.format());
+                    all_params.push((
+                        slave.display_name(),
+                        i,
+                        p.name.clone(),
+                        p.data_type.type_name(),
+                        p.address,
+                        value,
+                    ));
+                }
+            }
+        }
+    }
+
+    Html(templates::calibration_page(&all_params, 0))
 }
 
-/// Read calibration parameter (GET /api/cal/read/:idx)
+/// Read calibration parameter (GET /api/cal/read/:slave_id/:idx)
 pub async fn cal_read(
     State(state): State<AppState>,
-    Path(idx): Path<usize>,
+    Path((slave_id_str, idx)): Path<(String, usize)>,
 ) -> impl IntoResponse {
-    let connected = *state.connected.read().await;
+    let slave_id = match uuid::Uuid::parse_str(&slave_id_str) {
+        Ok(id) => SlaveId(id),
+        Err(_) => {
+            state.set_error("Invalid slave ID".to_string()).await;
+            return Redirect::to("/calibration");
+        }
+    };
 
-    if !connected {
+    let Some(slave) = state.get_slave(slave_id).await else {
+        state.set_error("Slave not found".to_string()).await;
+        return Redirect::to("/calibration");
+    };
+
+    if !slave.is_connected() {
         state.set_error("Not connected to XCP slave".to_string()).await;
         return Redirect::to("/calibration");
     }
 
-    let cal_manager = state.cal_manager.read().await;
-    let params = cal_manager.params().to_vec();
+    let client = state.client.lock().await;
+    let cal_manager = slave.cal_manager.read().await;
 
-    if let Some(param) = params.get(idx) {
-        let client = state.client.read().await;
+    if let Some(param) = cal_manager.params().get(idx) {
         let param = param.clone();
+        drop(cal_manager); // Release lock before async operation
 
-        match CalibrationManager::new().read_value(&client, &param).await {
-            Ok(value) => {
-                let value_str = value.format();
-                state.cal_values.write().await.insert(param.name.clone(), value);
-                state.set_status(format!("{} = {}", param.name, value_str)).await;
+        // Get the XcpSlave handle for this slave
+        if let Some(xcp_slave) = client.get_slave(slave_id) {
+            // Read using the slave's built-in methods
+            let result = {
+                let xcp_slave_guard = xcp_slave.lock().await;
+                read_calibration_from_slave(&xcp_slave_guard, &param).await
+            };
+
+            match result {
+                Ok(value) => {
+                    let value_str = value.format();
+                    slave.cal_values.write().await.insert(param.name.clone(), value);
+                    state.set_status(format!("[{}] {} = {}", slave.display_name(), param.name, value_str)).await;
+                }
+                Err(e) => {
+                    state
+                        .set_error(format!("Failed to read {}: {}", param.name, e))
+                        .await;
+                }
             }
-            Err(e) => {
-                state
-                    .set_error(format!("Failed to read {}: {}", param.name, e))
-                    .await;
-            }
+        } else {
+            state.set_error("Slave not available".to_string()).await;
         }
     }
 
     Redirect::to("/calibration")
 }
 
-/// Write calibration page (GET /cal/write/:idx)
+/// Helper function to read calibration from a slave
+async fn read_calibration_from_slave(
+    slave: &crate::slave::XcpSlave,
+    param: &crate::calibration::CalibrationParam,
+) -> Result<CalibrationValue, String> {
+    use crate::calibration::{CalibrationType, CalibrationValue};
+    use crate::protocol::Mta;
+
+    let mta = Mta::new(param.address, param.address_ext);
+    let size = param.data_type.size();
+
+    // Read data from slave
+    let data = if size <= 255 {
+        slave.read_memory(mta, size as u8).await.map_err(|e| e.to_string())?
+    } else {
+        slave.read_u8_array(mta, size).await.map_err(|e| e.to_string())?
+    };
+
+    // Parse based on type
+    let value = match &param.data_type {
+        CalibrationType::U8 => CalibrationValue::U8(data.first().copied().unwrap_or(0)),
+        CalibrationType::U16 => {
+            CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]]))
+        }
+        CalibrationType::U32 => {
+            CalibrationValue::U32(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+        }
+        CalibrationType::U64 => {
+            CalibrationValue::U64(u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
+        }
+        CalibrationType::I8 => CalibrationValue::I8(data.first().copied().unwrap_or(0) as i8),
+        CalibrationType::I16 => {
+            CalibrationValue::I16(i16::from_le_bytes([data[0], data[1]]))
+        }
+        CalibrationType::I32 => {
+            CalibrationValue::I32(i32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+        }
+        CalibrationType::I64 => {
+            CalibrationValue::I64(i64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
+        }
+        CalibrationType::F32 => {
+            CalibrationValue::F32(f32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+        }
+        CalibrationType::F64 => {
+            CalibrationValue::F64(f64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
+        }
+        CalibrationType::Bool => CalibrationValue::Bool(data.first().copied().unwrap_or(0) != 0),
+        _ => return Err(format!("Array/Matrix types not yet supported ({} bytes)", data.len())),
+    };
+
+    Ok(value)
+}
+
+/// Write calibration page (GET /cal/write/:slave_id/:idx)
 pub async fn cal_write_page(
     State(state): State<AppState>,
-    Path(idx): Path<usize>,
+    Path((slave_id_str, idx)): Path<(String, usize)>,
 ) -> Html<String> {
-    let cal_manager = state.cal_manager.read().await;
-    let cal_values = state.cal_values.read().await;
+    let slave_id = match uuid::Uuid::parse_str(&slave_id_str) {
+        Ok(id) => SlaveId(id),
+        Err(_) => {
+            return Html(templates::page(
+                "Error",
+                r#"<p>Invalid slave ID</p><a href="/calibration">Back</a>"#,
+                None,
+                Some("Invalid slave ID format"),
+            ));
+        }
+    };
+
+    let Some(slave) = state.get_slave(slave_id).await else {
+        return Html(templates::page(
+            "Error",
+            r#"<p>Slave not found</p><a href="/calibration">Back</a>"#,
+            None,
+            Some("Slave not found"),
+        ));
+    };
+
+    let cal_manager = slave.cal_manager.read().await;
+    let cal_values = slave.cal_values.read().await;
 
     if let Some(param) = cal_manager.params().get(idx) {
         let current = cal_values.get(&param.name).map(|v| v.format());
         Html(templates::cal_write_page(
+            &slave_id_str,
             idx,
             &param.name,
             current.as_deref(),
@@ -246,42 +516,66 @@ pub async fn cal_write_page(
     }
 }
 
-/// Write calibration API (POST /api/cal/write/:idx)
+/// Write calibration API (POST /api/cal/write/:slave_id/:idx)
 pub async fn cal_write_api(
     State(state): State<AppState>,
-    Path(idx): Path<usize>,
+    Path((slave_id_str, idx)): Path<(String, usize)>,
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let connected = *state.connected.read().await;
+    let slave_id = match uuid::Uuid::parse_str(&slave_id_str) {
+        Ok(id) => SlaveId(id),
+        Err(_) => {
+            state.set_error("Invalid slave ID".to_string()).await;
+            return Redirect::to("/calibration");
+        }
+    };
 
-    if !connected {
+    let Some(slave) = state.get_slave(slave_id).await else {
+        state.set_error("Slave not found".to_string()).await;
+        return Redirect::to("/calibration");
+    };
+
+    if !slave.is_connected() {
         state.set_error("Not connected to XCP slave".to_string()).await;
         return Redirect::to("/calibration");
     }
 
     let value_str = form.get("value").cloned().unwrap_or_default();
 
-    let cal_manager = state.cal_manager.read().await;
-    let params = cal_manager.params().to_vec();
+    let cal_manager = slave.cal_manager.read().await;
 
-    if let Some(param) = params.get(idx) {
-        let cal_manager = CalibrationManager::new();
+    if let Some(param) = cal_manager.params().get(idx) {
         let param = param.clone();
+        drop(cal_manager);
+
+        let cal_manager = CalibrationManager::new();
 
         match cal_manager.parse_value(&param, &value_str) {
             Ok(value) => {
-                let client = state.client.read().await;
-                match cal_manager.write_value(&client, &param, &value).await {
-                    Ok(_) => {
-                        state
-                            .set_status(format!("Wrote {} = {}", param.name, value_str))
-                            .await;
+                let client = state.client.lock().await;
+
+                // Get the XcpSlave handle for this slave
+                if let Some(xcp_slave) = client.get_slave(slave_id) {
+                    // Write using the slave's built-in methods
+                    let result = async {
+                        let xcp_slave_guard = xcp_slave.lock().await;
+                        write_calibration_to_slave(&xcp_slave_guard, &param, &value).await
+                    }.await;
+
+                    match result {
+                        Ok(_) => {
+                            state
+                                .set_status(format!("[{}] Wrote {} = {}", slave.display_name(), param.name, value_str))
+                                .await;
+                        }
+                        Err(e) => {
+                            state
+                                .set_error(format!("Failed to write {}: {}", param.name, e))
+                                .await;
+                        }
                     }
-                    Err(e) => {
-                        state
-                            .set_error(format!("Failed to write {}: {}", param.name, e))
-                            .await;
-                    }
+                } else {
+                    state.set_error("Slave not available".to_string()).await;
                 }
             }
             Err(e) => {
@@ -295,65 +589,166 @@ pub async fn cal_write_api(
     Redirect::to("/calibration")
 }
 
-/// DAQ page (GET /daq)
-pub async fn daq_page(State(state): State<AppState>) -> Html<String> {
-    let daq_manager = state.daq_manager.read().await;
-    let daq_running = *state.daq_running.read().await;
+/// Helper function to write calibration to a slave
+async fn write_calibration_to_slave(
+    slave: &crate::slave::XcpSlave,
+    param: &crate::calibration::CalibrationParam,
+    value: &CalibrationValue,
+) -> Result<(), String> {
+    use crate::calibration::CalibrationType;
+    use crate::protocol::Mta;
 
-    let all_meas = daq_manager.all_measurements();
-    let selected = daq_manager.selected_indices();
+    let mta = Mta::new(param.address, param.address_ext);
 
-    let measurements: Vec<_> = all_meas
-        .iter()
-        .enumerate()
-        .map(|(i, m)| (i, m.name.clone(), selected.contains(&i)))
-        .collect();
-
-    // Get latest DAQ values
-    let latest_values = if daq_running {
-        daq_manager
-            .get_latest_sample()
-            .await
-            .map(|r| {
-                r.values
-                    .into_iter()
-                    .map(|(k, v)| (k, v))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
+    // Convert value to bytes
+    let data: Vec<u8> = match (value, &param.data_type) {
+        (CalibrationValue::U8(v), CalibrationType::U8) => vec![*v],
+        (CalibrationValue::U16(v), CalibrationType::U16) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::U32(v), CalibrationType::U32) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::U64(v), CalibrationType::U64) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::I8(v), CalibrationType::I8) => vec![*v as u8],
+        (CalibrationValue::I16(v), CalibrationType::I16) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::I32(v), CalibrationType::I32) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::I64(v), CalibrationType::I64) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::F32(v), CalibrationType::F32) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::F64(v), CalibrationType::F64) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::Bool(v), CalibrationType::Bool) => vec![if *v { 1 } else { 0 }],
+        _ => return Err(format!("Value type mismatch for {:?}", param.data_type)),
     };
 
-    let selected_indices: Vec<_> = selected.iter().copied().collect();
+    // Write data using SHORT_DOWNLOAD for small writes
+    if data.len() <= 255 {
+        slave.write_memory(mta, &data).await.map_err(|e| e.to_string())
+    } else {
+        // Use set_mta + download for larger writes
+        slave.write_u8_array(mta, &data).await.map_err(|e| e.to_string())
+    }
+}
+
+/// DAQ page (GET /daq)
+pub async fn daq_page(State(state): State<AppState>) -> Html<String> {
+    let current_slave = state.current_slave().await;
+    let current_slave_id = current_slave.as_ref().map(|s| s.id.to_string());
+
+    // Use current slave's DAQ manager, or aggregate from all if no current
+    let (measurements, selected_indices, daq_running, latest_values) = if let Some(ref slave) = current_slave {
+        let daq_manager = slave.daq_manager.read().await;
+        let daq_running = *slave.daq_running.read().await;
+
+        let all_meas = daq_manager.all_measurements();
+        let selected = daq_manager.selected_indices();
+
+        let measurements: Vec<_> = all_meas
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (slave.id.to_string(), i, m.name.clone(), selected.contains(&i)))
+            .collect();
+
+        // Get latest DAQ values
+        let latest_values = if daq_running {
+            daq_manager
+                .get_latest_sample()
+                .await
+                .map(|r| {
+                    r.values
+                        .into_iter()
+                        .map(|(k, v)| (format!("[{}] {}", slave.display_name(), k), v))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let selected_indices: Vec<_> = selected.iter().copied().collect();
+
+        (measurements, selected_indices, daq_running, latest_values)
+    } else {
+        // Aggregate from all slaves
+        let slaves = state.all_slaves().await;
+        let mut all_measurements = Vec::new();
+        let mut all_selected = Vec::new();
+        let mut any_running = false;
+        let mut all_values = Vec::new();
+
+        for slave in slaves {
+            let daq_manager = slave.daq_manager.read().await;
+            let daq_running = *slave.daq_running.read().await;
+            any_running |= daq_running;
+
+            let selected = daq_manager.selected_indices();
+            let offset = all_measurements.len();
+
+            for (i, m) in daq_manager.all_measurements().iter().enumerate() {
+                all_measurements.push((slave.id.to_string(), i + offset, m.name.clone(), selected.contains(&i)));
+            }
+
+            all_selected.extend(selected.iter().map(|&i| i + offset));
+
+            if daq_running {
+                if let Some(r) = daq_manager.get_latest_sample().await {
+                    for (k, v) in r.values {
+                        all_values.push((format!("[{}] {}", slave.display_name(), k), v));
+                    }
+                }
+            }
+        }
+
+        (all_measurements, all_selected, any_running, all_values)
+    };
+
+    let slaves = state.all_slaves().await;
+
+    // Convert SlaveState to tuple format for template
+    let mut slaves_data = Vec::new();
+    for s in &slaves {
+        let cal_count = s.cal_manager.read().await.params().len();
+        let meas_count = s.daq_manager.read().await.available_count();
+        slaves_data.push((
+            s.id.to_string(),
+            s.display_name(),
+            s.is_connected(),
+            cal_count,
+            meas_count,
+        ));
+    }
 
     Html(templates::daq_page(
         &measurements,
         &selected_indices,
         daq_running,
         &latest_values,
+        &slaves_data,
+        current_slave_id.as_deref(),
     ))
 }
 
 /// DAQ start API (GET /api/daq/start)
 pub async fn daq_start(State(state): State<AppState>) -> impl IntoResponse {
-    let connected = *state.connected.read().await;
+    let current_slave = state.current_slave().await;
 
-    if !connected {
+    let Some(slave) = current_slave else {
+        state.set_error("No slave selected".to_string()).await;
+        return Redirect::to("/daq");
+    };
+
+    if !slave.is_connected() {
         state.set_error("Not connected to XCP slave".to_string()).await;
         return Redirect::to("/daq");
     }
 
-    let client = state.client.read().await;
-    let mut daq_manager = state.daq_manager.write().await;
-    let slave_addr = state.slave_addr.read().await.clone();
+    // Clone what we need before the async block
+    let slave_name = slave.display_name();
+    let slave_id = slave.id;
 
-    daq_manager.set_slave_addr(slave_addr);
+    let client = state.client.lock().await;
+    let mut daq_manager = slave.daq_manager.write().await;
 
+    // Use the client to start DAQ (DAQ manager needs XcpClient)
     match daq_manager.start(&*client, 1000).await {
         Ok(_) => {
-            *state.daq_running.write().await = true;
-            state.set_status("DAQ started".to_string()).await;
+            *slave.daq_running.write().await = true;
+            state.set_status(format!("DAQ started on {}", slave_name)).await;
         }
         Err(e) => {
             state.set_error(format!("DAQ start failed: {}", e)).await;
@@ -365,13 +760,23 @@ pub async fn daq_start(State(state): State<AppState>) -> impl IntoResponse {
 
 /// DAQ stop API (GET /api/daq/stop)
 pub async fn daq_stop(State(state): State<AppState>) -> impl IntoResponse {
-    let client = state.client.read().await;
-    let mut daq_manager = state.daq_manager.write().await;
+    let current_slave = state.current_slave().await;
+
+    let Some(slave) = current_slave else {
+        state.set_error("No slave selected".to_string()).await;
+        return Redirect::to("/daq");
+    };
+
+    // Clone what we need before the async block
+    let slave_name = slave.display_name();
+
+    let client = state.client.lock().await;
+    let mut daq_manager = slave.daq_manager.write().await;
 
     match daq_manager.stop(&*client).await {
         Ok(_) => {
-            *state.daq_running.write().await = false;
-            state.set_status("DAQ stopped".to_string()).await;
+            *slave.daq_running.write().await = false;
+            state.set_status(format!("DAQ stopped on {}", slave_name)).await;
         }
         Err(e) => {
             state.set_error(format!("DAQ stop failed: {}", e)).await;
@@ -386,15 +791,23 @@ pub async fn daq_toggle(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Some(idx_str) = form.get("idx") {
-        if let Ok(idx) = idx_str.parse::<usize>() {
-            let mut daq_manager = state.daq_manager.write().await;
-            let is_selected = daq_manager.selected_indices().contains(&idx);
+    let slave_id_str = form.get("slave_id").cloned();
+    let idx_str = form.get("idx").cloned();
 
-            if is_selected {
-                daq_manager.deselect_measurement(idx);
-            } else {
-                daq_manager.select_measurement(idx);
+    if let (Some(slave_id_str), Some(idx_str)) = (slave_id_str, idx_str) {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            if let Ok(id) = uuid::Uuid::parse_str(&slave_id_str) {
+                let slave_id = SlaveId(id);
+                if let Some(slave) = state.get_slave(slave_id).await {
+                    let mut daq_manager = slave.daq_manager.write().await;
+                    let is_selected = daq_manager.selected_indices().contains(&idx);
+
+                    if is_selected {
+                        daq_manager.deselect_measurement(idx);
+                    } else {
+                        daq_manager.select_measurement(idx);
+                    }
+                }
             }
         }
     }
@@ -404,32 +817,71 @@ pub async fn daq_toggle(
 
 /// DAQ clear data (GET /api/daq/clear)
 pub async fn daq_clear(State(state): State<AppState>) -> impl IntoResponse {
-    let mut daq_manager = state.daq_manager.write().await;
-    daq_manager.clear_samples();
+    let current_slave = state.current_slave().await;
+
+    if let Some(slave) = current_slave {
+        let mut daq_manager = slave.daq_manager.write().await;
+        daq_manager.clear_samples();
+        state.set_status(format!("DAQ data cleared for {}", slave.display_name())).await;
+    } else {
+        // Clear all slaves
+        let slaves = state.all_slaves().await;
+        for slave in slaves {
+            let mut daq_manager = slave.daq_manager.write().await;
+            daq_manager.clear_samples();
+        }
+        state.set_status("DAQ data cleared for all slaves".to_string()).await;
+    }
+
     Redirect::to("/daq")
 }
 
 /// DAQ data partial (GET /api/daq/data) - for AJAX updates
 pub async fn daq_data(State(state): State<AppState>) -> Html<String> {
-    let daq_manager = state.daq_manager.read().await;
+    let current_slave = state.current_slave().await;
 
-    let values = daq_manager
-        .get_latest_sample()
-        .await
-        .map(|r| {
-            r.values
-                .into_iter()
-                .map(|(k, v)| (k, v))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let values = if let Some(slave) = current_slave {
+        let daq_manager = slave.daq_manager.read().await;
+        daq_manager
+            .get_latest_sample()
+            .await
+            .map(|r| {
+                r.values
+                    .into_iter()
+                    .map(|(k, v)| (format!("[{}] {}", slave.display_name(), k), v))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        // Aggregate from all running slaves
+        let slaves = state.all_slaves().await;
+        let mut all_values = Vec::new();
+
+        for slave in slaves {
+            if *slave.daq_running.read().await {
+                let daq_manager = slave.daq_manager.read().await;
+                if let Some(r) = daq_manager.get_latest_sample().await {
+                    for (k, v) in r.values {
+                        all_values.push((format!("[{}] {}", slave.display_name(), k), v));
+                    }
+                }
+            }
+        }
+
+        all_values
+    };
 
     Html(templates::daq_data_partial(&values))
 }
 
 /// A2L page (GET /a2l)
 pub async fn a2l_page(State(state): State<AppState>) -> Html<String> {
-    let path = state.a2l_path.read().await.clone();
+    let current_slave = state.current_slave().await;
+    let path = if let Some(slave) = current_slave {
+        slave.a2l_path.read().await.clone()
+    } else {
+        String::new()
+    };
     Html(templates::a2l_page(&path))
 }
 
@@ -438,64 +890,106 @@ pub async fn a2l_load(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Some(path) = form.get("path") {
+    let path = form.get("path").cloned();
+    let slave_id_str = form.get("slave_id").cloned();
+
+    if let Some(path) = path {
         use crate::A2lReader;
 
-        match tokio::task::spawn_blocking({
-            let path = path.clone();
-            move || A2lReader::load(&path)
-        })
-        .await
-        {
-            Ok(Ok(reader)) => {
-                let measurements = reader.get_measurements();
-                let characteristics = reader.get_characteristics();
-                let slave_addrs = reader.get_slave_addresses();
+        // Determine which slave to load A2L for
+        let target_slave = if let Some(id_str) = slave_id_str {
+            uuid::Uuid::parse_str(&id_str).ok().map(SlaveId)
+        } else {
+            *state.current_slave_id.read().await
+        };
 
-                // Update calibration manager
-                {
-                    let mut cal_manager = state.cal_manager.write().await;
-                    cal_manager.clear_params();
-                    for ch in characteristics {
-                        if let Some(param) = convert_characteristic(ch) {
-                            cal_manager.add_param(param);
+        match target_slave {
+            Some(slave_id) => {
+                // Load for specific slave
+                let mut client = state.client.lock().await;
+
+                match client.load_a2l_for_slave(slave_id, &path).await {
+                    Ok(_) => {
+                        // Update the slave state with loaded data
+                        if let Some(xcp_slave) = client.get_slave(slave_id) {
+                            let xcp_slave_guard = xcp_slave.lock().await;
+                            let cal_count = xcp_slave_guard.cal_manager.params().len();
+                            let meas_count = xcp_slave_guard.daq_manager.lock().await.available_count();
+
+                            // Update slave state
+                            if let Some(mut slave_state) = state.get_slave(slave_id).await {
+                                *slave_state.a2l_path.write().await = path.clone();
+                                // Copy the loaded managers to slave state
+                                *slave_state.cal_manager.write().await = xcp_slave_guard.cal_manager.clone();
+                                *slave_state.daq_manager.write().await = xcp_slave_guard.daq_manager.lock().await.clone();
+                                state.add_slave_state(slave_state).await;
+                            }
+
+                            state.set_status(format!(
+                                "Loaded A2L: {} cal params, {} measurements",
+                                cal_count, meas_count
+                            )).await;
                         }
                     }
-                }
-
-                // Update DAQ manager
-                {
-                    let mut daq_manager = state.daq_manager.write().await;
-                    daq_manager.clear_measurements();
-                    for m in measurements {
-                        if let Some(meas) = convert_measurement(m) {
-                            daq_manager.add_measurement(meas);
-                        }
+                    Err(e) => {
+                        state.set_error(format!("Failed to load A2L: {}", e)).await;
                     }
                 }
-
-                *state.a2l_path.write().await = path.clone();
-
-                let addr_info = if slave_addrs.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        " Found {} slave address(es)",
-                        slave_addrs.len()
-                    )
-                };
-
-                state
-                    .set_status(format!("Loaded A2L: {}{}", path, addr_info))
-                    .await;
             }
-            Ok(Err(e)) => {
-                state
-                    .set_error(format!("Failed to load A2L: {}", e))
-                    .await;
-            }
-            Err(_) => {
-                state.set_error("A2L loading task failed".to_string()).await;
+            None => {
+                // No slave selected, load into global state for future connections
+                match tokio::task::spawn_blocking({
+                    let path = path.clone();
+                    move || A2lReader::load(&path)
+                }).await {
+                    Ok(Ok(reader)) => {
+                        let measurements = reader.get_measurements();
+                        let characteristics = reader.get_characteristics();
+                        let slave_addrs = reader.get_slave_addresses();
+
+                        // Store in current slave if available
+                        if let Some(slave) = state.current_slave().await {
+                            {
+                                let mut cal_manager = slave.cal_manager.write().await;
+                                cal_manager.clear_params();
+                                for ch in characteristics.clone() {
+                                    if let Some(param) = convert_characteristic(ch) {
+                                        cal_manager.add_param(param);
+                                    }
+                                }
+                            }
+
+                            {
+                                let mut daq_manager = slave.daq_manager.write().await;
+                                daq_manager.clear_measurements();
+                                for m in measurements.clone() {
+                                    if let Some(meas) = convert_measurement(m) {
+                                        daq_manager.add_measurement(meas);
+                                    }
+                                }
+                            }
+
+                            *slave.a2l_path.write().await = path.clone();
+                        }
+
+                        let addr_info = if slave_addrs.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" Found {} slave address(es)", slave_addrs.len())
+                        };
+
+                        state.set_status(format!(
+                            "Loaded A2L: {} ({} params, {} measurements){}",
+                            path, characteristics.len(), measurements.len(), addr_info
+                        )).await;
+                    }
+                    Ok(Err(e)) => {
+                        state.set_error(format!("Failed to load A2L: {}", e)).await;
+                    }
+                    Err(_) => {
+                        state.set_error("A2L loading task failed".to_string()).await;
+                    }
+                }
             }
         }
     }

@@ -1,5 +1,6 @@
 //! XCP Protocol Types
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// XCP Command Codes (ASAM MCD-1 XCP Protocol Layer V1.5.0)
@@ -210,7 +211,7 @@ impl Mta {
 }
 
 /// XCP Resource Flags
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ResourceFlags {
     pub cal_pgm: bool,
     pub daq: bool,
@@ -230,7 +231,7 @@ impl From<u8> for ResourceFlags {
 }
 
 /// XCP Connection Info (from CONNECT response)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConnectInfo {
     pub resource: ResourceFlags,
     pub comm_mode_basic: u8,
@@ -316,4 +317,213 @@ pub fn f64_from_le_bytes(data: &[u8]) -> f64 {
         data[0], data[1], data[2], data[3],
         data[4], data[5], data[6], data[7],
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mta_new() {
+        let mta = Mta::new(0x12345678, 0x02);
+        assert_eq!(mta.address, 0x12345678);
+        assert_eq!(mta.extension, 0x02);
+    }
+
+    #[test]
+    fn test_mta_default() {
+        let mta = Mta::default();
+        assert_eq!(mta.address, 0);
+        assert_eq!(mta.extension, 0);
+    }
+
+    #[test]
+    fn test_resource_flags_from_u8() {
+        let flags = ResourceFlags::from(0x00);
+        assert!(!flags.cal_pgm);
+        assert!(!flags.daq);
+        assert!(!flags.stim);
+        assert!(!flags.pgm);
+
+        let flags = ResourceFlags::from(0x01);
+        assert!(flags.cal_pgm);
+        assert!(!flags.daq);
+        assert!(!flags.stim);
+        assert!(!flags.pgm);
+
+        let flags = ResourceFlags::from(0x04);
+        assert!(!flags.cal_pgm);
+        assert!(flags.daq);
+        assert!(!flags.stim);
+        assert!(!flags.pgm);
+
+        let flags = ResourceFlags::from(0x08);
+        assert!(!flags.cal_pgm);
+        assert!(!flags.daq);
+        assert!(flags.stim);
+        assert!(!flags.pgm);
+
+        let flags = ResourceFlags::from(0x10);
+        assert!(!flags.cal_pgm);
+        assert!(!flags.daq);
+        assert!(!flags.stim);
+        assert!(flags.pgm);
+
+        let flags = ResourceFlags::from(0x1F);
+        assert!(flags.cal_pgm);
+        assert!(flags.daq);
+        assert!(flags.stim);
+        assert!(flags.pgm);
+    }
+
+    #[test]
+    fn test_resource_flags_default() {
+        let flags = ResourceFlags::default();
+        assert!(!flags.cal_pgm);
+        assert!(!flags.daq);
+        assert!(!flags.stim);
+        assert!(!flags.pgm);
+    }
+
+    #[test]
+    fn test_connect_info_parse_valid() {
+        // [resource, comm_mode, max_cto_l, max_cto_h, max_dto_l, max_dto_h, proto_ver, tl_ver]
+        // resource=0x11: cal_pgm=true (bit 0), daq=false (bit 2), pgm=true (bit 4)
+        let data = vec![0x11, 0x01, 0x08, 0x00, 0x10, 0x00, 0x01, 0x01];
+        let info = ConnectInfo::parse(&data).unwrap();
+        assert!(info.resource.cal_pgm);
+        assert!(!info.resource.daq);
+        assert!(info.resource.pgm);
+        assert_eq!(info.comm_mode_basic, 0x01);
+        assert_eq!(info.max_cto, 8);
+        assert_eq!(info.max_dto, 16);
+        assert_eq!(info.protocol_version, 0x01);
+    }
+
+    #[test]
+    fn test_connect_info_parse_too_short() {
+        let data = vec![0x05, 0x01, 0x08, 0x00, 0x10, 0x00];
+        assert!(ConnectInfo::parse(&data).is_none());
+    }
+
+    #[test]
+    fn test_error_code_from_u8() {
+        assert_eq!(ErrorCode::from(0x00), ErrorCode::CmdProcessorBusy);
+        assert_eq!(ErrorCode::from(0x01), ErrorCode::DaqProcessorBusy);
+        assert_eq!(ErrorCode::from(0x02), ErrorCode::InternalTimeout);
+        assert_eq!(ErrorCode::from(0x03), ErrorCode::KeyRequestSequence);
+        assert_eq!(ErrorCode::from(0x04), ErrorCode::SessionNotStarted);
+        assert_eq!(ErrorCode::from(0x20), ErrorCode::UnknownCommand);
+        assert_eq!(ErrorCode::from(0x21), ErrorCode::CommandSyntax);
+        assert_eq!(ErrorCode::from(0x22), ErrorCode::ParameterOutOfRange);
+        assert_eq!(ErrorCode::from(0x23), ErrorCode::AccessDenied);
+        assert_eq!(ErrorCode::from(0x24), ErrorCode::AccessLocked);
+        assert_eq!(ErrorCode::from(0x25), ErrorCode::PageNotValid);
+        assert_eq!(ErrorCode::from(0x26), ErrorCode::SegmentNotValid);
+        assert_eq!(ErrorCode::from(0x27), ErrorCode::MODENOTVALID);
+        assert_eq!(ErrorCode::from(0x28), ErrorCode::DaqConfig);
+        assert_eq!(ErrorCode::from(0x29), ErrorCode::MemoryOverflow);
+        assert_eq!(ErrorCode::from(0x30), ErrorCode::Verify);
+        assert_eq!(ErrorCode::from(0x31), ErrorCode::Generic);
+        assert_eq!(ErrorCode::from(0x2A), ErrorCode::DAQCONFIGERR);
+        assert_eq!(ErrorCode::from(0xFF), ErrorCode::Unknown(0xFF));
+    }
+
+    #[test]
+    fn test_error_code_display() {
+        assert_eq!(format!("{}", ErrorCode::CmdProcessorBusy), "Command processor busy");
+        assert_eq!(format!("{}", ErrorCode::UnknownCommand), "Unknown command");
+        assert_eq!(format!("{}", ErrorCode::Unknown(0xAB)), "Undefined error: 0xAB");
+    }
+
+    #[test]
+    fn test_daq_list_mode_default() {
+        let mode = DaqListMode::default();
+        assert_eq!(mode.mode, 0);
+        assert_eq!(mode.event_channel, 0);
+        assert_eq!(mode.prescaler, 0);
+        assert_eq!(mode.priority, 0);
+    }
+
+    #[test]
+    fn test_byte_order_default() {
+        let order = ByteOrder::default();
+        assert_eq!(order, ByteOrder::MsbLast);
+    }
+
+    #[test]
+    fn test_address_granularity_values() {
+        assert_eq!(AddressGranularity::Byte as u8, 1);
+        assert_eq!(AddressGranularity::Word as u8, 2);
+        assert_eq!(AddressGranularity::Dword as u8, 4);
+    }
+
+    #[test]
+    fn test_u32_from_le_bytes() {
+        let data = vec![0x78, 0x56, 0x34, 0x12];
+        assert_eq!(u32_from_le_bytes(&data), 0x12345678);
+    }
+
+    #[test]
+    fn test_u16_from_le_bytes() {
+        let data = vec![0x34, 0x12];
+        assert_eq!(u16_from_le_bytes(&data), 0x1234);
+    }
+
+    #[test]
+    fn test_u64_from_le_bytes() {
+        let data = vec![0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01];
+        assert_eq!(u64_from_le_bytes(&data), 0x0123456789ABCDEF);
+    }
+
+    #[test]
+    fn test_f32_from_le_bytes() {
+        let data = vec![0x00, 0x00, 0x80, 0x3F]; // 1.0 in IEEE 754
+        assert_eq!(f32_from_le_bytes(&data), 1.0);
+    }
+
+    #[test]
+    fn test_f64_from_le_bytes() {
+        let data = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x3F]; // 1.0 in IEEE 754
+        assert_eq!(f64_from_le_bytes(&data), 1.0);
+    }
+
+    #[test]
+    fn test_command_code_values() {
+        assert_eq!(CommandCode::Connect as u8, 0xFF);
+        assert_eq!(CommandCode::Disconnect as u8, 0xFE);
+        assert_eq!(CommandCode::GetStatus as u8, 0xFD);
+        assert_eq!(CommandCode::Synch as u8, 0xFC);
+        assert_eq!(CommandCode::GetCommModeInfo as u8, 0xFB);
+        assert_eq!(CommandCode::GetId as u8, 0xFA);
+        assert_eq!(CommandCode::SetMta as u8, 0xF6);
+        assert_eq!(CommandCode::Upload as u8, 0xF5);
+        assert_eq!(CommandCode::ShortUpload as u8, 0xF4);
+        assert_eq!(CommandCode::Download as u8, 0xF0);
+        assert_eq!(CommandCode::ShortDownload as u8, 0xED);
+        assert_eq!(CommandCode::FreeDaq as u8, 0xD6);
+        assert_eq!(CommandCode::AllocDaq as u8, 0xD5);
+        assert_eq!(CommandCode::AllocOdt as u8, 0xD4);
+        assert_eq!(CommandCode::AllocOdtEntry as u8, 0xD3);
+        assert_eq!(CommandCode::SetDaqPtr as u8, 0xE2);
+        assert_eq!(CommandCode::WriteDaq as u8, 0xE1);
+        assert_eq!(CommandCode::SetDaqListMode as u8, 0xE0);
+        assert_eq!(CommandCode::StartStopDaqList as u8, 0xDE);
+        assert_eq!(CommandCode::StartStopSynch as u8, 0xDD);
+        assert_eq!(CommandCode::GetDaqClock as u8, 0xDC);
+        assert_eq!(CommandCode::GetDaqProcessorInfo as u8, 0xDA);
+        assert_eq!(CommandCode::GetDaqResolutionInfo as u8, 0xD9);
+    }
+
+    #[test]
+    fn test_daq_entry_fields() {
+        let entry = DaqEntry {
+            address: 0x12345678,
+            address_ext: 0x02,
+            data_size: 4,
+        };
+        assert_eq!(entry.address, 0x12345678);
+        assert_eq!(entry.address_ext, 0x02);
+        assert_eq!(entry.data_size, 4);
+    }
 }

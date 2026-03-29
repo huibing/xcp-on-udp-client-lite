@@ -54,6 +54,26 @@ pub fn parse_response(data: &[u8]) -> Result<Response, String> {
             Ok(Response::Err(ErrorCode::from(err_code)))
         }
         0xFD => {
+            // EV (Event) packet - same format as DAQ
+            // PID, DAQ list number (2 bytes), ODT number (1 byte), data
+            if data.len() < payload_start + 4 {
+                return Err("EV packet too short".to_string());
+            }
+            let daq_list = u16::from_le_bytes([data[payload_start + 1], data[payload_start + 2]]);
+            let odt = data[payload_start + 3];
+            let daq_data = data[payload_start + 4..].to_vec();
+            Ok(Response::Daq {
+                daq_list,
+                odt,
+                data: daq_data,
+            })
+        }
+        0xFC => {
+            // SERV (Service Request) packet
+            Err(format!("SERV packet not implemented: 0x{:02X}", pid))
+        }
+        // DAQ packets: PID < 0xFC (0x00 - 0xFB)
+        _ if pid < 0xFC => {
             // DAQ packet: PID, DAQ list number (2 bytes), ODT number (1 byte), data
             if data.len() < payload_start + 4 {
                 return Err("DAQ packet too short".to_string());
@@ -188,4 +208,237 @@ pub fn parse_checksum(data: &[u8]) -> Result<(u8, u32), String> {
     let checksum_value = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
 
     Ok((checksum_type, checksum_value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::{ErrorCode, Response};
+
+    #[test]
+    fn test_parse_tl_header_valid() {
+        // TL header: len=10, counter=42
+        let data = vec![0x0A, 0x00, 0x2A, 0x00, 0xFF];
+        let header = parse_tl_header(&data).unwrap();
+        assert_eq!(header.length, 10);
+        assert_eq!(header.counter, 42);
+    }
+
+    #[test]
+    fn test_parse_tl_header_too_short() {
+        let data = vec![0x01, 0x02, 0x03];
+        assert!(parse_tl_header(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_tl_header_large_values() {
+        // len=65535 (max u16), counter=65535
+        let data = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+        let header = parse_tl_header(&data).unwrap();
+        assert_eq!(header.length, 65535);
+        assert_eq!(header.counter, 65535);
+    }
+
+    #[test]
+    fn test_parse_response_positive() {
+        // TL header: len=4, counter=1
+        // Payload: PID=0xFF (RES), data=[0x01, 0x02, 0x03]
+        let data = vec![0x04, 0x00, 0x01, 0x00, 0xFF, 0x01, 0x02, 0x03];
+        let response = parse_response(&data).unwrap();
+        match response {
+            Response::Res(res_data) => {
+                assert_eq!(res_data, vec![0x01, 0x02, 0x03]);
+            }
+            _ => panic!("Expected Res response"),
+        }
+    }
+
+    #[test]
+    fn test_parse_response_error() {
+        // TL header: len=2, counter=1
+        // Payload: PID=0xFE (ERR), error_code=0x21 (CommandSyntax)
+        let data = vec![0x02, 0x00, 0x01, 0x00, 0xFE, 0x21];
+        let response = parse_response(&data).unwrap();
+        match response {
+            Response::Err(err_code) => {
+                assert_eq!(err_code, ErrorCode::CommandSyntax);
+            }
+            _ => panic!("Expected Err response"),
+        }
+    }
+
+    #[test]
+    fn test_parse_response_daq() {
+        // TL header: len=6, counter=1
+        // Payload: PID=0xC0, daq_list=0x0001, odt=0x02, data=[0xAB, 0xCD]
+        let data = vec![0x06, 0x00, 0x01, 0x00, 0xC0, 0x01, 0x00, 0x02, 0xAB, 0xCD];
+        let response = parse_response(&data).unwrap();
+        match response {
+            Response::Daq { daq_list, odt, data } => {
+                assert_eq!(daq_list, 1);
+                assert_eq!(odt, 2);
+                assert_eq!(data, vec![0xAB, 0xCD]);
+            }
+            _ => panic!("Expected Daq response"),
+        }
+    }
+
+    #[test]
+    fn test_parse_response_serv_packet() {
+        // SERV packet (0xFC) should return not implemented error
+        let data = vec![0x01, 0x00, 0x01, 0x00, 0xFC];
+        let result = parse_response(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not implemented"));
+    }
+
+    #[test]
+    fn test_parse_response_too_short() {
+        // Only TL header, no payload
+        let data = vec![0x00, 0x00, 0x01, 0x00];
+        assert!(parse_response(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_response_error_too_short() {
+        // ERR response with no error code
+        let data = vec![0x01, 0x00, 0x01, 0x00, 0xFE];
+        assert!(parse_response(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_response_with_counter() {
+        // TL header: len=1, counter=12345
+        let data = vec![0x01, 0x00, 0x39, 0x30, 0xFF];
+        let (response, counter) = parse_response_with_counter(&data).unwrap();
+        assert_eq!(counter, 12345);
+        match response {
+            Response::Res(res_data) => {
+                assert!(res_data.is_empty()); // No data after PID
+            }
+            _ => panic!("Expected Res response"),
+        }
+    }
+
+    #[test]
+    fn test_parse_connect_response_valid() {
+        // Mock CONNECT response data (without TL header)
+        // [resource=0x11, comm_mode=0x00, max_cto=0x08, max_dto=0x08, proto_ver=0x01]
+        // resource=0x11: cal_pgm=true (bit 0), daq=false (bit 2), pgm=true (bit 4)
+        let data = vec![0x11, 0x00, 0x08, 0x00, 0x08, 0x00, 0x01];
+        let info = parse_connect_response(&data).unwrap();
+        assert!(info.resource.cal_pgm);
+        assert!(!info.resource.daq);
+        assert!(info.resource.pgm);
+        assert_eq!(info.comm_mode_basic, 0x00);
+        assert_eq!(info.max_cto, 8);
+        assert_eq!(info.max_dto, 8);
+        assert_eq!(info.protocol_version, 0x01);
+    }
+
+    #[test]
+    fn test_parse_connect_response_all_resources() {
+        // resource=0x1F (all resources enabled)
+        let data = vec![0x1F, 0x01, 0xFF, 0x00, 0xFF, 0x00, 0x02];
+        let info = parse_connect_response(&data).unwrap();
+        assert!(info.resource.cal_pgm);
+        assert!(info.resource.daq);
+        assert!(info.resource.stim);
+        assert!(info.resource.pgm);
+        assert_eq!(info.comm_mode_basic, 0x01);
+        assert_eq!(info.max_cto, 255);
+        assert_eq!(info.max_dto, 255);
+        assert_eq!(info.protocol_version, 0x02);
+    }
+
+    #[test]
+    fn test_parse_connect_response_too_short() {
+        let data = vec![0x05, 0x00, 0x08, 0x00];
+        assert!(parse_connect_response(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_get_id_response_valid() {
+        // GET_ID response: [mode=0, 0, 0, len_l, len_m, len_h, data...]
+        let data = vec![0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x54, 0x45, 0x53, 0x54];
+        let (length, id_string) = parse_get_id_response(&data).unwrap();
+        assert_eq!(length, 4);
+        assert_eq!(id_string, "TEST");
+    }
+
+    #[test]
+    fn test_parse_get_id_response_too_short() {
+        let data = vec![0x00, 0x00, 0x00];
+        assert!(parse_get_id_response(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_daq_processor_info_valid() {
+        // [min_daq=1, max_daq=10, properties=0x03, key_bit=0x01]
+        let data = vec![0x01, 0x00, 0x0A, 0x00, 0x03, 0x01];
+        let info = parse_daq_processor_info(&data).unwrap();
+        assert_eq!(info.min_daq, 1);
+        assert_eq!(info.max_daq, 10);
+        assert_eq!(info.properties, 0x03);
+        assert_eq!(info.key_bit, 0x01);
+    }
+
+    #[test]
+    fn test_parse_daq_processor_info_too_short() {
+        let data = vec![0x01, 0x00, 0x0A];
+        assert!(parse_daq_processor_info(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_daq_resolution_info_valid() {
+        // [gran_daq, max_daq, gran_stim, max_stim, ts_mode, ts_ticks_l, ts_ticks_h]
+        let data = vec![0x01, 0xFF, 0x01, 0xFF, 0x02, 0xE8, 0x03];
+        let info = parse_daq_resolution_info(&data).unwrap();
+        assert_eq!(info.granularity_odt_entry_size_daq, 0x01);
+        assert_eq!(info.max_odt_entry_size_daq, 0xFF);
+        assert_eq!(info.granularity_odt_entry_size_stim, 0x01);
+        assert_eq!(info.max_odt_entry_size_stim, 0xFF);
+        assert_eq!(info.timestamp_mode, 0x02);
+        assert_eq!(info.timestamp_ticks, 1000); // 0x03E8
+    }
+
+    #[test]
+    fn test_parse_daq_clock_valid() {
+        // 6-byte timestamp: 0x010203040506
+        let data = vec![0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+        let ts = parse_daq_clock(&data).unwrap();
+        assert_eq!(ts, 0x010203040506);
+    }
+
+    #[test]
+    fn test_parse_daq_clock_too_short() {
+        let data = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        assert!(parse_daq_clock(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_checksum_valid() {
+        // [type=0x01, value=0x12345678]
+        let data = vec![0x01, 0x78, 0x56, 0x34, 0x12];
+        let (checksum_type, checksum_value) = parse_checksum(&data).unwrap();
+        assert_eq!(checksum_type, 0x01);
+        assert_eq!(checksum_value, 0x12345678);
+    }
+
+    #[test]
+    fn test_parse_checksum_too_short() {
+        let data = vec![0x01, 0x78, 0x56, 0x34];
+        assert!(parse_checksum(&data).is_err());
+    }
+
+    #[test]
+    fn test_error_code_conversion() {
+        assert_eq!(ErrorCode::from(0x00), ErrorCode::CmdProcessorBusy);
+        assert_eq!(ErrorCode::from(0x20), ErrorCode::UnknownCommand);
+        assert_eq!(ErrorCode::from(0x21), ErrorCode::CommandSyntax);
+        assert_eq!(ErrorCode::from(0x22), ErrorCode::ParameterOutOfRange);
+        assert_eq!(ErrorCode::from(0x23), ErrorCode::AccessDenied);
+        assert_eq!(ErrorCode::from(0x24), ErrorCode::AccessLocked);
+        assert_eq!(ErrorCode::from(0xFF), ErrorCode::Unknown(0xFF));
+    }
 }
