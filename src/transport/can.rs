@@ -9,7 +9,7 @@
 //!
 //! For FD-CAN, the data length can be up to 64 bytes.
 
-use super::transport::{Transport, TransportConfig, TransportError, TransportType};
+use super::transport::{Transport, TransportError, TransportType};
 use async_trait::async_trait;
 
 /// CAN Transport for XCP on CAN communication
@@ -19,6 +19,7 @@ use async_trait::async_trait;
 pub struct CanTransport {
     channel: String,
     can_id: u32,
+    #[allow(dead_code)]
     connected: bool,
 }
 
@@ -100,6 +101,7 @@ impl Transport for CanTransport {
 }
 
 /// Create a CAN transport from configuration
+#[allow(dead_code)]
 pub async fn create_can_transport(
     channel: &str,
     can_id: u32,

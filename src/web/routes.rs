@@ -11,7 +11,7 @@ use axum::{
 use std::collections::HashMap;
 
 use crate::calibration::{CalibrationManager, CalibrationValue};
-use crate::slave::{SlaveId, SlaveInfo};
+use crate::slave::SlaveId;
 use crate::transport::TransportConfig;
 use crate::web::auth::{clear_session, try_create_session, verify_credentials};
 use crate::web::state::{AppState, SlaveState};
@@ -739,7 +739,6 @@ pub async fn daq_start(State(state): State<AppState>) -> impl IntoResponse {
 
     // Clone what we need before the async block
     let slave_name = slave.display_name();
-    let slave_id = slave.id;
 
     let client = state.client.lock().await;
     let mut daq_manager = slave.daq_manager.write().await;
@@ -771,7 +770,7 @@ pub async fn daq_stop(State(state): State<AppState>) -> impl IntoResponse {
     let slave_name = slave.display_name();
 
     let client = state.client.lock().await;
-    let mut daq_manager = slave.daq_manager.write().await;
+    let daq_manager = slave.daq_manager.write().await;
 
     match daq_manager.stop(&*client).await {
         Ok(_) => {
@@ -917,7 +916,7 @@ pub async fn a2l_load(
                             let meas_count = xcp_slave_guard.daq_manager.lock().await.available_count();
 
                             // Update slave state
-                            if let Some(mut slave_state) = state.get_slave(slave_id).await {
+                            if let Some(slave_state) = state.get_slave(slave_id).await {
                                 *slave_state.a2l_path.write().await = path.clone();
                                 // Copy the loaded managers to slave state
                                 *slave_state.cal_manager.write().await = xcp_slave_guard.cal_manager.clone();

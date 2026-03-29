@@ -6,8 +6,7 @@
 //! - Event system for monitoring slave state changes
 
 use crate::protocol::{
-    commands, parse_connect_response, parse_get_id_response, parse_response,
-    ConnectInfo, ErrorCode, Mta, Response,
+    commands, parse_response, ConnectInfo, ErrorCode, Mta, Response,
 };
 use crate::slave::{SlaveError, SlaveEvent, SlaveId, SlaveInfo, XcpSlave};
 use crate::transport::{TransportConfig, TransportError};
