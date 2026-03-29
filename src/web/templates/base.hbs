@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{title}} - XCP Web Client</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+        .header {
+            background: #16213e;
+            padding: 1rem 2rem;
+            border-bottom: 2px solid #0f3460;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 {
+            color: #00ff88;
+            font-size: 1.5rem;
+        }
+        .nav {
+            display: flex;
+            gap: 1rem;
+        }
+        .nav a {
+            color: #eee;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+        .nav a:hover {
+            background: #0f3460;
+        }
+        .nav a.active {
+            background: #00ff88;
+            color: #1a1a2e;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        .status {
+            padding: 1rem;
+            margin-bottom: 1rem;
+            border-radius: 4px;
+        }
+        .status.success {
+            background: #0f3d0f;
+            border: 1px solid #00ff88;
+            color: #00ff88;
+        }
+        .status.error {
+            background: #3d0f0f;
+            border: 1px solid #ff4444;
+            color: #ff4444;
+        }
+        .card {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            border: 1px solid #0f3460;
+        }
+        .card h2 {
+            color: #00ff88;
+            margin-bottom: 1rem;
+            font-size: 1.2rem;
+        }
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #aaa;
+        }
+        input[type="text"],
+        input[type="password"],
+        input[type="number"],
+        select {
+            width: 100%;
+            padding: 0.75rem;
+            background: #1a1a2e;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            color: #eee;
+            font-size: 1rem;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #00ff88;
+        }
+        button {
+            background: #00ff88;
+            color: #1a1a2e;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: bold;
+            transition: opacity 0.2s;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+        button.secondary {
+            background: #0f3460;
+            color: #eee;
+        }
+        button.danger {
+            background: #ff4444;
+            color: #fff;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .btn-group {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #0f3460;
+        }
+        th {
+            color: #00ff88;
+            font-weight: 600;
+        }
+        tr:hover {
+            background: #1a1a2e;
+        }
+        .tag {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+        .tag.connected {
+            background: #0f3d0f;
+            color: #00ff88;
+        }
+        .tag.disconnected {
+            background: #3d0f0f;
+            color: #ff4444;
+        }
+        .tag.running {
+            background: #0f3d0f;
+            color: #00ff88;
+        }
+        .tag.stopped {
+            background: #3d3d0f;
+            color: #ffaa00;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+        .login-box {
+            max-width: 400px;
+            margin: 5rem auto;
+        }
+        .login-box h2 {
+            text-align: center;
+            color: #00ff88;
+            margin-bottom: 2rem;
+        }
+        .value-display {
+            font-family: 'Courier New', monospace;
+            background: #1a1a2e;
+            padding: 0.5rem;
+            border-radius: 4px;
+            color: #00ff88;
+        }
+        .search-box {
+            margin-bottom: 1rem;
+        }
+        .checkbox {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            cursor: pointer;
+        }
+        .checkbox input {
+            width: auto;
+        }
+        .daq-value {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #0f3460;
+        }
+        .daq-value .name {
+            color: #aaa;
+        }
+        .daq-value .value {
+            color: #00ff88;
+            font-family: 'Courier New', monospace;
+        }
+        pre {
+            background: #1a1a2e;
+            padding: 1rem;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>XCP Web Client</h1>
+        <nav class="nav">
+            <a href="/" {{#if active_dashboard}}class="active"{{/if}}>Dashboard</a>
+            <a href="/calibration" {{#if active_calibration}}class="active"{{/if}}>Calibration</a>
+            <a href="/daq" {{#if active_daq}}class="active"{{/if}}>DAQ</a>
+            <a href="/a2l" {{#if active_a2l}}class="active"{{/if}}>A2L</a>
+            <a href="/logout">Logout</a>
+        </nav>
+    </div>
+    <div class="container">
+        {{#if status_message}}
+        <div class="status success">{{status_message}}</div>
+        {{/if}}
+        {{#if error_message}}
+        <div class="status error">{{error_message}}</div>
+        {{/if}}
+        {{{content}}}
+    </div>
+</body>
+</html>

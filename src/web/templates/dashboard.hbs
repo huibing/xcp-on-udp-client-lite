@@ -1,0 +1,50 @@
+<div class="grid">
+    <div class="card">
+        <h2>Slaves ({{slave_count}})</h2>
+        {{#if slaves}}
+            {{#each slaves}}
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: {{#if is_current}}#0f3460{{else}}#1a1a2e{{/if}}; margin-bottom: 0.5rem; border-radius: 4px;">
+                <div>
+                    <strong>{{name}}</strong> {{#if is_current}}<span style="color: #00ff88;">(current)</span>{{/if}}
+                    <span class="tag {{#if connected}}connected{{else}}disconnected{{/if}}">{{#if connected}}Connected{{else}}Disconnected{{/if}}</span>
+                    <br>
+                    <small style="color: #888;">{{cal_count}} cal, {{meas_count}} meas</small>
+                </div>
+                <div class="btn-group">
+                    {{#if is_current}}
+                    <button class="secondary" onclick="location.href='/api/disconnect'">Disconnect</button>
+                    {{else}}
+                    <button onclick="location.href='/api/slave/select/{{id}}'">Select</button>
+                    <button class="secondary" onclick="location.href='/api/disconnect/{{id}}'">Disconnect</button>
+                    {{/if}}
+                </div>
+            </div>
+            {{/each}}
+        {{else}}
+            <p style="color: #666;">No slaves connected</p>
+        {{/if}}
+        <br>
+        <button onclick="location.href='/connect'">Connect New Slave</button>
+        {{#if has_multiple_slaves}}
+        <br><button class="secondary" onclick="location.href='/slaves'">Manage Slaves</button>
+        {{/if}}
+    </div>
+    <div class="card">
+        <h2>DAQ Status</h2>
+        <p>{{#if daq_running}}<span class="tag running">Running</span>{{else}}<span class="tag stopped">Stopped</span>{{/if}}</p>
+        <br>
+        <div class="btn-group">
+            {{#if daq_running}}
+            <button onclick="location.href='/api/daq/stop'" class="danger">Stop DAQ</button>
+            {{else}}
+            <button onclick="location.href='/api/daq/start'">Start DAQ</button>
+            {{/if}}
+        </div>
+    </div>
+    <div class="card">
+        <h2>Summary</h2>
+        <p><span class="tag connected">{{connected_count}}</span> connected</p>
+        <p>{{total_cal}} calibration parameters</p>
+        <p>{{total_meas}} measurements</p>
+    </div>
+</div>

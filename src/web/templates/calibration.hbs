@@ -1,0 +1,41 @@
+<div class="card">
+    <h2>Calibration Parameters</h2>
+    <form method="GET" action="/calibration" class="search-box">
+        <div style="display: flex; gap: 0.5rem;">
+            <input type="text" name="search" placeholder="Search parameters..." autofocus style="flex: 2;">
+            <input type="text" name="slave" placeholder="Filter by slave..." style="flex: 1;">
+        </div>
+        <button type="submit" style="margin-top: 0.5rem;">Search</button>
+    </form>
+    <table>
+        <thead>
+            <tr>
+                <th>Device / Name</th>
+                <th>Type</th>
+                <th>Address</th>
+                <th>Value</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{#if params}}
+                {{#each params}}
+                <tr>
+                    <td><span style="color: #888; font-size: 0.85em;">[{{slave_name}}]</span><br>{{name}}</td>
+                    <td>{{type_name}}</td>
+                    <td>0x{{address_hex}}</td>
+                    <td>{{#if value}}<span class="value-display">{{value}}</span>{{else}}-{{/if}}</td>
+                    <td>
+                        <div class="btn-group">
+                            <button onclick="location.href='/api/cal/read/{{slave_id}}/{{idx}}'" title="Read">R</button>
+                            <button onclick="location.href='/cal/write/{{slave_id}}/{{idx}}'" title="Write">W</button>
+                        </div>
+                    </td>
+                </tr>
+                {{/each}}
+            {{else}}
+                <tr><td colspan="5" style="text-align: center; color: #666;">No parameters loaded. Load an A2L file first.</td></tr>
+            {{/if}}
+        </tbody>
+    </table>
+</div>

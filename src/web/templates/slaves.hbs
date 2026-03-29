@@ -1,0 +1,43 @@
+<div class="card">
+    <h2>Connected Slaves ({{slave_count}})</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Cal Params</th>
+                <th>Measurements</th>
+                <th>ID</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{#if slaves}}
+                {{#each slaves}}
+                <tr>
+                    <td>
+                        {{#if is_current}}<strong>{{name}}</strong> <span style="color: #00ff88;">(current)</span>{{else}}{{name}}{{/if}}
+                        <span class="tag {{#if connected}}connected{{else}}disconnected{{/if}}">{{#if connected}}Connected{{else}}Disconnected{{/if}}</span>
+                    </td>
+                    <td>{{cal_count}}</td>
+                    <td>{{meas_count}}</td>
+                    <td>{{short_id}}</td>
+                    <td>
+                        <div class="btn-group">
+                            {{#if is_current}}
+                            <button disabled>Selected</button>
+                            {{else}}
+                            <button onclick="location.href='/api/slave/select/{{id}}'">Select</button>
+                            {{/if}}
+                            <button class="secondary" onclick="location.href='/api/disconnect/{{id}}'">Disconnect</button>
+                        </div>
+                    </td>
+                </tr>
+                {{/each}}
+            {{else}}
+                <tr><td colspan="5" style="text-align: center; color: #666;">No slaves connected</td></tr>
+            {{/if}}
+        </tbody>
+    </table>
+    <br>
+    <button onclick="location.href='/connect'">Connect New Slave</button>
+</div>

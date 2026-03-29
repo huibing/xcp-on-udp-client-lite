@@ -321,13 +321,14 @@ impl XcpClient {
 
     /// Get DTO receiver for current slave (backward compatible)
     /// Returns None if no slave is connected
-    pub fn get_dto_receiver(&self) -> Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::transport::XcpMessage>>>> {
-        self.current_slave_id.and_then(|id| {
-            self.slaves.get(&id).map(|slave| {
-                let slave = slave.blocking_lock();
-                slave.get_dto_receiver()
-            })
-        })
+    pub async fn get_dto_receiver(&self) -> Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::transport::XcpMessage>>>> {
+        if let Some(id) = self.current_slave_id {
+            if let Some(slave) = self.get_slave(id) {
+                let slave = slave.lock().await;
+                return Some(slave.get_dto_receiver());
+            }
+        }
+        None
     }
 
     /// Get current state (backward compatible)

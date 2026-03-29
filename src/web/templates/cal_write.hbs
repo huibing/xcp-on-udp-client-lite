@@ -1,0 +1,17 @@
+<div class="card" style="max-width: 500px;">
+    <h2>Write Calibration Parameter</h2>
+    <p><strong>Device:</strong> {{slave_id}}</p>
+    <p><strong>Parameter:</strong> {{name}}</p>
+    <p><strong>Current Value:</strong> {{current_value}}</p>
+    <br>
+    <form method="POST" action="/api/cal/write/{{slave_id}}/{{idx}}">
+        <div class="form-group">
+            <label for="value">New Value</label>
+            <input type="text" name="value" id="value" required autofocus>
+        </div>
+        <div class="btn-group">
+            <button type="submit">Write</button>
+            <button type="button" class="secondary" onclick="location.href='/calibration'">Cancel</button>
+        </div>
+    </form>
+</div>

@@ -7,7 +7,8 @@
 use crate::calibration::{CalibrationManager, CalibrationValue};
 use crate::daq::DaqManager;
 use crate::slave::{SlaveId, SlaveInfo};
-use crate::variable::{VariableSearchManager, DeviceVariable};
+use crate::variable::{DeviceVariable, VariableSearchManager};
+use crate::web::templates::TemplateEngine;
 use crate::XcpClient;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -70,6 +71,16 @@ pub struct AppState {
     pub status: Arc<RwLock<Option<String>>>,
     /// Error message
     pub error: Arc<RwLock<Option<String>>>,
+    /// Template engine for rendering HTML
+    pub templates: Arc<TemplateEngine>,
+    /// Global A2L data (for offline viewing without connected slave)
+    pub global_cal_manager: Arc<RwLock<CalibrationManager>>,
+    /// Global DAQ measurements (for offline viewing)
+    pub global_daq_manager: Arc<RwLock<DaqManager>>,
+    /// Global A2L file path
+    pub global_a2l_path: Arc<RwLock<String>>,
+    /// Slave addresses from loaded A2L
+    pub a2l_slave_addresses: Arc<RwLock<Vec<String>>>,
 }
 
 impl AppState {
@@ -86,6 +97,11 @@ impl AppState {
             slave_states: Arc::new(RwLock::new(HashMap::new())),
             status: Arc::new(RwLock::new(None)),
             error: Arc::new(RwLock::new(None)),
+            templates: Arc::new(TemplateEngine::new()),
+            global_cal_manager: Arc::new(RwLock::new(CalibrationManager::new())),
+            global_daq_manager: Arc::new(RwLock::new(DaqManager::new())),
+            global_a2l_path: Arc::new(RwLock::new(String::new())),
+            a2l_slave_addresses: Arc::new(RwLock::new(Vec::new())),
         }
     }
 

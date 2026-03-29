@@ -1,0 +1,105 @@
+<div class="card" style="max-width: 600px;">
+    <h2>A2L File Management</h2>
+    {{#if current_slave}}
+    <div class="form-group" style="background: #0f3460; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem;">
+        <label style="color: #00ff88; margin-bottom: 0.25rem;">Current Slave</label>
+        <div style="font-size: 1.1em; font-weight: bold;">{{current_slave.name}}</div>
+        <div style="color: #888; font-size: 0.85em; font-family: monospace;">ID: {{current_slave.id}}</div>
+    </div>
+    {{else}}
+    <div class="form-group" style="background: #3d3d0f; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem;">
+        <label style="color: #ffaa00; margin-bottom: 0.25rem;">No Slave Connected</label>
+        <div style="font-size: 0.9em;">Load A2L file to view variables or select a slave address to connect.</div>
+    </div>
+    {{/if}}
+
+    {{#if slave_addresses}}
+    <div class="form-group" style="background: #0f3d0f; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem;">
+        <label style="color: #00ff88; margin-bottom: 0.5rem;">Slave Addresses from A2L</label>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+            {{#each slave_addresses}}
+            <button type="button" class="secondary" onclick="connectTo('{{this}}')">{{this}}</button>
+            {{/each}}
+        </div>
+    </div>
+    {{/if}}
+
+    {{#if cal_count}}
+    <div class="form-group" style="background: #0f3460; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem;">
+        <div style="display: flex; gap: 1rem; justify-content: space-around;">
+            <div><span style="color: #00ff88; font-size: 1.5em; font-weight: bold;">{{cal_count}}</span> <span style="color: #888;">Calibration Params</span></div>
+            <div><span style="color: #00ff88; font-size: 1.5em; font-weight: bold;">{{meas_count}}</span> <span style="color: #888;">Measurements</span></div>
+        </div>
+    </div>
+    {{/if}}
+
+    <p><strong>Current File:</strong></p>
+    <pre id="current-path">{{current_path}}</pre>
+    <br>
+    <form id="a2l-form" method="POST" action="/api/a2l/load" enctype="multipart/form-data">
+        <input type="hidden" name="slave_id" id="slave_id" value="{{current_slave.id}}">
+        <div class="form-group">
+            <label for="a2l_file">Load A2L File</label>
+            <input type="file" name="a2l_file" id="a2l_file" accept=".a2l" required>
+        </div>
+        <button type="submit" id="load-btn">Load</button>
+    </form>
+</div>
+
+<script>
+function connectTo(address) {
+    const name = prompt('Enter slave name:', 'Slave ' + address);
+    if (name) {
+        const formData = new FormData();
+        formData.append('name', name);
+        formData.append('address', address);
+        formData.append('custom', '');
+
+        fetch('/api/connect', {
+            method: 'POST',
+            body: new URLSearchParams(formData)
+        })
+        .then(() => {
+            window.location.reload();
+        })
+        .catch(err => {
+            alert('Connection failed: ' + err.message);
+        });
+    }
+}
+
+document.getElementById('a2l-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    const btn = document.getElementById('load-btn');
+    btn.disabled = true;
+    btn.textContent = 'Loading...';
+
+    const formData = new FormData(this);
+    const fileInput = document.getElementById('a2l_file');
+    const fileName = fileInput.files[0]?.name || 'unknown';
+
+    try {
+        const response = await fetch('/api/a2l/load', {
+            method: 'POST',
+            body: formData
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            alert('A2L file loaded successfully!\n' + result.message);
+            // Reload page to show updated state
+            window.location.reload();
+        } else {
+            alert('Failed to load A2L file:\n' + (result.error || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Error loading A2L file: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Load';
+    }
+});
+</script>
+</content>

@@ -1,0 +1,89 @@
+<div class="grid">
+    <div class="card">
+        <h2>Measurements ({{selected_count}})</h2>
+        {{#if has_slave_selector}}
+        <div class="form-group" style="margin-bottom: 1rem;">
+            <label>Current Slave</label>
+            <select onchange="selectSlave(this.value)">
+                <option value="">All Slaves</option>
+                {{#each slave_options}}
+                <option value="{{id}}" {{#if selected}}selected{{/if}}>{{status}} {{name}}</option>
+                {{/each}}
+            </select>
+        </div>
+        <script>
+            function selectSlave(id) {
+                if (id) {
+                    location.href = '/api/slave/select/' + id;
+                }
+            }
+        </script>
+        {{/if}}
+        <form id="measForm" method="POST" action="/api/daq/select">
+            <div style="max-height: 400px; overflow-y: auto;">
+                {{#if measurements_by_slave}}
+                    {{#each measurements_by_slave}}
+                    <div style="background: #0f3460; padding: 0.5rem; margin-bottom: 0.5rem; border-radius: 4px;">
+                        <strong style="color: #00ff88;">[{{slave_name}}]</strong>
+                    </div>
+                        {{#each measurements}}
+                        <div class="daq-value">
+                            <label class="checkbox">
+                                <input type="checkbox" name="meas_{{slave_id}}_{{idx}}" {{#if is_selected}}checked{{/if}} onchange="toggleMeas('{{slave_id}}', {{idx}})">
+                                <span>{{name}}</span>
+                            </label>
+                        </div>
+                        {{/each}}
+                    {{/each}}
+                {{else}}
+                    <p style="color: #666;">No measurements loaded. Load A2L files first.</p>
+                {{/if}}
+            </div>
+        </form>
+    </div>
+    <div class="card">
+        <h2>Live Data {{#if daq_running}}<span class="tag running">RUNNING</span>{{else}}<span class="tag stopped">STOPPED</span>{{/if}}</h2>
+        <div id="liveData" style="max-height: 400px; overflow-y: auto;">
+            {{#if daq_running}}
+                {{#if latest_values}}
+                    {{#each latest_values}}
+                    <div class="daq-value">
+                        <span class="name">{{#if device}}<span style="color: #888; font-size: 0.85em;">[{{device}}]</span> {{var_name}}{{else}}{{name}}{{/if}}</span>
+                        <span class="value">{{value}}</span>
+                    </div>
+                    {{/each}}
+                {{else}}
+                    <p style="color: #666; text-align: center;">No data (DAQ not running)</p>
+                {{/if}}
+            {{else}}
+                <p style="color: #666; text-align: center;">No data (DAQ not running)</p>
+            {{/if}}
+        </div>
+        <br>
+        <div class="btn-group">
+            {{#if daq_running}}
+            <button onclick="location.href='/api/daq/stop'" class="danger">Stop</button>
+            {{else}}
+            <button onclick="location.href='/api/daq/start'">Start</button>
+            {{/if}}
+            <button onclick="location.href='/api/daq/clear'" class="secondary">Clear</button>
+        </div>
+    </div>
+</div>
+<script>
+    function toggleMeas(slaveId, idx) {
+        fetch('/api/daq/toggle', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: 'slave_id=' + encodeURIComponent(slaveId) + '&idx=' + idx
+        });
+    }
+    // Auto-refresh live data every 500ms
+    setInterval(function() {
+        fetch('/api/daq/data')
+            .then(r => r.text())
+            .then(html => {
+                document.getElementById('liveData').innerHTML = html;
+            });
+    }, 500);
+</script>

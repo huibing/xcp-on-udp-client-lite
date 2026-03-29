@@ -1,0 +1,10 @@
+{{#if values}}
+    {{#each values}}
+    <div class="daq-value">
+        <span class="name">{{name}}</span>
+        <span class="value">{{value}}</span>
+    </div>
+    {{/each}}
+{{else}}
+    <p style="color: #666; text-align: center;">No data</p>
+{{/if}}

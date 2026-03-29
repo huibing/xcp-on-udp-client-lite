@@ -4,7 +4,7 @@
 //! Multi-slave support: routes now handle multiple XCP slave connections.
 
 use axum::{
-    extract::{Form, Path, Query, State},
+    extract::{Form, Multipart, Path, Query, State},
     http::header::SET_COOKIE,
     response::{AppendHeaders, Html, IntoResponse, Redirect},
 };
@@ -20,7 +20,8 @@ use crate::web::templates;
 /// Login page (GET /login)
 pub async fn login_page(Query(params): Query<HashMap<String, String>>) -> Html<String> {
     let error = params.get("error").map(|s| s.as_str());
-    Html(templates::login_page(error))
+    let engine = crate::web::templates::TemplateEngine::new();
+    Html(engine.login_page(error))
 }
 
 /// Login API (POST /api/login)
@@ -137,7 +138,11 @@ pub async fn connect_page(State(state): State<AppState>) -> Html<String> {
     slave_addrs.push("192.168.1.100:5555".to_string());
     slave_addrs.dedup();
 
-    Html(templates::connect_page(&slave_addrs))
+    let status = state.take_status().await;
+    let error = state.take_error().await;
+
+    let content = templates::connect_page(&slave_addrs);
+    Html(templates::page("Connect", &content, status.as_deref(), error.as_deref()))
 }
 
 /// Connect API (POST /api/connect)
@@ -172,6 +177,22 @@ pub async fn connect_api(
 
                 // Create slave state
                 let slave_state = SlaveState::new(slave_id, info);
+
+                // Copy global A2L data to the new slave if available
+                let global_cal = state.global_cal_manager.read().await;
+                let global_daq = state.global_daq_manager.read().await;
+                let global_path = state.global_a2l_path.read().await;
+
+                if !global_cal.params().is_empty() {
+                    *slave_state.cal_manager.write().await = global_cal.clone();
+                }
+                if global_daq.available_count() > 0 {
+                    *slave_state.daq_manager.write().await = global_daq.clone();
+                }
+                if !global_path.is_empty() {
+                    *slave_state.a2l_path.write().await = global_path.clone();
+                }
+
                 state.add_slave_state(slave_state).await;
                 state.set_current_slave(Some(slave_id)).await;
 
@@ -304,19 +325,38 @@ pub async fn calibration_page(
     let search = params.get("search").cloned().unwrap_or_default();
     let slave_filter = params.get("slave").cloned();
 
+    // Get status/error from URL parameters (from cal_read redirect)
+    let url_status = params.get("status").cloned();
+    let url_error = params.get("error").cloned();
+
+    // If URL has status/error, use it; otherwise use state
+    let status = if url_status.is_some() {
+        url_status
+    } else {
+        state.take_status().await
+    };
+    let error = if url_error.is_some() {
+        url_error
+    } else {
+        state.take_error().await
+    };
+
     let current_slave = state.current_slave().await;
 
-    let mut all_params: Vec<(String, usize, String, String, u32, Option<String>)> = Vec::new();
+    // (slave_id, slave_name, idx, param_name, type_name, address, value)
+    let mut all_params: Vec<(String, String, usize, String, String, u32, Option<String>)> = Vec::new();
 
     if let Some(slave) = current_slave {
         // Show calibration for current slave
         let cal_manager = slave.cal_manager.read().await;
         let cal_values = slave.cal_values.read().await;
+        let slave_id = slave.id.to_string();
 
         for (i, p) in cal_manager.params().iter().enumerate() {
             if search.is_empty() || p.name.to_lowercase().contains(&search.to_lowercase()) {
                 let value = cal_values.get(&p.name).map(|v| v.format());
                 all_params.push((
+                    slave_id.clone(),
                     slave.display_name(),
                     i,
                     p.name.clone(),
@@ -329,33 +369,56 @@ pub async fn calibration_page(
     } else {
         // Show calibration from all slaves
         let slaves = state.all_slaves().await;
-        for slave in slaves {
-            let cal_manager = slave.cal_manager.read().await;
-            let cal_values = slave.cal_values.read().await;
+        if !slaves.is_empty() {
+            for slave in slaves {
+                let cal_manager = slave.cal_manager.read().await;
+                let cal_values = slave.cal_values.read().await;
+                let slave_id = slave.id.to_string();
 
-            for (i, p) in cal_manager.params().iter().enumerate() {
-                let matches_search = search.is_empty()
-                    || p.name.to_lowercase().contains(&search.to_lowercase());
-                let matches_slave = slave_filter.as_ref().map_or(true, |s| {
-                    slave.display_name().to_lowercase().contains(&s.to_lowercase())
-                });
+                for (i, p) in cal_manager.params().iter().enumerate() {
+                    let matches_search = search.is_empty()
+                        || p.name.to_lowercase().contains(&search.to_lowercase());
+                    let matches_slave = slave_filter.as_ref().map_or(true, |s| {
+                        slave.display_name().to_lowercase().contains(&s.to_lowercase())
+                    });
 
-                if matches_search && matches_slave {
-                    let value = cal_values.get(&p.name).map(|v| v.format());
-                    all_params.push((
-                        slave.display_name(),
-                        i,
-                        p.name.clone(),
-                        p.data_type.type_name(),
-                        p.address,
-                        value,
-                    ));
+                    if matches_search && matches_slave {
+                        let value = cal_values.get(&p.name).map(|v| v.format());
+                        all_params.push((
+                            slave_id.clone(),
+                            slave.display_name(),
+                            i,
+                            p.name.clone(),
+                            p.data_type.type_name(),
+                            p.address,
+                            value,
+                        ));
+                    }
+                }
+            }
+        } else {
+            // No slaves connected, show global A2L data if available
+            let global_cal = state.global_cal_manager.read().await;
+            if !global_cal.params().is_empty() {
+                for (i, p) in global_cal.params().iter().enumerate() {
+                    if search.is_empty() || p.name.to_lowercase().contains(&search.to_lowercase()) {
+                        all_params.push((
+                            "global".to_string(),
+                            "Offline".to_string(),
+                            i,
+                            p.name.clone(),
+                            p.data_type.type_name(),
+                            p.address,
+                            None, // No values available offline
+                        ));
+                    }
                 }
             }
         }
     }
 
-    Html(templates::calibration_page(&all_params, 0))
+    let content = templates::calibration_page(&all_params, 0);
+    Html(templates::page("Calibration", &content, status.as_deref(), error.as_deref()))
 }
 
 /// Read calibration parameter (GET /api/cal/read/:slave_id/:idx)
@@ -366,19 +429,16 @@ pub async fn cal_read(
     let slave_id = match uuid::Uuid::parse_str(&slave_id_str) {
         Ok(id) => SlaveId(id),
         Err(_) => {
-            state.set_error("Invalid slave ID".to_string()).await;
-            return Redirect::to("/calibration");
+            return Redirect::to(&format!("/calibration?error={}", urlencoding::encode("Invalid slave ID")));
         }
     };
 
     let Some(slave) = state.get_slave(slave_id).await else {
-        state.set_error("Slave not found".to_string()).await;
-        return Redirect::to("/calibration");
+        return Redirect::to(&format!("/calibration?error={}", urlencoding::encode("Slave not found")));
     };
 
     if !slave.is_connected() {
-        state.set_error("Not connected to XCP slave".to_string()).await;
-        return Redirect::to("/calibration");
+        return Redirect::to(&format!("/calibration?error={}", urlencoding::encode("Not connected to XCP slave")));
     }
 
     let client = state.client.lock().await;
@@ -387,6 +447,14 @@ pub async fn cal_read(
     if let Some(param) = cal_manager.params().get(idx) {
         let param = param.clone();
         drop(cal_manager); // Release lock before async operation
+
+        tracing::info!(
+            "Reading calibration param '{}' at address 0x{:08X} (ext: {}), type: {:?}",
+            param.name,
+            param.address,
+            param.address_ext,
+            param.data_type
+        );
 
         // Get the XcpSlave handle for this slave
         if let Some(xcp_slave) = client.get_slave(slave_id) {
@@ -399,21 +467,26 @@ pub async fn cal_read(
             match result {
                 Ok(value) => {
                     let value_str = value.format();
+                    tracing::info!("Successfully read {} = {}", param.name, value_str);
                     slave.cal_values.write().await.insert(param.name.clone(), value);
-                    state.set_status(format!("[{}] {} = {}", slave.display_name(), param.name, value_str)).await;
+                    let msg = format!("[{}] {} = {}", slave.display_name(), param.name, value_str);
+                    return Redirect::to(&format!("/calibration?status={}", urlencoding::encode(&msg)));
                 }
                 Err(e) => {
-                    state
-                        .set_error(format!("Failed to read {}: {}", param.name, e))
-                        .await;
+                    tracing::error!("Failed to read {}: {}", param.name, e);
+                    let msg = format!("Failed to read {}: {}", param.name, e);
+                    return Redirect::to(&format!("/calibration?error={}", urlencoding::encode(&msg)));
                 }
             }
         } else {
-            state.set_error("Slave not available".to_string()).await;
+            tracing::error!("XcpSlave not found in client for slave_id: {:?}", slave_id);
+            return Redirect::to(&format!("/calibration?error={}", urlencoding::encode("Slave not available in client")));
         }
+    } else {
+        tracing::error!("Calibration parameter index {} not found", idx);
+        let msg = format!("Parameter index {} not found", idx);
+        return Redirect::to(&format!("/calibration?error={}", urlencoding::encode(&msg)));
     }
-
-    Redirect::to("/calibration")
 }
 
 /// Helper function to read calibration from a slave
@@ -427,6 +500,8 @@ async fn read_calibration_from_slave(
     let mta = Mta::new(param.address, param.address_ext);
     let size = param.data_type.size();
 
+    tracing::debug!("Reading {} bytes from address 0x{:08X} (ext: {})", size, mta.address, mta.extension);
+
     // Read data from slave
     let data = if size <= 255 {
         slave.read_memory(mta, size as u8).await.map_err(|e| e.to_string())?
@@ -434,9 +509,20 @@ async fn read_calibration_from_slave(
         slave.read_u8_array(mta, size).await.map_err(|e| e.to_string())?
     };
 
+    tracing::debug!("Read {} bytes, expected {}", data.len(), size);
+
+    // Verify data length
+    if data.len() != size {
+        return Err(format!(
+            "Data length mismatch: expected {} bytes, got {}",
+            size, data.len()
+        ));
+    }
+
     // Parse based on type
     let value = match &param.data_type {
-        CalibrationType::U8 => CalibrationValue::U8(data.first().copied().unwrap_or(0)),
+        // Scalar types
+        CalibrationType::U8 => CalibrationValue::U8(data[0]),
         CalibrationType::U16 => {
             CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]]))
         }
@@ -446,7 +532,7 @@ async fn read_calibration_from_slave(
         CalibrationType::U64 => {
             CalibrationValue::U64(u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
         }
-        CalibrationType::I8 => CalibrationValue::I8(data.first().copied().unwrap_or(0) as i8),
+        CalibrationType::I8 => CalibrationValue::I8(data[0] as i8),
         CalibrationType::I16 => {
             CalibrationValue::I16(i16::from_le_bytes([data[0], data[1]]))
         }
@@ -462,8 +548,166 @@ async fn read_calibration_from_slave(
         CalibrationType::F64 => {
             CalibrationValue::F64(f64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
         }
-        CalibrationType::Bool => CalibrationValue::Bool(data.first().copied().unwrap_or(0) != 0),
-        _ => return Err(format!("Array/Matrix types not yet supported ({} bytes)", data.len())),
+        CalibrationType::Bool => CalibrationValue::Bool(data[0] != 0),
+
+        // Array types
+        CalibrationType::U8Array(_len) => {
+            CalibrationValue::U8Array(data.clone())
+        }
+        CalibrationType::U16Array(_len) => {
+            let vals: Vec<u16> = data.chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            CalibrationValue::U16Array(vals)
+        }
+        CalibrationType::U32Array(_len) => {
+            let vals: Vec<u32> = data.chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            CalibrationValue::U32Array(vals)
+        }
+        CalibrationType::U64Array(_len) => {
+            let vals: Vec<u64> = data.chunks_exact(8)
+                .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect();
+            CalibrationValue::U64Array(vals)
+        }
+        CalibrationType::I8Array(_len) => {
+            CalibrationValue::I8Array(data.iter().map(|&v| v as i8).collect())
+        }
+        CalibrationType::I16Array(_len) => {
+            let vals: Vec<i16> = data.chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            CalibrationValue::I16Array(vals)
+        }
+        CalibrationType::I32Array(_len) => {
+            let vals: Vec<i32> = data.chunks_exact(4)
+                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            CalibrationValue::I32Array(vals)
+        }
+        CalibrationType::I64Array(_len) => {
+            let vals: Vec<i64> = data.chunks_exact(8)
+                .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect();
+            CalibrationValue::I64Array(vals)
+        }
+        CalibrationType::F32Array(_len) => {
+            let vals: Vec<f32> = data.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            CalibrationValue::F32Array(vals)
+        }
+        CalibrationType::F64Array(_len) => {
+            let vals: Vec<f64> = data.chunks_exact(8)
+                .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect();
+            CalibrationValue::F64Array(vals)
+        }
+        CalibrationType::BoolArray(_len) => {
+            CalibrationValue::BoolArray(data.iter().map(|&v| v != 0).collect())
+        }
+
+        // Matrix types - flatten to 2D vectors
+        CalibrationType::U8Matrix(_rows, cols) => {
+            let matrix: Vec<Vec<u8>> = data.chunks_exact(*cols)
+                .map(|c| c.to_vec())
+                .collect();
+            CalibrationValue::U8Matrix(matrix)
+        }
+        CalibrationType::U16Matrix(_rows, cols) => {
+            let matrix: Vec<Vec<u16>> = data.chunks_exact(cols * 2)
+                .map(|row| {
+                    row.chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .collect()
+                })
+                .collect();
+            CalibrationValue::U16Matrix(matrix)
+        }
+        CalibrationType::U32Matrix(_rows, cols) => {
+            let matrix: Vec<Vec<u32>> = data.chunks_exact(cols * 4)
+                .map(|row| {
+                    row.chunks_exact(4)
+                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect()
+                })
+                .collect();
+            CalibrationValue::U32Matrix(matrix)
+        }
+        CalibrationType::U64Matrix(_rows, cols) => {
+            let matrix: Vec<Vec<u64>> = data.chunks_exact(cols * 8)
+                .map(|row| {
+                    row.chunks_exact(8)
+                        .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                        .collect()
+                })
+                .collect();
+            CalibrationValue::U64Matrix(matrix)
+        }
+        CalibrationType::I8Matrix(_rows, cols) => {
+            let matrix: Vec<Vec<i8>> = data.chunks_exact(*cols)
+                .map(|row| row.iter().map(|&v| v as i8).collect())
+                .collect();
+            CalibrationValue::I8Matrix(matrix)
+        }
+        CalibrationType::I16Matrix(_rows, cols) => {
+            let matrix: Vec<Vec<i16>> = data.chunks_exact(cols * 2)
+                .map(|row| {
+                    row.chunks_exact(2)
+                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .collect()
+                })
+                .collect();
+            CalibrationValue::I16Matrix(matrix)
+        }
+        CalibrationType::I32Matrix(_rows, cols) => {
+            let matrix: Vec<Vec<i32>> = data.chunks_exact(cols * 4)
+                .map(|row| {
+                    row.chunks_exact(4)
+                        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect()
+                })
+                .collect();
+            CalibrationValue::I32Matrix(matrix)
+        }
+        CalibrationType::I64Matrix(_rows, cols) => {
+            let matrix: Vec<Vec<i64>> = data.chunks_exact(cols * 8)
+                .map(|row| {
+                    row.chunks_exact(8)
+                        .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                        .collect()
+                })
+                .collect();
+            CalibrationValue::I64Matrix(matrix)
+        }
+        CalibrationType::F32Matrix(_rows, cols) => {
+            let matrix: Vec<Vec<f32>> = data.chunks_exact(cols * 4)
+                .map(|row| {
+                    row.chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect()
+                })
+                .collect();
+            CalibrationValue::F32Matrix(matrix)
+        }
+        CalibrationType::F64Matrix(_rows, cols) => {
+            let matrix: Vec<Vec<f64>> = data.chunks_exact(cols * 8)
+                .map(|row| {
+                    row.chunks_exact(8)
+                        .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                        .collect()
+                })
+                .collect();
+            CalibrationValue::F64Matrix(matrix)
+        }
+        CalibrationType::BoolMatrix(_rows, cols) => {
+            let matrix: Vec<Vec<bool>> = data.chunks_exact(*cols)
+                .map(|row| row.iter().map(|&v| v != 0).collect())
+                .collect();
+            CalibrationValue::BoolMatrix(matrix)
+        }
     };
 
     Ok(value)
@@ -500,12 +744,13 @@ pub async fn cal_write_page(
 
     if let Some(param) = cal_manager.params().get(idx) {
         let current = cal_values.get(&param.name).map(|v| v.format());
-        Html(templates::cal_write_page(
+        let content = templates::cal_write_page(
             &slave_id_str,
             idx,
             &param.name,
             current.as_deref(),
-        ))
+        );
+        Html(templates::page("Write Calibration", &content, None, None))
     } else {
         Html(templates::page(
             "Error",
@@ -666,35 +911,47 @@ pub async fn daq_page(State(state): State<AppState>) -> Html<String> {
     } else {
         // Aggregate from all slaves
         let slaves = state.all_slaves().await;
-        let mut all_measurements = Vec::new();
-        let mut all_selected = Vec::new();
-        let mut any_running = false;
-        let mut all_values = Vec::new();
+        if !slaves.is_empty() {
+            let mut all_measurements = Vec::new();
+            let mut all_selected = Vec::new();
+            let mut any_running = false;
+            let mut all_values = Vec::new();
 
-        for slave in slaves {
-            let daq_manager = slave.daq_manager.read().await;
-            let daq_running = *slave.daq_running.read().await;
-            any_running |= daq_running;
+            for slave in slaves {
+                let daq_manager = slave.daq_manager.read().await;
+                let daq_running = *slave.daq_running.read().await;
+                any_running |= daq_running;
 
-            let selected = daq_manager.selected_indices();
-            let offset = all_measurements.len();
+                let selected = daq_manager.selected_indices();
+                let offset = all_measurements.len();
 
-            for (i, m) in daq_manager.all_measurements().iter().enumerate() {
-                all_measurements.push((slave.id.to_string(), i + offset, m.name.clone(), selected.contains(&i)));
-            }
+                for (i, m) in daq_manager.all_measurements().iter().enumerate() {
+                    all_measurements.push((slave.id.to_string(), i + offset, m.name.clone(), selected.contains(&i)));
+                }
 
-            all_selected.extend(selected.iter().map(|&i| i + offset));
+                all_selected.extend(selected.iter().map(|&i| i + offset));
 
-            if daq_running {
-                if let Some(r) = daq_manager.get_latest_sample().await {
-                    for (k, v) in r.values {
-                        all_values.push((format!("[{}] {}", slave.display_name(), k), v));
+                if daq_running {
+                    if let Some(r) = daq_manager.get_latest_sample().await {
+                        for (k, v) in r.values {
+                            all_values.push((format!("[{}] {}", slave.display_name(), k), v));
+                        }
                     }
                 }
             }
-        }
 
-        (all_measurements, all_selected, any_running, all_values)
+            (all_measurements, all_selected, any_running, all_values)
+        } else {
+            // No slaves connected, use global DAQ data if available
+            let global_daq = state.global_daq_manager.read().await;
+            let measurements: Vec<_> = global_daq
+                .all_measurements()
+                .iter()
+                .enumerate()
+                .map(|(i, m)| ("global".to_string(), i, m.name.clone(), false))
+                .collect();
+            (measurements, Vec::new(), false, Vec::new())
+        }
     };
 
     let slaves = state.all_slaves().await;
@@ -713,14 +970,18 @@ pub async fn daq_page(State(state): State<AppState>) -> Html<String> {
         ));
     }
 
-    Html(templates::daq_page(
+    let status = state.take_status().await;
+    let error = state.take_error().await;
+
+    let content = templates::daq_page(
         &measurements,
         &selected_indices,
         daq_running,
         &latest_values,
         &slaves_data,
         current_slave_id.as_deref(),
-    ))
+    );
+    Html(templates::page("DAQ", &content, status.as_deref(), error.as_deref()))
 }
 
 /// DAQ start API (GET /api/daq/start)
@@ -876,27 +1137,120 @@ pub async fn daq_data(State(state): State<AppState>) -> Html<String> {
 /// A2L page (GET /a2l)
 pub async fn a2l_page(State(state): State<AppState>) -> Html<String> {
     let current_slave = state.current_slave().await;
-    let path = if let Some(slave) = current_slave {
+
+    // Get path from current slave or global state
+    let path = if let Some(ref slave) = current_slave {
         slave.a2l_path.read().await.clone()
     } else {
-        String::new()
+        state.global_a2l_path.read().await.clone()
     };
-    Html(templates::a2l_page(&path))
+
+    // Get slave addresses from A2L
+    let slave_addresses = state.a2l_slave_addresses.read().await.clone();
+
+    // Get parameter/measurement counts from appropriate source
+    let (cal_count, meas_count) = if let Some(ref slave) = current_slave {
+        let cal_mgr = slave.cal_manager.read().await;
+        let daq_mgr = slave.daq_manager.read().await;
+        (cal_mgr.params().len(), daq_mgr.available_count())
+    } else {
+        let cal_mgr = state.global_cal_manager.read().await;
+        let daq_mgr = state.global_daq_manager.read().await;
+        (cal_mgr.params().len(), daq_mgr.available_count())
+    };
+
+    // Build current slave info for template
+    let current_slave_info = current_slave.map(|s| {
+        let id = s.id.to_string();
+        let name = s.display_name();
+        (id, name)
+    });
+
+    let status = state.take_status().await;
+    let error = state.take_error().await;
+
+    let content = templates::a2l_page(&path, current_slave_info.as_ref(), &slave_addresses, cal_count, meas_count);
+    Html(templates::page("A2L", &content, status.as_deref(), error.as_deref()))
 }
 
 /// A2L load API (POST /api/a2l/load)
 pub async fn a2l_load(
     State(state): State<AppState>,
-    Form(form): Form<HashMap<String, String>>,
+    mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let path = form.get("path").cloned();
-    let slave_id_str = form.get("slave_id").cloned();
+    let mut file_data = None;
+    let mut file_name = None;
+    let mut slave_id_str = None;
+
+    // Process multipart form data
+    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
+        let name = field.name().unwrap_or("").to_string();
+
+        if name == "a2l_file" {
+            // Get the filename and file content
+            if let Some(filename) = field.file_name() {
+                file_name = Some(filename.to_string());
+                // Read the file content
+                match field.bytes().await {
+                    Ok(bytes) => {
+                        file_data = Some(bytes);
+                    }
+                    Err(e) => {
+                        return axum::Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to read file: {}", e)
+                        }));
+                    }
+                }
+            }
+        } else if name == "slave_id" {
+            if let Ok(value) = field.text().await {
+                if !value.is_empty() {
+                    slave_id_str = Some(value);
+                }
+            }
+        }
+    }
+
+    // Save uploaded file to temp location and load it
+    let temp_path = if let (Some(name), Some(data)) = (&file_name, &file_data) {
+        // Create temp directory if not exists
+        let temp_dir = std::env::temp_dir().join("xcp_client");
+        if let Err(e) = tokio::fs::create_dir_all(&temp_dir).await {
+            return axum::Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to create temp dir: {}", e)
+            }));
+        }
+
+        // Generate unique filename to avoid collisions
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let safe_name = name.replace(['/', '\\', ':'], "_");
+        let temp_file = temp_dir.join(format!("{}_{}", timestamp, safe_name));
+
+        // Write file content
+        if let Err(e) = tokio::fs::write(&temp_file, data).await {
+            return axum::Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to save temp file: {}", e)
+            }));
+        }
+
+        Some(temp_file)
+    } else {
+        None
+    };
+
+    let path = temp_path;
 
     if let Some(path) = path {
         use crate::A2lReader;
 
         // Determine which slave to load A2L for
-        let target_slave = if let Some(id_str) = slave_id_str {
+        let target_slave = if let Some(id_str) = slave_id_str.filter(|s| !s.is_empty()) {
             uuid::Uuid::parse_str(&id_str).ok().map(SlaveId)
         } else {
             *state.current_slave_id.read().await
@@ -917,26 +1271,40 @@ pub async fn a2l_load(
 
                             // Update slave state
                             if let Some(slave_state) = state.get_slave(slave_id).await {
-                                *slave_state.a2l_path.write().await = path.clone();
+                                *slave_state.a2l_path.write().await = path.to_string_lossy().to_string();
                                 // Copy the loaded managers to slave state
                                 *slave_state.cal_manager.write().await = xcp_slave_guard.cal_manager.clone();
                                 *slave_state.daq_manager.write().await = xcp_slave_guard.daq_manager.lock().await.clone();
                                 state.add_slave_state(slave_state).await;
                             }
 
-                            state.set_status(format!(
+                            let msg = format!(
                                 "Loaded A2L: {} cal params, {} measurements",
                                 cal_count, meas_count
-                            )).await;
+                            );
+                            state.set_status(msg.clone()).await;
+
+                            return axum::Json(serde_json::json!({
+                                "success": true,
+                                "message": msg,
+                                "path": path,
+                                "cal_count": cal_count,
+                                "meas_count": meas_count
+                            }));
                         }
                     }
                     Err(e) => {
-                        state.set_error(format!("Failed to load A2L: {}", e)).await;
+                        let msg = format!("Failed to load A2L: {}", e);
+                        state.set_error(msg.clone()).await;
+                        return axum::Json(serde_json::json!({
+                            "success": false,
+                            "error": msg
+                        }));
                     }
                 }
             }
             None => {
-                // No slave selected, load into global state for future connections
+                // No slave selected, load into global state for offline viewing
                 match tokio::task::spawn_blocking({
                     let path = path.clone();
                     move || A2lReader::load(&path)
@@ -946,7 +1314,32 @@ pub async fn a2l_load(
                         let characteristics = reader.get_characteristics();
                         let slave_addrs = reader.get_slave_addresses();
 
-                        // Store in current slave if available
+                        // Store in global state for offline viewing
+                        {
+                            let mut cal_manager = state.global_cal_manager.write().await;
+                            cal_manager.clear_params();
+                            for ch in characteristics.clone() {
+                                if let Some(param) = convert_characteristic(ch) {
+                                    cal_manager.add_param(param);
+                                }
+                            }
+                        }
+
+                        {
+                            let mut daq_manager = state.global_daq_manager.write().await;
+                            daq_manager.clear_measurements();
+                            for m in measurements.clone() {
+                                if let Some(meas) = convert_measurement(m) {
+                                    daq_manager.add_measurement(meas);
+                                }
+                            }
+                        }
+
+                        // Store path and addresses
+                        *state.global_a2l_path.write().await = path.to_string_lossy().to_string();
+                        *state.a2l_slave_addresses.write().await = slave_addrs.clone();
+
+                        // Also store in current slave if available
                         if let Some(slave) = state.current_slave().await {
                             {
                                 let mut cal_manager = slave.cal_manager.write().await;
@@ -968,7 +1361,7 @@ pub async fn a2l_load(
                                 }
                             }
 
-                            *slave.a2l_path.write().await = path.clone();
+                            *slave.a2l_path.write().await = path.to_string_lossy().to_string();
                         }
 
                         let addr_info = if slave_addrs.is_empty() {
@@ -977,23 +1370,47 @@ pub async fn a2l_load(
                             format!(" Found {} slave address(es)", slave_addrs.len())
                         };
 
-                        state.set_status(format!(
+                        let msg = format!(
                             "Loaded A2L: {} ({} params, {} measurements){}",
-                            path, characteristics.len(), measurements.len(), addr_info
-                        )).await;
+                            path.display(), characteristics.len(), measurements.len(), addr_info
+                        );
+                        state.set_status(msg.clone()).await;
+
+                        return axum::Json(serde_json::json!({
+                            "success": true,
+                            "message": msg,
+                            "path": path,
+                            "cal_count": characteristics.len(),
+                            "meas_count": measurements.len(),
+                            "slave_addresses": slave_addrs
+                        }));
                     }
                     Ok(Err(e)) => {
-                        state.set_error(format!("Failed to load A2L: {}", e)).await;
+                        let msg = format!("Failed to load A2L: {}", e);
+                        state.set_error(msg.clone()).await;
+                        return axum::Json(serde_json::json!({
+                            "success": false,
+                            "error": msg
+                        }));
                     }
                     Err(_) => {
-                        state.set_error("A2L loading task failed".to_string()).await;
+                        let msg = "A2L loading task failed".to_string();
+                        state.set_error(msg.clone()).await;
+                        return axum::Json(serde_json::json!({
+                            "success": false,
+                            "error": msg
+                        }));
                     }
                 }
             }
         }
     }
 
-    Redirect::to("/a2l")
+    // No file uploaded
+    axum::Json(serde_json::json!({
+        "success": false,
+        "error": "No file uploaded"
+    }))
 }
 
 /// Convert A2L characteristic to calibration parameter

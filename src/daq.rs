@@ -1064,7 +1064,7 @@ impl DaqManager {
         self.configure(client).await?;
 
         // Get DTO receiver for DAQ reception (must be done before starting DAQ)
-        let dto_rx = client.get_dto_receiver().ok_or("No DTO receiver available")?;
+        let dto_rx = client.get_dto_receiver().await.ok_or("No DTO receiver available")?;
 
         // Start DAQ list 0
         tracing::info!("Selecte DAQ list 0");

@@ -37,7 +37,7 @@ impl Default for SlaveId {
 
 impl std::fmt::Display for SlaveId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.to_string().split('-').next().unwrap_or("unknown"))
+        write!(f, "{}", self.0.to_string())
     }
 }
 
