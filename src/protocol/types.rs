@@ -242,15 +242,16 @@ pub struct ConnectInfo {
 
 impl ConnectInfo {
     pub fn parse(data: &[u8]) -> Option<Self> {
-        if data.len() < 8 {
+        // Format per XCP spec: [resource, comm_mode, max_cto(1B), max_dto_l, max_dto_h, proto_ver, tl_ver]
+        if data.len() < 7 {
             return None;
         }
         Some(Self {
             resource: ResourceFlags::from(data[0]),
             comm_mode_basic: data[1],
-            max_cto: data[2] as u16 | ((data[3] as u16) << 8),
-            max_dto: data[4] as u16 | ((data[5] as u16) << 8),
-            protocol_version: data[6],
+            max_cto: data[2] as u16, // max_cto is 1 byte only!
+            max_dto: u16::from_le_bytes([data[3], data[4]]),
+            protocol_version: data[5],
         })
     }
 }
@@ -387,9 +388,9 @@ mod tests {
 
     #[test]
     fn test_connect_info_parse_valid() {
-        // [resource, comm_mode, max_cto_l, max_cto_h, max_dto_l, max_dto_h, proto_ver, tl_ver]
+        // Format per XCP spec: [resource, comm_mode, max_cto(1B), max_dto_l, max_dto_h, proto_ver, tl_ver]
         // resource=0x11: cal_pgm=true (bit 0), daq=false (bit 2), pgm=true (bit 4)
-        let data = vec![0x11, 0x01, 0x08, 0x00, 0x10, 0x00, 0x01, 0x01];
+        let data = vec![0x11, 0x01, 0x08, 0x10, 0x00, 0x01, 0x01];
         let info = ConnectInfo::parse(&data).unwrap();
         assert!(info.resource.cal_pgm);
         assert!(!info.resource.daq);
@@ -402,7 +403,7 @@ mod tests {
 
     #[test]
     fn test_connect_info_parse_too_short() {
-        let data = vec![0x05, 0x01, 0x08, 0x00, 0x10, 0x00];
+        let data = vec![0x05, 0x01, 0x08, 0x10, 0x00, 0x01];
         assert!(ConnectInfo::parse(&data).is_none());
     }
 

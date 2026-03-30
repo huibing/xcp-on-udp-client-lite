@@ -101,8 +101,13 @@ pub fn parse_response_with_counter(data: &[u8]) -> Result<(Response, u16), Strin
 
 /// Parse CONNECT response
 pub fn parse_connect_response(data: &[u8]) -> Result<ConnectInfo, String> {
-    // Response format (after TL header):
-    // [resource, comm_mode_basic, max_cto_l, max_cto_h, max_dto_l, max_dto_h, protocol_version, transport_layer_version]
+    // Response format (after TL header) per XCP Protocol Specification:
+    // BYTE 0: resource
+    // BYTE 1: comm_mode_basic
+    // BYTE 2: max_cto (1 byte!)
+    // BYTE 3-4: max_dto (2 bytes, little-endian)
+    // BYTE 5: protocol_version
+    // BYTE 6: transport_layer_version
     if data.len() < 7 {
         return Err("Connect response too short".to_string());
     }
@@ -110,9 +115,9 @@ pub fn parse_connect_response(data: &[u8]) -> Result<ConnectInfo, String> {
     Ok(ConnectInfo {
         resource: super::types::ResourceFlags::from(data[0]),
         comm_mode_basic: data[1],
-        max_cto: u16::from_le_bytes([data[2], data[3]]),
-        max_dto: u16::from_le_bytes([data[4], data[5]]),
-        protocol_version: data[6],
+        max_cto: data[2] as u16, // max_cto is 1 byte only!
+        max_dto: u16::from_le_bytes([data[3], data[4]]),
+        protocol_version: data[5],
     })
 }
 
@@ -323,9 +328,9 @@ mod tests {
     #[test]
     fn test_parse_connect_response_valid() {
         // Mock CONNECT response data (without TL header)
-        // [resource=0x11, comm_mode=0x00, max_cto=0x08, max_dto=0x08, proto_ver=0x01]
+        // Format per XCP spec: [resource, comm_mode, max_cto(1B), max_dto_l, max_dto_h, proto_ver, tl_ver]
         // resource=0x11: cal_pgm=true (bit 0), daq=false (bit 2), pgm=true (bit 4)
-        let data = vec![0x11, 0x00, 0x08, 0x00, 0x08, 0x00, 0x01];
+        let data = vec![0x11, 0x00, 0x08, 0x08, 0x00, 0x01, 0x01];
         let info = parse_connect_response(&data).unwrap();
         assert!(info.resource.cal_pgm);
         assert!(!info.resource.daq);
@@ -339,7 +344,8 @@ mod tests {
     #[test]
     fn test_parse_connect_response_all_resources() {
         // resource=0x1F (all resources enabled)
-        let data = vec![0x1F, 0x01, 0xFF, 0x00, 0xFF, 0x00, 0x02];
+        // Format: [resource, comm_mode, max_cto(1B), max_dto_l, max_dto_h, proto_ver, tl_ver]
+        let data = vec![0x1F, 0x01, 0xFF, 0xFF, 0x00, 0x02, 0x01];
         let info = parse_connect_response(&data).unwrap();
         assert!(info.resource.cal_pgm);
         assert!(info.resource.daq);

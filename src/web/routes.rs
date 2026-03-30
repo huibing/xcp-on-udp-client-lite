@@ -137,10 +137,7 @@ pub async fn connect_page(State(state): State<AppState>) -> Html<String> {
                 "id": d.id,
                 "name": d.name,
                 "address": d.address,
-                "a2l_name": std::path::Path::new(&d.a2l_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default(),
+                "a2l_name": d.original_filename,
                 "connected": d.connected,
             })
         })
@@ -316,6 +313,7 @@ pub async fn connect_all_devices(State(state): State<AppState>) -> impl IntoResp
                     let slave_state = SlaveState {
                         id: slave_id,
                         info,
+                        max_cto: device.max_cto,
                         cal_manager: device.cal_manager.clone(),
                         daq_manager: device.daq_manager.clone(),
                         cal_values: device.cal_values.clone(),
@@ -412,6 +410,7 @@ pub async fn connect_device(State(state): State<AppState>, Json(payload): Json<s
             let slave_state = SlaveState {
                 id: slave_id,
                 info: info.clone(),
+                max_cto: device.max_cto,
                 cal_manager: device.cal_manager.clone(),
                 daq_manager: device.daq_manager.clone(),
                 cal_values: device.cal_values.clone(),
@@ -704,6 +703,7 @@ pub async fn cal_read(
         // Get the XcpSlave handle for this slave
         if let Some(xcp_slave) = client.get_slave(slave_id) {
             // Read using the slave's built-in methods
+            // Uses slave's actual maxCTO from CONNECT response for proper chunking
             let result = {
                 let xcp_slave_guard = xcp_slave.lock().await;
                 read_calibration_from_slave(&xcp_slave_guard, &param).await
@@ -758,12 +758,17 @@ async fn read_calibration_from_slave(
 
     tracing::debug!("Reading {} bytes from address 0x{:08X} (ext: {})", size, mta.address, mta.extension);
 
-    // Read data from slave
-    let data = if size <= 255 {
-        slave.read_memory(mta, size as u8).await.map_err(|e| e.to_string())?
-    } else {
-        slave.read_u8_array(mta, size).await.map_err(|e| e.to_string())?
-    };
+    // Check for zero size (invalid matrix_dim issue)
+    if size == 0 {
+        return Err(format!(
+            "Invalid parameter size (0 bytes). Check A2L matrix_dim for '{}'",
+            param.name
+        ));
+    }
+
+    // Use slave's actual maxCTO from CONNECT response (not A2L's MAX_CTO)
+    // This ensures we use the correct chunk size for UPLOAD operations
+    let data = slave.read_large_data(mta, size, None).await.map_err(|e| e.to_string())?;
 
     tracing::debug!("Read {} bytes, expected {}", data.len(), size);
 
@@ -1626,20 +1631,22 @@ pub async fn a2l_load(
         let characteristics = reader.get_characteristics();
         let measurements = reader.get_measurements();
 
+        // Get MAX_CTO from A2L (default to 255 if not specified)
+        let max_cto = reader.get_max_cto().unwrap_or(255);
+
         // Store counts before consuming vectors
         let cal_count = characteristics.len();
         let meas_count = measurements.len();
 
         // Generate device ID and name
         let device_id = uuid::Uuid::new_v4().to_string();
-        let a2l_filename = std::path::Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+
+        // Use original filename from user upload
+        let original_filename = file_name.clone().unwrap_or_else(|| "unknown.a2l".to_string());
 
         // Get current device count for naming (synchronous approximation)
         let device_count = state.devices.read().await.len();
-        let device_name = std::path::Path::new(&a2l_filename)
+        let device_name = std::path::Path::new(&original_filename)
             .file_stem()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| format!("Device{}", device_count + 1));
@@ -1665,6 +1672,8 @@ pub async fn a2l_load(
             name: device_name,
             address: device_addr.clone(),
             a2l_path: path.to_string_lossy().to_string(),
+            original_filename: original_filename.clone(),
+            max_cto,
             connected: false,
             slave_id: None,
             cal_manager: Arc::new(RwLock::new(cal_manager)),
@@ -1677,14 +1686,14 @@ pub async fn a2l_load(
 
         state.set_status(format!(
             "Added device {} with address {} ({} cal params, {} measurements)",
-            a2l_filename, device_addr, cal_count, meas_count
+            original_filename, device_addr, cal_count, meas_count
         )).await;
 
         return axum::Json(serde_json::json!({
             "success": true,
             "message": format!(
                 "Added device {} with address {}",
-                a2l_filename, device_addr
+                original_filename, device_addr
             ),
             "path": path,
             "cal_count": cal_count,

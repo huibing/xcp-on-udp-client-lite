@@ -209,6 +209,11 @@ impl XcpSlave {
         let connect_info = parse_connect_response(&res_data)
             .map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
+        tracing::info!(
+            "Connected: max_cto={}, max_dto={}, resource={:?}",
+            connect_info.max_cto, connect_info.max_dto, connect_info.resource
+        );
+
         Ok(connect_info)
     }
 
@@ -261,6 +266,17 @@ impl XcpSlave {
 
     /// Read memory from slave using SHORT_UPLOAD
     pub async fn read_memory(&self, mta: Mta, length: u8) -> Result<Vec<u8>, SlaveError> {
+        // SHORT_UPLOAD response: [RES, data...]
+        // Maximum data we can read is max_cto - 1
+        let max_per_read = self.max_upload_size();
+
+        if length as usize > max_per_read {
+            tracing::warn!(
+                "Requested read of {} bytes exceeds max CTO limit ({}), truncating",
+                length, max_per_read
+            );
+        }
+
         let response = self
             .send_command_and_wait(&commands::short_upload(mta, length))
             .await?;
@@ -271,6 +287,53 @@ impl XcpSlave {
             Response::Err(err) => Err(SlaveError::Protocol(err)),
             _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
         }
+    }
+
+    /// Get maximum bytes that can be read in a single SHORT_UPLOAD or UPLOAD command
+    /// SHORT_UPLOAD response: [RES (1 byte), data...]
+    /// So max data = max_cto - 1
+    pub fn max_upload_size(&self) -> usize {
+        self.info.connect_info
+            .as_ref()
+            .map(|ci| (ci.max_cto as usize).saturating_sub(1))
+            .unwrap_or(254) // Default to 254 if not connected
+    }
+
+    /// Read a large amount of data from slave, using SET_MTA + UPLOAD as needed
+    /// This handles reads larger than what SHORT_UPLOAD can handle in one command
+    ///
+    /// # Arguments
+    /// * `mta` - Memory transfer address
+    /// * `size` - Total bytes to read
+    /// * `max_per_read_override` - Optional override for maximum bytes per read
+    pub async fn read_large_data(&self, mta: Mta, size: usize, max_per_read_override: Option<usize>) -> Result<Vec<u8>, SlaveError> {
+        // Use the override if provided, otherwise use the default from connect_info
+        let max_per_read = max_per_read_override.unwrap_or_else(|| self.max_upload_size());
+
+        if size <= max_per_read {
+            // Small enough for single SHORT_UPLOAD
+            return self.read_memory(mta, size as u8).await;
+        }
+
+        tracing::debug!(
+            "Reading {} bytes in chunks (max per read: {})",
+            size, max_per_read
+        );
+
+        // Use SET_MTA + UPLOAD for large reads
+        self.set_mta(mta).await?;
+
+        let mut result = Vec::with_capacity(size);
+        let mut remaining = size;
+
+        while remaining > 0 {
+            let to_read = remaining.min(max_per_read).min(255) as u8;
+            let data = self.upload(to_read).await?;
+            result.extend_from_slice(&data);
+            remaining -= to_read as usize;
+        }
+
+        Ok(result)
     }
 
     /// Write memory to slave using SHORT_DOWNLOAD
@@ -353,20 +416,17 @@ impl XcpSlave {
     }
 
     /// Read a U8 array from memory
+    /// Handles large reads by using SET_MTA + UPLOAD when needed
     pub async fn read_u8_array(&self, mta: Mta, count: usize) -> Result<Vec<u8>, SlaveError> {
-        let mut result = Vec::with_capacity(count);
-        let mut remaining = count;
-        let mut current_addr = mta;
+        let max_per_read = self.max_upload_size();
 
-        while remaining > 0 {
-            let to_read = remaining.min(255) as u8;
-            let data = self.read_memory(current_addr, to_read).await?;
-            result.extend_from_slice(&data);
-            remaining -= to_read as usize;
-            current_addr.address += to_read as u32;
+        if count <= max_per_read {
+            // Small enough for single SHORT_UPLOAD
+            return self.read_memory(mta, count as u8).await;
         }
 
-        Ok(result)
+        // For large arrays, use SET_MTA + UPLOAD sequence
+        self.read_large_data(mta, count, None).await
     }
 
     /// Write a U8 array to memory
@@ -464,8 +524,11 @@ mod tests {
     fn test_slave_id_display() {
         let id = SlaveId::new();
         let display = format!("{}", id);
-        // Should display short form (first part of UUID)
-        assert_eq!(display.len(), 8); // e.g., "a1b2c3d4"
+        // Should display full UUID string (36 chars: 32 hex + 4 dashes)
+        // e.g., "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        assert_eq!(display.len(), 36);
+        // Verify it's a valid UUID format
+        assert!(uuid::Uuid::parse_str(&display).is_ok());
     }
 
     #[test]
