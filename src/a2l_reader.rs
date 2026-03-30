@@ -112,6 +112,17 @@ impl A2lDataType {
     }
 }
 
+/// Dimension type inferred from record layout name
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DimensionKind {
+    /// Scalar value (single element)
+    Scalar,
+    /// 1D array (actual size from matrix_dim)
+    Array,
+    /// 2D matrix (actual size from matrix_dim)
+    Matrix,
+}
+
 /// Measurement information from A2L
 #[derive(Debug, Clone)]
 pub struct A2lMeasurement {
@@ -365,7 +376,9 @@ impl A2lReader {
     ///    - Lookup1D_* -> 1D array
     ///    - Lookup2D_* -> 2D matrix
     ///    - LAYOUT_* -> scalar (simple layout)
-    /// 4. Combine base type with dimensions from matrix_dim if available
+    /// 4. Combine base type with dimensions from:
+    ///    a) matrix_dim if available (preferred)
+    ///    b) AXIS_DESCR max_axis_points (fallback for MAP/CURVE types)
     fn parse_characteristic_datatype(
         &self,
         ch: &a2lfile::Characteristic,
@@ -390,28 +403,104 @@ impl A2lReader {
         };
 
         // Step 2: Determine dimensionality from name patterns
-        let dimensions = Self::infer_dimensions_from_layout_name(layout_name);
+        let dimension_kind = Self::infer_dimension_kind(layout_name);
 
         // Step 3: Combine base type with dimensions
-        // Priority: explicit matrix_dim > name pattern inference
+        // Priority: matrix_dim > AXIS_DESCR dimensions
+
+        // Try matrix_dim first
         if let Some(matrix_dim) = &ch.matrix_dim {
             let dims = &matrix_dim.dim_list;
-            match dims.len() {
+            return match dims.len() {
                 1 => Self::wrap_as_array(base_type, dims[0] as usize),
                 2 => Self::wrap_as_matrix(base_type, dims[0] as usize, dims[1] as usize),
                 _ => Some(base_type),
+            };
+        }
+
+        // Fallback: get dimensions from AXIS_DESCR
+        let dimensions_from_axis = Self::get_dimensions_from_axis_descr(ch);
+
+        match dimension_kind {
+            DimensionKind::Scalar => Some(base_type),
+            DimensionKind::Array => {
+                // 1D array (CURVE type)
+                match dimensions_from_axis {
+                    Some((rows, _)) if rows > 0 => {
+                        tracing::debug!(
+                            "Characteristic '{}' has array layout '{}' with {} elements from AXIS_DESCR",
+                            ch.get_name(), layout_name, rows
+                        );
+                        Self::wrap_as_array(base_type, rows)
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "Characteristic '{}' has array layout '{}' but could not determine dimensions from AXIS_DESCR. Treating as scalar.",
+                            ch.get_name(), layout_name
+                        );
+                        Some(base_type)
+                    }
+                }
             }
-        } else if let Some((rows, cols)) = dimensions {
-            if rows == 1 {
-                // 1D array
-                Self::wrap_as_array(base_type, cols)
-            } else {
-                // 2D matrix
-                Self::wrap_as_matrix(base_type, rows, cols)
+            DimensionKind::Matrix => {
+                // 2D matrix (MAP type)
+                match dimensions_from_axis {
+                    Some((rows, cols)) if rows > 0 && cols > 0 => {
+                        tracing::debug!(
+                            "Characteristic '{}' has matrix layout '{}' with dimensions {}x{} from AXIS_DESCR",
+                            ch.get_name(), layout_name, rows, cols
+                        );
+                        Self::wrap_as_matrix(base_type, rows, cols)
+                    }
+                    Some((rows, _)) if rows > 0 => {
+                        // Only one dimension found - treat as 1D array
+                        tracing::debug!(
+                            "Characteristic '{}' has matrix layout '{}' with {} elements from AXIS_DESCR (1D fallback)",
+                            ch.get_name(), layout_name, rows
+                        );
+                        Self::wrap_as_array(base_type, rows)
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "Characteristic '{}' has matrix layout '{}' but could not determine dimensions from AXIS_DESCR. Treating as scalar.",
+                            ch.get_name(), layout_name
+                        );
+                        Some(base_type)
+                    }
+                }
             }
-        } else {
-            // Scalar
-            Some(base_type)
+        }
+    }
+
+    /// Get dimensions from AXIS_DESCR blocks
+    /// Returns Some((rows, cols)) for MAP types (2D)
+    /// Returns Some((n, 0)) for CURVE types (1D)
+    /// Returns None if no AXIS_DESCR or invalid configuration
+    fn get_dimensions_from_axis_descr(ch: &a2lfile::Characteristic) -> Option<(usize, usize)> {
+        let axis_descr_count = ch.axis_descr.len();
+
+        match axis_descr_count {
+            0 => None,
+            1 => {
+                // CURVE type (1D array)
+                let size = ch.axis_descr[0].max_axis_points as usize;
+                Some((size, 0))
+            }
+            2 => {
+                // MAP type (2D matrix)
+                // First AXIS_DESCR defines rows, second defines columns
+                let rows = ch.axis_descr[0].max_axis_points as usize;
+                let cols = ch.axis_descr[1].max_axis_points as usize;
+                Some((rows, cols))
+            }
+            _ => {
+                // More than 2 AXIS_DESCR blocks - unusual
+                tracing::warn!(
+                    "Characteristic '{}' has {} AXIS_DESCR blocks, expected 0-2",
+                    ch.get_name(), axis_descr_count
+                );
+                None
+            }
         }
     }
 
@@ -502,22 +591,19 @@ impl A2lReader {
         }
     }
 
-    /// Infer dimensions from record layout name
-    /// Returns Some((rows, cols)) where:
-    /// - For 1D array: (1, n) or None if size unknown
-    /// - For 2D matrix: (rows, cols)
-    /// Returns None for scalars
-    fn infer_dimensions_from_layout_name(name: &str) -> Option<(usize, usize)> {
+    /// Infer dimension kind from record layout name
+    /// Returns the type of dimensionality (Scalar, Array, or Matrix)
+    /// Actual dimensions must come from matrix_dim in the CHARACTERISTIC block
+    fn infer_dimension_kind(name: &str) -> DimensionKind {
         if name.starts_with("Lookup2D_") && !name.starts_with("Lookup2D_X_") {
-            // 2D lookup table (matrix) - actual dimensions come from matrix_dim
-            // Return None to indicate "matrix type but size unknown from name"
-            Some((0, 0)) // Marker for 2D type
+            // 2D lookup table (matrix)
+            DimensionKind::Matrix
         } else if name.starts_with("Lookup1D_") && !name.starts_with("Lookup1D_X_") {
-            // 1D lookup table (array) - actual dimensions come from matrix_dim
-            Some((1, 0)) // Marker for 1D type
+            // 1D lookup table (array)
+            DimensionKind::Array
         } else {
             // Scalar types (Scalar_*, LAYOUT_*, etc.)
-            None
+            DimensionKind::Scalar
         }
     }
 
@@ -612,6 +698,92 @@ impl A2lReader {
         }
 
         addresses
+    }
+
+    /// Get MAX_CTO from PROTOCOL_LAYER block in IF_DATA
+    /// Returns None if not found
+    pub fn get_max_cto(&self) -> Option<u16> {
+        for module in &self.file.project.module {
+            for if_data in &module.if_data {
+                if let Some(ref generic) = if_data.ifdata_items {
+                    let content = format!("{:?}", generic);
+                    if let Some(max_cto) = Self::extract_max_cto_from_protocol_layer(&content) {
+                        return Some(max_cto);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract MAX_CTO from PROTOCOL_LAYER block
+    /// Format in A2L: /begin PROTOCOL_LAYER ... MAX_CTO ... /end PROTOCOL_LAYER
+    /// In Debug format: Block { tag: "PROTOCOL_LAYER", items: [..., 64, ...] }
+    fn extract_max_cto_from_protocol_layer(content: &str) -> Option<u16> {
+        let content_lower = content.to_lowercase();
+
+        // Find PROTOCOL_LAYER block
+        if let Some(pos) = content_lower.find("protocol_layer") {
+            let after_protocol = &content[pos..];
+
+            // Find the block content
+            if let Some(block_end) = Self::find_block_end(after_protocol) {
+                let block = &after_protocol[..block_end];
+
+                // MAX_CTO is typically the 8th numeric value after protocol version and timeouts
+                // T1, T2, T3, T4, T5, T6, T7 are timeouts (7 values), then MAX_CTO
+                // But we'll just look for reasonable values (16-65535) in position after timeouts
+
+                // Extract all numeric values from the block
+                let mut numbers = Vec::new();
+                let mut pos = 0;
+                while let Some(uint_pos) = block[pos..].find("UInt(") {
+                    let start = pos + uint_pos + 5;
+                    if let Some(end) = block[start..].find(")") {
+                        let num_str = &block[start..start + end];
+                        // Handle both "UInt(64)" and "UInt(0, 64)" formats
+                        let num_part = if let Some(comma_pos) = num_str.find(",") {
+                            &num_str[comma_pos + 1..].trim()
+                        } else {
+                            num_str.trim()
+                        };
+                        if let Ok(num) = num_part.parse::<u64>() {
+                            numbers.push(num);
+                        }
+                        pos = start + end + 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                // MAX_CTO should be after 7 timeout values (T1-T7) and protocol version
+                // Typical sequence: version(0x0102 as 2 numbers), T1-T7 (7 numbers), MAX_CTO, MAX_DTO
+                // So MAX_CTO is at index 9 (after 2 version numbers + 7 timeouts) or index 8 (if version is 1 number)
+                // Let's look for a reasonable MAX_CTO value (16-65535) that appears after several timeout values
+
+                // Common patterns:
+                // [version_high, version_low, T1, T2, T3, T4, T5, T6, T7, MAX_CTO, MAX_DTO, ...]
+                // MAX_CTO is typically 8, 16, 32, 64, 128, 255, etc.
+
+                for (i, &num) in numbers.iter().enumerate() {
+                    // MAX_CTO should be after timeout values (typically 1000-10000ms)
+                    // and be a reasonable CTO size (8-255)
+                    if (8..=255).contains(&num) {
+                        // Check if previous values look like timeouts (1000-10000 range)
+                        if i >= 7 {
+                            let timeout_range = 100..=10000u64;
+                            let prev_7_are_timeouts = numbers[i.saturating_sub(7)..i]
+                                .iter()
+                                .all(|&n| timeout_range.contains(&n));
+                            if prev_7_are_timeouts {
+                                return Some(num as u16);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Parse debug content to find addresses

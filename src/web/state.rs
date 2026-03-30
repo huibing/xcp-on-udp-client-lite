@@ -23,8 +23,12 @@ pub struct DeviceState {
     pub name: String,
     /// IP address from A2L
     pub address: String,
-    /// A2L file path
+    /// A2L file path (temp file path)
     pub a2l_path: String,
+    /// Original A2L filename (user's uploaded filename)
+    pub original_filename: String,
+    /// MAX_CTO from A2L (max command transfer object size)
+    pub max_cto: u16,
     /// Is connected to device
     pub connected: bool,
     /// XCP slave ID when connected
@@ -41,12 +45,14 @@ pub struct DeviceState {
 
 impl DeviceState {
     /// Create new device state from A2L
-    pub fn new(id: String, name: String, address: String, a2l_path: String) -> Self {
+    pub fn new(id: String, name: String, address: String, a2l_path: String, original_filename: String, max_cto: u16) -> Self {
         Self {
             id,
             name,
             address,
             a2l_path,
+            original_filename,
+            max_cto,
             connected: false,
             slave_id: None,
             cal_manager: Arc::new(RwLock::new(CalibrationManager::new())),
@@ -54,6 +60,13 @@ impl DeviceState {
             cal_values: Arc::new(RwLock::new(HashMap::new())),
             daq_running: Arc::new(RwLock::new(false)),
         }
+    }
+
+    /// Get maximum bytes that can be read in a single SHORT_UPLOAD or UPLOAD command
+    /// SHORT_UPLOAD response: [RES (1 byte), data...]
+    /// So max data = max_cto - 1
+    pub fn max_upload_size(&self) -> usize {
+        (self.max_cto as usize).saturating_sub(1)
     }
 }
 
@@ -64,6 +77,8 @@ pub struct SlaveState {
     pub id: SlaveId,
     /// Slave info
     pub info: SlaveInfo,
+    /// MAX_CTO from A2L (max command transfer object size)
+    pub max_cto: u16,
     /// Calibration parameter manager (slave-specific A2L data)
     pub cal_manager: Arc<RwLock<CalibrationManager>>,
     /// DAQ measurement manager (slave-specific A2L data)
@@ -82,6 +97,7 @@ impl SlaveState {
         Self {
             id,
             info,
+            max_cto: 255, // Default to 255
             cal_manager: Arc::new(RwLock::new(CalibrationManager::new())),
             daq_manager: Arc::new(RwLock::new(DaqManager::new())),
             cal_values: Arc::new(RwLock::new(HashMap::new())),
@@ -93,6 +109,13 @@ impl SlaveState {
     /// Get display name for this slave
     pub fn display_name(&self) -> String {
         self.info.display_name()
+    }
+
+    /// Get maximum bytes that can be read in a single SHORT_UPLOAD or UPLOAD command
+    /// SHORT_UPLOAD response: [RES (1 byte), data...]
+    /// So max data = max_cto - 1
+    pub fn max_upload_size(&self) -> usize {
+        (self.max_cto as usize).saturating_sub(1)
     }
 
     /// Check if connected
