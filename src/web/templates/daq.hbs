@@ -118,6 +118,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadSelectionFromStorage();
     renderSelectedVars();
     checkDaqStatus();
+
+    // Reload variables when page becomes visible (after connecting device)
+    document.addEventListener('visibilitychange', async () => {
+        if (!document.hidden) {
+            await loadAvailableVars();
+            renderSelectedVars();
+        }
+    });
 });
 
 async function loadAvailableVars() {
@@ -149,6 +157,12 @@ function saveSelectionToStorage() {
 }
 
 function openModal() {
+    // Check if DAQ is running
+    if (daqRunning) {
+        alert('Please stop DAQ before adding or removing variables.');
+        return;
+    }
+
     tempSelectedKeys = new Set(selectedKeys);
     renderAvailableVars();
     document.getElementById('varModal').style.display = 'flex';
@@ -258,12 +272,15 @@ function applySelection() {
 }
 
 async function syncSelectionToBackend() {
-    // Clear all selections first
+    // Build selections array - first clear all, then set selected
+    const selections = [];
+
+    // Clear all variables
     for (const v of allVariables) {
-        await fetch('/api/daq/toggle', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: `device_id=${encodeURIComponent(v.device_id)}&idx=${v.idx}&selected=false`
+        selections.push({
+            device_id: v.device_id,
+            idx: v.idx,
+            selected: false
         });
     }
 
@@ -272,12 +289,23 @@ async function syncSelectionToBackend() {
         const [deviceId, name] = key.split(':');
         const v = allVariables.find(v => v.device_id === deviceId && v.name === name);
         if (v) {
-            await fetch('/api/daq/toggle', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                body: `device_id=${encodeURIComponent(v.device_id)}&idx=${v.idx}&selected=true`
-            });
+            // Find and update the selection
+            const existing = selections.find(s => s.device_id === v.device_id && s.idx === v.idx);
+            if (existing) {
+                existing.selected = true;
+            }
         }
+    }
+
+    // Send single batch request
+    try {
+        await fetch('/api/daq/select', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ selections })
+        });
+    } catch (e) {
+        console.error('Failed to sync selection:', e);
     }
 }
 
@@ -300,18 +328,7 @@ function renderSelectedVars() {
     emptyState.style.display = 'none';
 
     // Render selected list
-    list.innerHTML = selectedVars.map(v => {
-        const key = `${v.device_id}:${v.name}`;
-        return `
-            <div class="daq-item">
-                <span class="name">
-                    <span style="color: #888; font-size: 0.85em;">[${escapeHtml(v.device_name)}]</span>
-                    ${escapeHtml(v.name)}
-                </span>
-                <button class="secondary" onclick="removeVar('${key}')" title="Remove" style="padding: 0.2rem 0.5rem;">&times;</button>
-            </div>
-        `;
-    }).join('');
+    renderSelectedList(selectedVars);
 
     // Render live data placeholders (fixed positions)
     liveData.innerHTML = selectedVars.map(v => {
@@ -323,6 +340,25 @@ function renderSelectedVars() {
                     ${escapeHtml(v.name)}
                 </span>
                 <span class="value" id="live-${key}">-</span>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderSelectedList(selectedVars) {
+    const list = document.getElementById('selectedList');
+    list.innerHTML = selectedVars.map(v => {
+        const key = `${v.device_id}:${v.name}`;
+        const removeBtn = daqRunning
+            ? ''
+            : `<button class="secondary" onclick="removeVar('${key}')" title="Remove" style="padding: 0.2rem 0.5rem;">&times;</button>`;
+        return `
+            <div class="daq-item">
+                <span class="name">
+                    <span style="color: #888; font-size: 0.85em;">[${escapeHtml(v.device_name)}]</span>
+                    ${escapeHtml(v.name)}
+                </span>
+                ${removeBtn}
             </div>
         `;
     }).join('');
@@ -341,12 +377,17 @@ async function startDaq() {
         return;
     }
 
+    // Sync selection to backend before starting
+    await syncSelectionToBackend();
+
     try {
         const response = await fetch('/api/daq/start');
         const data = await response.json();
         if (data.success) {
             daqRunning = true;
             updateDaqStatus();
+            // Update remove buttons (hide them when running)
+            updateSelectedListButtons();
             // Reset all values to "-" before starting
             resetLiveValues();
             startRefresh();
@@ -365,6 +406,8 @@ async function stopDaq() {
         if (data.success) {
             daqRunning = false;
             updateDaqStatus();
+            // Update remove buttons (show them when stopped)
+            updateSelectedListButtons();
             stopRefresh();
         } else {
             alert('Failed to stop DAQ: ' + data.error);
@@ -372,6 +415,13 @@ async function stopDaq() {
     } catch (e) {
         alert('Failed to stop DAQ: ' + e.message);
     }
+}
+
+function updateSelectedListButtons() {
+    const selectedVars = allVariables.filter(v =>
+        selectedKeys.has(`${v.device_id}:${v.name}`)
+    );
+    renderSelectedList(selectedVars);
 }
 
 function resetLiveValues() {
@@ -421,6 +471,7 @@ async function checkDaqStatus() {
         const data = await response.json();
         daqRunning = data.running;
         updateDaqStatus();
+        updateSelectedListButtons();
         if (daqRunning) {
             startRefresh();
         }

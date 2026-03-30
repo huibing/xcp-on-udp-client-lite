@@ -2,8 +2,10 @@
 
 mod tui;
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
+use std::path::Path;
 use std::time::Duration;
+use chrono::Local;
 use clap::{Parser, Subcommand};
 use tui::app::App;
 use tui::event::{Event, EventHandler};
@@ -35,16 +37,37 @@ enum Mode {
     },
 }
 
+/// Setup logging to a file in the logs directory
+fn setup_logging() -> Result<std::fs::File, Box<dyn std::error::Error>> {
+    // Create logs directory if it doesn't exist
+    let logs_dir = Path::new("logs");
+    if !logs_dir.exists() {
+        fs::create_dir_all(logs_dir)?;
+    }
+
+    // Generate log filename with current date and time
+    let now = Local::now();
+    let log_filename = format!("xcp_client_{}.log", now.format("%Y%m%d_%H%M%S"));
+    let log_path = logs_dir.join(log_filename);
+
+    // Create log file
+    let log_file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&log_path)?;
+
+    tracing::info!("Log file created: {}", log_path.display());
+
+    Ok(log_file)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // Initialize logging to file
-    let log_file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open("xcp_client.log")?;
+    let log_file = setup_logging()?;
 
     tracing_subscriber::fmt()
         .with_env_filter(

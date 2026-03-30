@@ -86,6 +86,7 @@ impl WebServer {
             .route("/api/daq/stop", get(routes::daq_stop))
             .route("/api/daq/status", get(routes::daq_status))
             .route("/api/daq/toggle", post(routes::daq_toggle))
+            .route("/api/daq/select", post(routes::daq_set_selection))
             .route("/api/daq/clear", get(routes::daq_clear))
             .route("/api/daq/data", post(routes::daq_data))
             // A2L
@@ -94,8 +95,8 @@ impl WebServer {
             // State and middleware
             .layer(axum::middleware::from_fn(auth_middleware))
             .layer(TraceLayer::new_for_http())
-            // Increase body size limit for large A2L file uploads (20MB)
-            .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
+            // Increase body size limit for large A2L file uploads (50MB)
+            .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
             .with_state(state)
     }
 }

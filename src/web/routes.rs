@@ -475,6 +475,18 @@ pub async fn disconnect_device(State(state): State<AppState>, Json(payload): Jso
         }
         // Remove SlaveState
         state.remove_slave_state(slave_id).await;
+
+        // Clear current_slave if it was this device
+        let current_id = *state.current_slave_id.read().await;
+        if current_id == Some(slave_id) {
+            // Find another connected slave or set to None
+            let remaining = state.all_slaves().await;
+            if remaining.is_empty() {
+                state.set_current_slave(None).await;
+            } else {
+                state.set_current_slave(Some(remaining[0].id)).await;
+            }
+        }
     }
 
     // Update device connection status
@@ -1256,6 +1268,62 @@ pub async fn daq_stop(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// DAQ set selected measurements (POST /api/daq/select)
+pub async fn daq_set_selection(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let selections: Vec<(String, usize, bool)> = payload
+        .get("selections")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let device_id = v.get("device_id").and_then(|d| d.as_str()).unwrap_or("");
+                    let idx = v.get("idx").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                    let selected = v.get("selected").and_then(|s| s.as_bool()).unwrap_or(false);
+                    if !device_id.is_empty() {
+                        Some((device_id.to_string(), idx, selected))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for (device_id, idx, selected) in selections {
+        // Try to parse as UUID first (for connected slaves)
+        if let Ok(uuid) = uuid::Uuid::parse_str(&device_id) {
+            let slave_id = SlaveId(uuid);
+            if let Some(slave) = state.get_slave(slave_id).await {
+                let mut daq_manager = slave.daq_manager.write().await;
+                let is_currently_selected = daq_manager.selected_indices().contains(&idx);
+
+                if selected && !is_currently_selected {
+                    daq_manager.select_measurement(idx);
+                } else if !selected && is_currently_selected {
+                    daq_manager.deselect_measurement(idx);
+                }
+            }
+        } else {
+            // Not a UUID, try to find by device ID
+            if let Some(device) = state.get_device(&device_id).await {
+                let mut daq_manager = device.daq_manager.write().await;
+                let is_currently_selected = daq_manager.selected_indices().contains(&idx);
+
+                if selected && !is_currently_selected {
+                    daq_manager.select_measurement(idx);
+                } else if !selected && is_currently_selected {
+                    daq_manager.deselect_measurement(idx);
+                }
+            }
+        }
+    }
+
+    Json(json!({ "success": true }))
+}
+
 /// DAQ status API (GET /api/daq/status)
 pub async fn daq_status(State(state): State<AppState>) -> impl IntoResponse {
     let current_slave = state.current_slave().await;
@@ -1283,14 +1351,13 @@ pub async fn daq_toggle(
 
     if let (Some(device_id_str), Some(idx_str)) = (device_id_str, idx_str) {
         if let Ok(idx) = idx_str.parse::<usize>() {
-            // Try to parse as UUID
+            // Try to parse as UUID first (for connected slaves)
             if let Ok(uuid) = uuid::Uuid::parse_str(&device_id_str) {
                 let slave_id = SlaveId(uuid);
                 if let Some(slave) = state.get_slave(slave_id).await {
                     let mut daq_manager = slave.daq_manager.write().await;
                     let is_selected = daq_manager.selected_indices().contains(&idx);
 
-                    // If "selected" parameter is provided, use it; otherwise toggle
                     if let Some(should_select) = selected {
                         if should_select && !is_selected {
                             daq_manager.select_measurement(idx);
@@ -1298,7 +1365,26 @@ pub async fn daq_toggle(
                             daq_manager.deselect_measurement(idx);
                         }
                     } else {
-                        // Toggle behavior
+                        if is_selected {
+                            daq_manager.deselect_measurement(idx);
+                        } else {
+                            daq_manager.select_measurement(idx);
+                        }
+                    }
+                }
+            } else {
+                // Not a UUID, try to find by device ID (for unconnected devices)
+                if let Some(device) = state.get_device(&device_id_str).await {
+                    let mut daq_manager = device.daq_manager.write().await;
+                    let is_selected = daq_manager.selected_indices().contains(&idx);
+
+                    if let Some(should_select) = selected {
+                        if should_select && !is_selected {
+                            daq_manager.select_measurement(idx);
+                        } else if !should_select && is_selected {
+                            daq_manager.deselect_measurement(idx);
+                        }
+                    } else {
                         if is_selected {
                             daq_manager.deselect_measurement(idx);
                         } else {
