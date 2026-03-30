@@ -14,6 +14,49 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
+/// Device state - represents a physical device with its A2L file
+#[derive(Clone)]
+pub struct DeviceState {
+    /// Unique device ID
+    pub id: String,
+    /// Device name (from A2L or user-defined)
+    pub name: String,
+    /// IP address from A2L
+    pub address: String,
+    /// A2L file path
+    pub a2l_path: String,
+    /// Is connected to device
+    pub connected: bool,
+    /// XCP slave ID when connected
+    pub slave_id: Option<SlaveId>,
+    /// Calibration parameter manager
+    pub cal_manager: Arc<RwLock<CalibrationManager>>,
+    /// DAQ measurement manager
+    pub daq_manager: Arc<RwLock<DaqManager>>,
+    /// Cached calibration values
+    pub cal_values: Arc<RwLock<HashMap<String, CalibrationValue>>>,
+    /// DAQ running status
+    pub daq_running: Arc<RwLock<bool>>,
+}
+
+impl DeviceState {
+    /// Create new device state from A2L
+    pub fn new(id: String, name: String, address: String, a2l_path: String) -> Self {
+        Self {
+            id,
+            name,
+            address,
+            a2l_path,
+            connected: false,
+            slave_id: None,
+            cal_manager: Arc::new(RwLock::new(CalibrationManager::new())),
+            daq_manager: Arc::new(RwLock::new(DaqManager::new())),
+            cal_values: Arc::new(RwLock::new(HashMap::new())),
+            daq_running: Arc::new(RwLock::new(false)),
+        }
+    }
+}
+
 /// Slave state containing A2L data and managers for a specific slave
 #[derive(Clone)]
 pub struct SlaveState {
@@ -73,14 +116,10 @@ pub struct AppState {
     pub error: Arc<RwLock<Option<String>>>,
     /// Template engine for rendering HTML
     pub templates: Arc<TemplateEngine>,
-    /// Global A2L data (for offline viewing without connected slave)
-    pub global_cal_manager: Arc<RwLock<CalibrationManager>>,
-    /// Global DAQ measurements (for offline viewing)
-    pub global_daq_manager: Arc<RwLock<DaqManager>>,
-    /// Global A2L file path
-    pub global_a2l_path: Arc<RwLock<String>>,
-    /// Slave addresses from loaded A2L
-    pub a2l_slave_addresses: Arc<RwLock<Vec<String>>>,
+    /// Devices list (A2L files loaded, each representing a device)
+    pub devices: Arc<RwLock<Vec<DeviceState>>>,
+    /// Current selected device ID
+    pub current_device_id: Arc<RwLock<Option<String>>>,
 }
 
 impl AppState {
@@ -98,10 +137,8 @@ impl AppState {
             status: Arc::new(RwLock::new(None)),
             error: Arc::new(RwLock::new(None)),
             templates: Arc::new(TemplateEngine::new()),
-            global_cal_manager: Arc::new(RwLock::new(CalibrationManager::new())),
-            global_daq_manager: Arc::new(RwLock::new(DaqManager::new())),
-            global_a2l_path: Arc::new(RwLock::new(String::new())),
-            a2l_slave_addresses: Arc::new(RwLock::new(Vec::new())),
+            devices: Arc::new(RwLock::new(Vec::new())),
+            current_device_id: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -197,5 +234,77 @@ impl AppState {
     pub async fn search_variables(&self, query: &str) -> Vec<DeviceVariable> {
         let search = self.variable_search().await;
         search.search(query).await
+    }
+
+    /// Get all devices
+    pub async fn all_devices(&self) -> Vec<DeviceState> {
+        self.devices.read().await.clone()
+    }
+
+    /// Get device by ID
+    pub async fn get_device(&self, id: &str) -> Option<DeviceState> {
+        self.devices.read().await.iter().find(|d| d.id == id).cloned()
+    }
+
+    /// Add a new device
+    pub async fn add_device(&self, device: DeviceState) {
+        self.devices.write().await.push(device);
+    }
+
+    /// Update device connection status
+    pub async fn update_device_connection(&self, device_id: &str, connected: bool, slave_id: Option<SlaveId>) {
+        let mut devices = self.devices.write().await;
+        if let Some(device) = devices.iter_mut().find(|d| d.id == device_id) {
+            device.connected = connected;
+            device.slave_id = slave_id;
+        }
+    }
+
+    /// Remove a device
+    pub async fn remove_device(&self, id: &str) {
+        self.devices.write().await.retain(|d| d.id != id);
+    }
+
+    /// Get current device
+    pub async fn current_device(&self) -> Option<DeviceState> {
+        let id = self.current_device_id.read().await.clone();
+        if let Some(id) = id {
+            self.devices.read().await.iter().find(|d| d.id == id).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Set current device
+    pub async fn set_current_device(&self, id: Option<String>) {
+        *self.current_device_id.write().await = id;
+    }
+
+    /// Check if address already exists in any device
+    pub async fn address_exists(&self, address: &str) -> bool {
+        self.devices.read().await.iter().any(|d| d.address == address)
+    }
+
+    /// Get total calibration count from all devices
+    pub async fn total_device_cal_count(&self) -> usize {
+        let mut count = 0;
+        for device in self.devices.read().await.iter() {
+            count += device.cal_manager.read().await.params().len();
+        }
+        count
+    }
+
+    /// Get total measurement count from all devices
+    pub async fn total_device_meas_count(&self) -> usize {
+        let mut count = 0;
+        for device in self.devices.read().await.iter() {
+            count += device.daq_manager.read().await.available_count();
+        }
+        count
+    }
+
+    /// Get connected device count
+    pub async fn connected_device_count(&self) -> usize {
+        self.devices.read().await.iter().filter(|d| d.connected).count()
     }
 }

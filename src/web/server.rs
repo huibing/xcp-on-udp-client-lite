@@ -7,6 +7,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use axum::extract::DefaultBodyLimit;
 use std::net::SocketAddr;
 use tower_http::trace::TraceLayer;
 
@@ -63,28 +64,38 @@ impl WebServer {
             .route("/slaves", get(routes::slaves_page))
             .route("/api/slave/select/:id", get(routes::select_slave_api))
             .route("/api/disconnect/:id", get(routes::disconnect_slave_api))
-            // Connection
+            // Connection (device-based)
             .route("/connect", get(routes::connect_page))
             .route("/api/connect", post(routes::connect_api))
             .route("/api/disconnect", get(routes::disconnect_api))
-            // Calibration (with slave ID)
+            // Device management
+            .route("/api/devices/connect-all", post(routes::connect_all_devices))
+            .route("/api/devices/connect", post(routes::connect_device))
+            .route("/api/devices/disconnect", post(routes::disconnect_device))
+            .route("/api/devices/remove", post(routes::remove_device))
+            // Calibration (with device ID)
             .route("/calibration", get(routes::calibration_page))
-            .route("/api/cal/read/:slave_id/:idx", get(routes::cal_read))
-            .route("/cal/write/:slave_id/:idx", get(routes::cal_write_page))
-            .route("/api/cal/write/:slave_id/:idx", post(routes::cal_write_api))
+            .route("/api/cal/available", get(routes::cal_available))
+            .route("/api/cal/read/:device_id/:idx", get(routes::cal_read))
+            .route("/cal/write/:device_id/:idx", get(routes::cal_write_page))
+            .route("/api/cal/write/:device_id/:idx", post(routes::cal_write_api))
             // DAQ
             .route("/daq", get(routes::daq_page))
+            .route("/api/daq/available", get(routes::daq_available))
             .route("/api/daq/start", get(routes::daq_start))
             .route("/api/daq/stop", get(routes::daq_stop))
+            .route("/api/daq/status", get(routes::daq_status))
             .route("/api/daq/toggle", post(routes::daq_toggle))
             .route("/api/daq/clear", get(routes::daq_clear))
-            .route("/api/daq/data", get(routes::daq_data))
+            .route("/api/daq/data", post(routes::daq_data))
             // A2L
             .route("/a2l", get(routes::a2l_page))
             .route("/api/a2l/load", post(routes::a2l_load))
             // State and middleware
             .layer(axum::middleware::from_fn(auth_middleware))
             .layer(TraceLayer::new_for_http())
+            // Increase body size limit for large A2L file uploads (20MB)
+            .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
             .with_state(state)
     }
 }

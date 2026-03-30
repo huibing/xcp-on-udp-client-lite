@@ -1,0 +1,144 @@
+<div class="card" style="max-width: 800px;">
+    <h2>Device Management</h2>
+    <p style="color: #888; margin-bottom: 1rem;">
+        Each device corresponds to one A2L file. Upload A2L files first, then connect to devices.
+    </p>
+
+    <div style="margin-bottom: 1.5rem;">
+        <a href="/a2l" class="btn" style="display: inline-block; text-decoration: none;">Upload A2L Files</a>
+        <button type="button" class="btn" onclick="connectAllDevices()" style="margin-left: 0.5rem;">Connect All Devices</button>
+    </div>
+
+    {{#if devices}}
+    <table style="width: 100%; border-collapse: collapse; table-layout: fixed;">
+        <colgroup>
+            <col style="width: 15%;">
+            <col style="width: 18%;">
+            <col style="width: 22%;">
+            <col style="width: 12%;">
+            <col style="width: 33%;">
+        </colgroup>
+        <thead>
+            <tr style="border-bottom: 1px solid #444;">
+                <th style="text-align: left; padding: 0.5rem;">Name</th>
+                <th style="text-align: left; padding: 0.5rem;">Address</th>
+                <th style="text-align: left; padding: 0.5rem;">A2L File</th>
+                <th style="text-align: left; padding: 0.5rem;">Status</th>
+                <th style="text-align: left; padding: 0.5rem;">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{#each devices}}
+            <tr style="border-bottom: 1px solid #333;">
+                <td style="padding: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{this.name}}">{{this.name}}</td>
+                <td style="padding: 0.5rem; font-family: monospace;">{{this.address}}</td>
+                <td style="padding: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{this.a2l_name}}">{{this.a2l_name}}</td>
+                <td style="padding: 0.5rem;">
+                    {{#if this.connected}}
+                    <span style="color: #00ff88; font-weight: bold;">Connected</span>
+                    {{else}}
+                    <span style="color: #888;">Disconnected</span>
+                    {{/if}}
+                </td>
+                <td style="padding: 0.5rem; white-space: nowrap;">
+                    {{#if this.connected}}
+                    <button type="button" class="secondary" onclick="disconnectDevice('{{this.id}}')">Disconnect</button>
+                    {{else}}
+                    <button type="button" class="btn" onclick="connectDevice('{{this.id}}', '{{this.address}}')">Connect</button>
+                    {{/if}}
+                    <button type="button" class="secondary" onclick="removeDevice('{{this.id}}')" style="margin-left: 0.25rem;">Remove</button>
+                </td>
+            </tr>
+            {{/each}}
+        </tbody>
+    </table>
+    {{else}}
+    <p style="color: #888; text-align: center; padding: 2rem;">
+        No devices configured. Upload A2L files to add devices.
+    </p>
+    {{/if}}
+
+    <div style="margin-top: 1.5rem;">
+        <button type="button" class="secondary" onclick="location.href='/'">Back to Dashboard</button>
+    </div>
+</div>
+
+<script>
+async function connectAllDevices() {
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = 'Connecting...';
+
+    try {
+        const response = await fetch('/api/devices/connect-all', { method: 'POST' });
+        const result = await response.json();
+        if (result.success) {
+            alert(result.message);
+            location.reload();
+        } else {
+            alert('Error: ' + result.error);
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Connect All Devices';
+    }
+}
+
+async function connectDevice(deviceId, address) {
+    try {
+        const response = await fetch('/api/devices/connect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId })
+        });
+        const result = await response.json();
+        if (result.success) {
+            location.reload();
+        } else {
+            alert('Error: ' + result.error);
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+    }
+}
+
+async function disconnectDevice(deviceId) {
+    try {
+        const response = await fetch('/api/devices/disconnect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId })
+        });
+        const result = await response.json();
+        if (result.success) {
+            location.reload();
+        } else {
+            alert('Error: ' + result.error);
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+    }
+}
+
+async function removeDevice(deviceId) {
+    if (!confirm('Are you sure you want to remove this device?')) return;
+
+    try {
+        const response = await fetch('/api/devices/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId })
+        });
+        const result = await response.json();
+        if (result.success) {
+            location.reload();
+        } else {
+            alert('Error: ' + result.error);
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+    }
+}
+</script>

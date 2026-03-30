@@ -1,89 +1,500 @@
 <div class="grid">
     <div class="card">
-        <h2>Measurements ({{selected_count}})</h2>
-        {{#if has_slave_selector}}
-        <div class="form-group" style="margin-bottom: 1rem;">
-            <label>Current Slave</label>
-            <select onchange="selectSlave(this.value)">
-                <option value="">All Slaves</option>
-                {{#each slave_options}}
-                <option value="{{id}}" {{#if selected}}selected{{/if}}>{{status}} {{name}}</option>
-                {{/each}}
-            </select>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+            <h2 style="margin: 0;">Measurements</h2>
+            <button id="addVarsBtn" class="btn" onclick="openModal()">+ Add Variables</button>
         </div>
-        <script>
-            function selectSlave(id) {
-                if (id) {
-                    location.href = '/api/slave/select/' + id;
-                }
-            }
-        </script>
-        {{/if}}
-        <form id="measForm" method="POST" action="/api/daq/select">
-            <div style="max-height: 400px; overflow-y: auto;">
-                {{#if measurements_by_slave}}
-                    {{#each measurements_by_slave}}
-                    <div style="background: #0f3460; padding: 0.5rem; margin-bottom: 0.5rem; border-radius: 4px;">
-                        <strong style="color: #00ff88;">[{{slave_name}}]</strong>
-                    </div>
-                        {{#each measurements}}
-                        <div class="daq-value">
-                            <label class="checkbox">
-                                <input type="checkbox" name="meas_{{slave_id}}_{{idx}}" {{#if is_selected}}checked{{/if}} onchange="toggleMeas('{{slave_id}}', {{idx}})">
-                                <span>{{name}}</span>
-                            </label>
-                        </div>
-                        {{/each}}
-                    {{/each}}
-                {{else}}
-                    <p style="color: #666;">No measurements loaded. Load A2L files first.</p>
-                {{/if}}
-            </div>
-        </form>
+
+        <div id="selectedList" style="max-height: 400px; overflow-y: auto;">
+            <!-- Populated by JavaScript -->
+        </div>
+
+        <div id="emptyState" style="text-align: center; padding: 2rem; color: #666;">
+            <p>No variables selected.</p>
+            <p>Click "Add Variables" to select measurements.</p>
+        </div>
     </div>
+
     <div class="card">
-        <h2>Live Data {{#if daq_running}}<span class="tag running">RUNNING</span>{{else}}<span class="tag stopped">STOPPED</span>{{/if}}</h2>
+        <h2>Live Data <span id="daqStatus" class="tag stopped">STOPPED</span></h2>
         <div id="liveData" style="max-height: 400px; overflow-y: auto;">
-            {{#if daq_running}}
-                {{#if latest_values}}
-                    {{#each latest_values}}
-                    <div class="daq-value">
-                        <span class="name">{{#if device}}<span style="color: #888; font-size: 0.85em;">[{{device}}]</span> {{var_name}}{{else}}{{name}}{{/if}}</span>
-                        <span class="value">{{value}}</span>
-                    </div>
-                    {{/each}}
-                {{else}}
-                    <p style="color: #666; text-align: center;">No data (DAQ not running)</p>
-                {{/if}}
-            {{else}}
-                <p style="color: #666; text-align: center;">No data (DAQ not running)</p>
-            {{/if}}
+            <p style="color: #666; text-align: center;">No data (DAQ not running)</p>
         </div>
         <br>
         <div class="btn-group">
-            {{#if daq_running}}
-            <button onclick="location.href='/api/daq/stop'" class="danger">Stop</button>
-            {{else}}
-            <button onclick="location.href='/api/daq/start'">Start</button>
-            {{/if}}
-            <button onclick="location.href='/api/daq/clear'" class="secondary">Clear</button>
+            <button id="startBtn" onclick="startDaq()">Start</button>
+            <button id="stopBtn" onclick="stopDaq()" class="danger" style="display: none;">Stop</button>
+            <button onclick="clearData()" class="secondary">Clear</button>
         </div>
     </div>
 </div>
+
+<!-- Modal for variable selection -->
+<div id="varModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 800px; max-height: 80vh; overflow: hidden; display: flex; flex-direction: column;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem; border-bottom: 1px solid #444;">
+            <h3 style="margin: 0;">Select Measurements</h3>
+            <button onclick="closeModal()" style="background: none; border: none; color: #fff; font-size: 1.5rem; cursor: pointer;">&times;</button>
+        </div>
+
+        <div class="modal-search" style="padding: 0.75rem 1rem; border-bottom: 1px solid #333;">
+            <input type="text" id="varSearch" placeholder="Search measurements..." style="width: 100%;" oninput="filterVars()">
+        </div>
+
+        <div class="modal-body" style="flex: 1; overflow-y: auto; padding: 0.5rem 0;">
+            <table class="modal-table" style="width: 100%; border-collapse: collapse;">
+                <thead style="position: sticky; top: 0; background: #2a2a2a;">
+                    <tr>
+                        <th style="width: 40px; padding: 0.5rem;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll()"></th>
+                        <th style="text-align: left; padding: 0.5rem;">Name</th>
+                        <th style="text-align: left; padding: 0.5rem;">Device</th>
+                        <th style="text-align: left; padding: 0.5rem;">Type</th>
+                        <th style="text-align: left; padding: 0.5rem;">Address</th>
+                    </tr>
+                </thead>
+                <tbody id="availableVars">
+                    <!-- Populated by JavaScript -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="modal-footer" style="padding: 1rem; border-top: 1px solid #444; display: flex; justify-content: space-between; align-items: center;">
+            <span id="selectedCount">0 variables selected</span>
+            <div>
+                <button class="secondary" onclick="closeModal()" style="margin-right: 0.5rem;">Cancel</button>
+                <button class="btn" onclick="applySelection()">Apply Selection</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+.modal-content {
+    background: #1e1e1e;
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+.modal-table th, .modal-table td {
+    text-align: left;
+    padding: 0.5rem;
+    border-bottom: 1px solid #333;
+}
+.modal-table tr:hover {
+    background: #2a2a2a;
+}
+.tag.running { background: #00ff88; color: #000; }
+.tag.stopped { background: #555; color: #fff; }
+.daq-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem;
+    border-bottom: 1px solid #333;
+}
+.daq-item .name { color: #fff; }
+.daq-item .value { color: #00ff88; font-family: monospace; }
+</style>
+
 <script>
-    function toggleMeas(slaveId, idx) {
-        fetch('/api/daq/toggle', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: 'slave_id=' + encodeURIComponent(slaveId) + '&idx=' + idx
+let allVariables = [];
+let selectedKeys = new Set();
+let tempSelectedKeys = new Set();
+let daqRunning = false;
+let refreshInterval = null;
+
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadAvailableVars();
+    loadSelectionFromStorage();
+    renderSelectedVars();
+    checkDaqStatus();
+});
+
+async function loadAvailableVars() {
+    try {
+        const response = await fetch('/api/daq/available');
+        const data = await response.json();
+        if (data.success) {
+            allVariables = data.variables;
+        }
+    } catch (e) {
+        console.error('Failed to load available variables:', e);
+    }
+}
+
+function loadSelectionFromStorage() {
+    const stored = localStorage.getItem('daq_selectedVars');
+    if (stored) {
+        try {
+            const arr = JSON.parse(stored);
+            selectedKeys = new Set(arr);
+        } catch (e) {
+            selectedKeys = new Set();
+        }
+    }
+}
+
+function saveSelectionToStorage() {
+    localStorage.setItem('daq_selectedVars', JSON.stringify([...selectedKeys]));
+}
+
+function openModal() {
+    tempSelectedKeys = new Set(selectedKeys);
+    renderAvailableVars();
+    document.getElementById('varModal').style.display = 'flex';
+    document.getElementById('varSearch').focus();
+}
+
+function closeModal() {
+    document.getElementById('varModal').style.display = 'none';
+}
+
+function renderAvailableVars() {
+    const tbody = document.getElementById('availableVars');
+    const searchTerm = document.getElementById('varSearch').value.toLowerCase();
+
+    const filtered = allVariables.filter(v =>
+        v.name.toLowerCase().includes(searchTerm) ||
+        v.device_name.toLowerCase().includes(searchTerm)
+    );
+
+    tbody.innerHTML = filtered.map(v => {
+        const key = `${v.device_id}:${v.name}`;
+        const checked = tempSelectedKeys.has(key) ? 'checked' : '';
+        return `
+            <tr>
+                <td><input type="checkbox" data-key="${key}" ${checked} onchange="toggleVar('${key}')"></td>
+                <td>${escapeHtml(v.name)}</td>
+                <td style="color: #888;">${escapeHtml(v.device_name)}</td>
+                <td>${v.type}</td>
+                <td style="font-family: monospace;">0x${v.address_hex}</td>
+            </tr>
+        `;
+    }).join('');
+
+    updateSelectedCount();
+    updateSelectAllCheckbox();
+}
+
+function filterVars() {
+    renderAvailableVars();
+}
+
+function toggleVar(key) {
+    if (tempSelectedKeys.has(key)) {
+        tempSelectedKeys.delete(key);
+    } else {
+        tempSelectedKeys.add(key);
+    }
+    updateSelectedCount();
+    updateSelectAllCheckbox();
+}
+
+function toggleSelectAll() {
+    const selectAll = document.getElementById('selectAll');
+    const searchTerm = document.getElementById('varSearch').value.toLowerCase();
+
+    const filtered = allVariables.filter(v =>
+        v.name.toLowerCase().includes(searchTerm) ||
+        v.device_name.toLowerCase().includes(searchTerm)
+    );
+
+    if (selectAll.checked) {
+        filtered.forEach(v => {
+            tempSelectedKeys.add(`${v.device_id}:${v.name}`);
+        });
+    } else {
+        filtered.forEach(v => {
+            tempSelectedKeys.delete(`${v.device_id}:${v.name}`);
         });
     }
-    // Auto-refresh live data every 500ms
-    setInterval(function() {
-        fetch('/api/daq/data')
-            .then(r => r.text())
-            .then(html => {
-                document.getElementById('liveData').innerHTML = html;
+    renderAvailableVars();
+}
+
+function updateSelectedCount() {
+    document.getElementById('selectedCount').textContent =
+        `${tempSelectedKeys.size} variable${tempSelectedKeys.size !== 1 ? 's' : ''} selected`;
+}
+
+function updateSelectAllCheckbox() {
+    const selectAll = document.getElementById('selectAll');
+    const searchTerm = document.getElementById('varSearch').value.toLowerCase();
+
+    const filtered = allVariables.filter(v =>
+        v.name.toLowerCase().includes(searchTerm) ||
+        v.device_name.toLowerCase().includes(searchTerm)
+    );
+
+    if (filtered.length === 0) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+        return;
+    }
+
+    const allSelected = filtered.every(v => tempSelectedKeys.has(`${v.device_id}:${v.name}`));
+    const someSelected = filtered.some(v => tempSelectedKeys.has(`${v.device_id}:${v.name}`));
+
+    selectAll.checked = allSelected;
+    selectAll.indeterminate = someSelected && !allSelected;
+}
+
+function applySelection() {
+    selectedKeys = new Set(tempSelectedKeys);
+    saveSelectionToStorage();
+    closeModal();
+    renderSelectedVars();
+    // Sync selection to backend
+    syncSelectionToBackend();
+}
+
+async function syncSelectionToBackend() {
+    // Clear all selections first
+    for (const v of allVariables) {
+        await fetch('/api/daq/toggle', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: `device_id=${encodeURIComponent(v.device_id)}&idx=${v.idx}&selected=false`
+        });
+    }
+
+    // Set selected ones
+    for (const key of selectedKeys) {
+        const [deviceId, name] = key.split(':');
+        const v = allVariables.find(v => v.device_id === deviceId && v.name === name);
+        if (v) {
+            await fetch('/api/daq/toggle', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: `device_id=${encodeURIComponent(v.device_id)}&idx=${v.idx}&selected=true`
             });
-    }, 500);
+        }
+    }
+}
+
+function renderSelectedVars() {
+    const list = document.getElementById('selectedList');
+    const emptyState = document.getElementById('emptyState');
+    const liveData = document.getElementById('liveData');
+
+    const selectedVars = allVariables.filter(v =>
+        selectedKeys.has(`${v.device_id}:${v.name}`)
+    );
+
+    if (selectedVars.length === 0) {
+        list.innerHTML = '';
+        liveData.innerHTML = '<p style="color: #666; text-align: center;">No data (DAQ not running)</p>';
+        emptyState.style.display = 'block';
+        return;
+    }
+
+    emptyState.style.display = 'none';
+
+    // Render selected list
+    list.innerHTML = selectedVars.map(v => {
+        const key = `${v.device_id}:${v.name}`;
+        return `
+            <div class="daq-item">
+                <span class="name">
+                    <span style="color: #888; font-size: 0.85em;">[${escapeHtml(v.device_name)}]</span>
+                    ${escapeHtml(v.name)}
+                </span>
+                <button class="secondary" onclick="removeVar('${key}')" title="Remove" style="padding: 0.2rem 0.5rem;">&times;</button>
+            </div>
+        `;
+    }).join('');
+
+    // Render live data placeholders (fixed positions)
+    liveData.innerHTML = selectedVars.map(v => {
+        const key = `${v.device_id}:${v.name}`.replace(/:/g, '-');
+        return `
+            <div class="daq-item" data-var-key="${key}">
+                <span class="name">
+                    <span style="color: #888; font-size: 0.85em;">[${escapeHtml(v.device_name)}]</span>
+                    ${escapeHtml(v.name)}
+                </span>
+                <span class="value" id="live-${key}">-</span>
+            </div>
+        `;
+    }).join('');
+}
+
+function removeVar(key) {
+    selectedKeys.delete(key);
+    saveSelectionToStorage();
+    renderSelectedVars();
+    syncSelectionToBackend();
+}
+
+async function startDaq() {
+    if (selectedKeys.size === 0) {
+        alert('Please select at least one variable first');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/daq/start');
+        const data = await response.json();
+        if (data.success) {
+            daqRunning = true;
+            updateDaqStatus();
+            // Reset all values to "-" before starting
+            resetLiveValues();
+            startRefresh();
+        } else {
+            alert('Failed to start DAQ: ' + data.error);
+        }
+    } catch (e) {
+        alert('Failed to start DAQ: ' + e.message);
+    }
+}
+
+async function stopDaq() {
+    try {
+        const response = await fetch('/api/daq/stop');
+        const data = await response.json();
+        if (data.success) {
+            daqRunning = false;
+            updateDaqStatus();
+            stopRefresh();
+        } else {
+            alert('Failed to stop DAQ: ' + data.error);
+        }
+    } catch (e) {
+        alert('Failed to stop DAQ: ' + e.message);
+    }
+}
+
+function resetLiveValues() {
+    const selectedVars = allVariables.filter(v =>
+        selectedKeys.has(`${v.device_id}:${v.name}`)
+    );
+    selectedVars.forEach(v => {
+        const key = `${v.device_id}:${v.name}`.replace(/:/g, '-');
+        const valueCell = document.getElementById(`live-${key}`);
+        if (valueCell) {
+            valueCell.textContent = '-';
+        }
+    });
+}
+
+async function clearData() {
+    try {
+        await fetch('/api/daq/clear');
+        // Just reset values, don't re-render structure
+        resetLiveValues();
+    } catch (e) {
+        console.error('Failed to clear data:', e);
+    }
+}
+
+function updateDaqStatus() {
+    const status = document.getElementById('daqStatus');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+
+    if (daqRunning) {
+        status.className = 'tag running';
+        status.textContent = 'RUNNING';
+        startBtn.style.display = 'none';
+        stopBtn.style.display = 'inline-block';
+    } else {
+        status.className = 'tag stopped';
+        status.textContent = 'STOPPED';
+        startBtn.style.display = 'inline-block';
+        stopBtn.style.display = 'none';
+    }
+}
+
+async function checkDaqStatus() {
+    try {
+        const response = await fetch('/api/daq/status');
+        const data = await response.json();
+        daqRunning = data.running;
+        updateDaqStatus();
+        if (daqRunning) {
+            startRefresh();
+        }
+    } catch (e) {
+        console.error('Failed to check DAQ status:', e);
+    }
+}
+
+function startRefresh() {
+    if (refreshInterval) return;
+    refreshInterval = setInterval(fetchLiveData, 500);
+    fetchLiveData();
+}
+
+function stopRefresh() {
+    if (refreshInterval) {
+        clearInterval(refreshInterval);
+        refreshInterval = null;
+    }
+}
+
+async function fetchLiveData() {
+    if (selectedKeys.size === 0) return;
+
+    try {
+        // Build filter for selected variables
+        const selectedVars = allVariables.filter(v =>
+            selectedKeys.has(`${v.device_id}:${v.name}`)
+        );
+
+        const response = await fetch('/api/daq/data', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                variables: selectedVars.map(v => ({
+                    device_id: v.device_id,
+                    name: v.name
+                }))
+            })
+        });
+        const data = await response.json();
+
+        if (data.values && data.values.length > 0) {
+            // Update values in place without re-rendering
+            data.values.forEach(v => {
+                const key = `${v.device_id}:${v.var_name}`.replace(/:/g, '-');
+                const valueCell = document.getElementById(`live-${key}`);
+                if (valueCell) {
+                    valueCell.textContent = v.value;
+                }
+            });
+        }
+    } catch (e) {
+        console.error('Failed to fetch live data:', e);
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Close modal on outside click
+document.getElementById('varModal').addEventListener('click', (e) => {
+    if (e.target.id === 'varModal') {
+        closeModal();
+    }
+});
+
+// Close modal on Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        closeModal();
+    }
+});
 </script>

@@ -723,9 +723,6 @@ mod tests {
 
     #[test]
     fn test_slave_id_hashmap() {
-        use crate::calibration::CalibrationManager;
-        use crate::daq::DaqManager;
-        use crate::transport::{MessageRouter, TransportConfig};
 
         let mut client = XcpClient::new();
         let id1 = SlaveId::new();

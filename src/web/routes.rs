@@ -4,17 +4,23 @@
 //! Multi-slave support: routes now handle multiple XCP slave connections.
 
 use axum::{
-    extract::{Form, Multipart, Path, Query, State},
+    extract::{Form, Json, Multipart, Path, Query, State},
     http::header::SET_COOKIE,
     response::{AppendHeaders, Html, IntoResponse, Redirect},
 };
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+#[allow(unused)]
+use serde_json::json;
 
 use crate::calibration::{CalibrationManager, CalibrationValue};
+use crate::daq::DaqManager;
 use crate::slave::SlaveId;
 use crate::transport::TransportConfig;
 use crate::web::auth::{clear_session, try_create_session, verify_credentials};
-use crate::web::state::{AppState, SlaveState};
+use crate::web::state::{AppState, DeviceState, SlaveState};
 use crate::web::templates;
 
 /// Login page (GET /login)
@@ -120,28 +126,34 @@ pub async fn dashboard(State(state): State<AppState>) -> Html<String> {
 
 /// Connect page (GET /connect)
 pub async fn connect_page(State(state): State<AppState>) -> Html<String> {
-    // Get unique addresses from all loaded A2L files
-    let slaves = state.all_slaves().await;
-    let mut slave_addrs: Vec<String> = slaves
+    // Get all devices
+    let devices = state.all_devices().await;
+
+    // Build device list for template
+    let device_list: Vec<serde_json::Value> = devices
         .iter()
-        .filter_map(|s| {
-            if s.is_connected() {
-                Some(s.info.addr_string())
-            } else {
-                None
-            }
+        .map(|d| {
+            json!({
+                "id": d.id,
+                "name": d.name,
+                "address": d.address,
+                "a2l_name": std::path::Path::new(&d.a2l_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                "connected": d.connected,
+            })
         })
         .collect();
 
-    // Add default addresses
-    slave_addrs.push("127.0.0.1:5555".to_string());
-    slave_addrs.push("192.168.1.100:5555".to_string());
-    slave_addrs.dedup();
+    // Calculate next ECU name
+    let next_ecu_num = devices.len() + 1;
+    let default_name = format!("ECU{}", next_ecu_num);
 
     let status = state.take_status().await;
     let error = state.take_error().await;
 
-    let content = templates::connect_page(&slave_addrs);
+    let content = templates::connect_page_devices(&device_list, &default_name);
     Html(templates::page("Connect", &content, status.as_deref(), error.as_deref()))
 }
 
@@ -177,22 +189,6 @@ pub async fn connect_api(
 
                 // Create slave state
                 let slave_state = SlaveState::new(slave_id, info);
-
-                // Copy global A2L data to the new slave if available
-                let global_cal = state.global_cal_manager.read().await;
-                let global_daq = state.global_daq_manager.read().await;
-                let global_path = state.global_a2l_path.read().await;
-
-                if !global_cal.params().is_empty() {
-                    *slave_state.cal_manager.write().await = global_cal.clone();
-                }
-                if global_daq.available_count() > 0 {
-                    *slave_state.daq_manager.write().await = global_daq.clone();
-                }
-                if !global_path.is_empty() {
-                    *slave_state.a2l_path.write().await = global_path.clone();
-                }
-
                 state.add_slave_state(slave_state).await;
                 state.set_current_slave(Some(slave_id)).await;
 
@@ -290,6 +286,241 @@ pub async fn select_slave_api(
     Redirect::to("/")
 }
 
+// ============== Device Management Routes ==============
+
+/// Connect all devices API (POST /api/devices/connect-all)
+pub async fn connect_all_devices(State(state): State<AppState>) -> impl IntoResponse {
+    let devices = state.all_devices().await;
+    let mut client = state.client.lock().await;
+    let mut connected_count = 0;
+    let mut failed_devices: Vec<String> = Vec::new();
+
+    for device in &devices {
+        if device.connected {
+            continue; // Already connected
+        }
+
+        let transport_config = TransportConfig::Udp {
+            addr: device.address.clone(),
+        };
+
+        match client.connect_slave(&device.name, transport_config).await {
+            Ok(slave_id) => {
+                // Get slave info from XcpClient
+                if let Some(xcp_slave) = client.get_slave(slave_id) {
+                    let guard = xcp_slave.lock().await;
+                    let info = guard.info.clone();
+                    drop(guard);
+
+                    // Create SlaveState using device's cal_manager and daq_manager
+                    let slave_state = SlaveState {
+                        id: slave_id,
+                        info,
+                        cal_manager: device.cal_manager.clone(),
+                        daq_manager: device.daq_manager.clone(),
+                        cal_values: device.cal_values.clone(),
+                        daq_running: device.daq_running.clone(),
+                        a2l_path: Arc::new(RwLock::new(device.a2l_path.clone())),
+                    };
+                    state.add_slave_state(slave_state).await;
+
+                    // Update device connection status
+                    state.update_device_connection(&device.id, true, Some(slave_id)).await;
+
+                    // If this is the first connection, set it as current
+                    if state.current_slave().await.is_none() {
+                        state.set_current_slave(Some(slave_id)).await;
+                    }
+
+                    connected_count += 1;
+                } else {
+                    failed_devices.push(format!("{}: failed to get slave info", device.name));
+                }
+            }
+            Err(e) => {
+                failed_devices.push(format!("{}: {}", device.name, e));
+            }
+        }
+    }
+
+    let message = if connected_count > 0 {
+        if failed_devices.is_empty() {
+            format!("Connected to {} device(s)", connected_count)
+        } else {
+            format!(
+                "Connected to {} device(s). Failed: {}",
+                connected_count,
+                failed_devices.join(", ")
+            )
+        }
+    } else if failed_devices.is_empty() {
+        "All devices already connected or no devices available".to_string()
+    } else {
+        format!("Failed to connect: {}", failed_devices.join(", "))
+    };
+
+    Json(serde_json::json!({
+        "success": failed_devices.is_empty() || connected_count > 0,
+        "message": message,
+        "connected": connected_count,
+    }))
+}
+
+/// Connect single device API (POST /api/devices/connect)
+pub async fn connect_device(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
+    let device_id = payload.get("device_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let device = match state.get_device(device_id).await {
+        Some(d) => d,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Device not found"
+            }));
+        }
+    };
+
+    if device.connected {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "Device already connected"
+        }));
+    }
+
+    let transport_config = TransportConfig::Udp {
+        addr: device.address.clone(),
+    };
+
+    let mut client = state.client.lock().await;
+
+    match client.connect_slave(&device.name, transport_config).await {
+        Ok(slave_id) => {
+            // Get slave info from XcpClient
+            let info = if let Some(xcp_slave) = client.get_slave(slave_id) {
+                let guard = xcp_slave.lock().await;
+                guard.info.clone()
+            } else {
+                return Json(serde_json::json!({
+                    "success": false,
+                    "error": "Failed to get slave info after connection",
+                }));
+            };
+
+            // Create SlaveState using device's cal_manager and daq_manager
+            let slave_state = SlaveState {
+                id: slave_id,
+                info: info.clone(),
+                cal_manager: device.cal_manager.clone(),
+                daq_manager: device.daq_manager.clone(),
+                cal_values: device.cal_values.clone(),
+                daq_running: device.daq_running.clone(),
+                a2l_path: Arc::new(RwLock::new(device.a2l_path.clone())),
+            };
+            state.add_slave_state(slave_state).await;
+
+            // Update device connection status
+            state.update_device_connection(&device.id, true, Some(slave_id)).await;
+
+            // If this is the first connection, set it as current
+            if state.current_slave().await.is_none() {
+                state.set_current_slave(Some(slave_id)).await;
+            }
+
+            Json(serde_json::json!({
+                "success": true,
+                "message": format!("Connected to {}", device.name),
+            }))
+        }
+        Err(e) => {
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to connect: {}", e),
+            }))
+        }
+    }
+}
+
+/// Disconnect device API (POST /api/devices/disconnect)
+pub async fn disconnect_device(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
+    let device_id = payload.get("device_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let device = match state.get_device(device_id).await {
+        Some(d) => d,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Device not found"
+            }));
+        }
+    };
+
+    if !device.connected {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "Device not connected"
+        }));
+    }
+
+    if let Some(slave_id) = device.slave_id {
+        let mut client = state.client.lock().await;
+        if let Err(e) = client.disconnect_slave(slave_id).await {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to disconnect: {}", e),
+            }));
+        }
+        // Remove SlaveState
+        state.remove_slave_state(slave_id).await;
+    }
+
+    // Update device connection status
+    state.update_device_connection(&device.id, false, None).await;
+
+    Json(serde_json::json!({
+        "success": true,
+        "message": format!("Disconnected from {}", device.name),
+    }))
+}
+
+/// Remove device API (POST /api/devices/remove)
+pub async fn remove_device(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
+    let device_id = payload.get("device_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // First disconnect if connected
+    let device = match state.get_device(device_id).await {
+        Some(d) => d,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Device not found"
+            }));
+        }
+    };
+
+    if device.connected {
+        if let Some(slave_id) = device.slave_id {
+            let mut client = state.client.lock().await;
+            let _ = client.disconnect_slave(slave_id).await;
+            // Remove SlaveState
+            state.remove_slave_state(slave_id).await;
+        }
+    }
+
+    // Remove device
+    state.remove_device(device_id).await;
+
+    Json(serde_json::json!({
+        "success": true,
+        "message": "Device removed",
+    }))
+}
+
 /// Slaves list page (GET /slaves)
 pub async fn slaves_page(State(state): State<AppState>) -> Html<String> {
     let slaves = state.all_slaves().await;
@@ -322,9 +553,6 @@ pub async fn calibration_page(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Html<String> {
-    let search = params.get("search").cloned().unwrap_or_default();
-    let slave_filter = params.get("slave").cloned();
-
     // Get status/error from URL parameters (from cal_read redirect)
     let url_status = params.get("status").cloned();
     let url_error = params.get("error").cloned();
@@ -341,104 +569,109 @@ pub async fn calibration_page(
         state.take_error().await
     };
 
-    let current_slave = state.current_slave().await;
-
-    // (slave_id, slave_name, idx, param_name, type_name, address, value)
-    let mut all_params: Vec<(String, String, usize, String, String, u32, Option<String>)> = Vec::new();
-
-    if let Some(slave) = current_slave {
-        // Show calibration for current slave
-        let cal_manager = slave.cal_manager.read().await;
-        let cal_values = slave.cal_values.read().await;
-        let slave_id = slave.id.to_string();
-
-        for (i, p) in cal_manager.params().iter().enumerate() {
-            if search.is_empty() || p.name.to_lowercase().contains(&search.to_lowercase()) {
-                let value = cal_values.get(&p.name).map(|v| v.format());
-                all_params.push((
-                    slave_id.clone(),
-                    slave.display_name(),
-                    i,
-                    p.name.clone(),
-                    p.data_type.type_name(),
-                    p.address,
-                    value,
-                ));
-            }
-        }
-    } else {
-        // Show calibration from all slaves
-        let slaves = state.all_slaves().await;
-        if !slaves.is_empty() {
-            for slave in slaves {
-                let cal_manager = slave.cal_manager.read().await;
-                let cal_values = slave.cal_values.read().await;
-                let slave_id = slave.id.to_string();
-
-                for (i, p) in cal_manager.params().iter().enumerate() {
-                    let matches_search = search.is_empty()
-                        || p.name.to_lowercase().contains(&search.to_lowercase());
-                    let matches_slave = slave_filter.as_ref().map_or(true, |s| {
-                        slave.display_name().to_lowercase().contains(&s.to_lowercase())
-                    });
-
-                    if matches_search && matches_slave {
-                        let value = cal_values.get(&p.name).map(|v| v.format());
-                        all_params.push((
-                            slave_id.clone(),
-                            slave.display_name(),
-                            i,
-                            p.name.clone(),
-                            p.data_type.type_name(),
-                            p.address,
-                            value,
-                        ));
-                    }
-                }
-            }
-        } else {
-            // No slaves connected, show global A2L data if available
-            let global_cal = state.global_cal_manager.read().await;
-            if !global_cal.params().is_empty() {
-                for (i, p) in global_cal.params().iter().enumerate() {
-                    if search.is_empty() || p.name.to_lowercase().contains(&search.to_lowercase()) {
-                        all_params.push((
-                            "global".to_string(),
-                            "Offline".to_string(),
-                            i,
-                            p.name.clone(),
-                            p.data_type.type_name(),
-                            p.address,
-                            None, // No values available offline
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    let content = templates::calibration_page(&all_params, 0);
+    // Render empty calibration page - variables loaded via API
+    let content = templates::calibration_page(&[], 0);
     Html(templates::page("Calibration", &content, status.as_deref(), error.as_deref()))
 }
 
-/// Read calibration parameter (GET /api/cal/read/:slave_id/:idx)
+/// Get available calibration variables (GET /api/cal/available)
+pub async fn cal_available(State(state): State<AppState>) -> impl IntoResponse {
+    let mut variables: Vec<serde_json::Value> = Vec::new();
+
+    // First check connected slaves
+    let slaves = state.all_slaves().await;
+    for slave in &slaves {
+        let cal_manager = slave.cal_manager.read().await;
+        for (i, p) in cal_manager.params().iter().enumerate() {
+            variables.push(json!({
+                "device_id": slave.id.to_string(),
+                "device_name": slave.display_name(),
+                "idx": i,
+                "name": p.name,
+                "type": p.data_type.type_name(),
+                "address_hex": format!("{:08X}", p.address),
+                "connected": slave.is_connected(),
+            }));
+        }
+    }
+
+    // Also check devices (for offline A2L data)
+    let devices = state.all_devices().await;
+    for device in devices {
+        // Skip if this device's slave is already in the list
+        if let Some(slave_id) = device.slave_id {
+            if slaves.iter().any(|s| s.id == slave_id) {
+                continue;
+            }
+        }
+
+        let cal_mgr = device.cal_manager.read().await;
+        for (i, p) in cal_mgr.params().iter().enumerate() {
+            variables.push(json!({
+                "device_id": device.id.clone(),
+                "device_name": device.name.clone(),
+                "idx": i,
+                "name": p.name,
+                "type": p.data_type.type_name(),
+                "address_hex": format!("{:08X}", p.address),
+                "connected": device.connected,
+            }));
+        }
+    }
+
+    Json(json!({
+        "success": true,
+        "variables": variables,
+    }))
+}
+
+/// Read calibration parameter (GET /api/cal/read/:device_id/:idx)
 pub async fn cal_read(
     State(state): State<AppState>,
-    Path((slave_id_str, idx)): Path<(String, usize)>,
+    Path((device_id_str, idx)): Path<(String, usize)>,
 ) -> impl IntoResponse {
-    let slave_id = match uuid::Uuid::parse_str(&slave_id_str) {
-        Ok(id) => SlaveId(id),
+    // Try to parse as UUID (could be slave_id or device_id)
+    let uuid = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
         Err(_) => {
-            return Redirect::to(&format!("/calibration?error={}", urlencoding::encode("Invalid slave ID")));
+            return Json(json!({
+                "success": false,
+                "error": "Invalid device ID"
+            }));
         }
     };
 
-    let Some(slave) = state.get_slave(slave_id).await else {
-        return Redirect::to(&format!("/calibration?error={}", urlencoding::encode("Slave not found")));
+    // First try to find as SlaveId
+    let slave_id = SlaveId(uuid);
+    let slave = state.get_slave(slave_id).await;
+
+    // If not found as slave, try to find device and check if connected
+    let Some(slave) = slave else {
+        // Check if it's a device ID
+        if let Some(device) = state.get_device(&device_id_str).await {
+            if !device.connected {
+                return Json(json!({
+                    "success": false,
+                    "error": "Device not connected. Please connect first."
+                }));
+            }
+            // Device is connected but slave state not found - internal error
+            return Json(json!({
+                "success": false,
+                "error": "Device connected but slave state missing. Try reconnecting."
+            }));
+        }
+        return Json(json!({
+            "success": false,
+            "error": "Device not found"
+        }));
     };
 
     if !slave.is_connected() {
-        return Redirect::to(&format!("/calibration?error={}", urlencoding::encode("Not connected to XCP slave")));
+        return Json(json!({
+            "success": false,
+            "error": "Not connected to XCP slave"
+        }));
     }
 
     let client = state.client.lock().await;
@@ -468,24 +701,35 @@ pub async fn cal_read(
                 Ok(value) => {
                     let value_str = value.format();
                     tracing::info!("Successfully read {} = {}", param.name, value_str);
-                    slave.cal_values.write().await.insert(param.name.clone(), value);
-                    let msg = format!("[{}] {} = {}", slave.display_name(), param.name, value_str);
-                    return Redirect::to(&format!("/calibration?status={}", urlencoding::encode(&msg)));
+                    slave.cal_values.write().await.insert(param.name.clone(), value.clone());
+                    return Json(json!({
+                        "success": true,
+                        "name": param.name,
+                        "value": value_str,
+                        "device_name": slave.display_name()
+                    }));
                 }
                 Err(e) => {
                     tracing::error!("Failed to read {}: {}", param.name, e);
-                    let msg = format!("Failed to read {}: {}", param.name, e);
-                    return Redirect::to(&format!("/calibration?error={}", urlencoding::encode(&msg)));
+                    return Json(json!({
+                        "success": false,
+                        "error": format!("Failed to read {}: {}", param.name, e)
+                    }));
                 }
             }
         } else {
             tracing::error!("XcpSlave not found in client for slave_id: {:?}", slave_id);
-            return Redirect::to(&format!("/calibration?error={}", urlencoding::encode("Slave not available in client")));
+            return Json(json!({
+                "success": false,
+                "error": "Slave not available in client"
+            }));
         }
     } else {
         tracing::error!("Calibration parameter index {} not found", idx);
-        let msg = format!("Parameter index {} not found", idx);
-        return Redirect::to(&format!("/calibration?error={}", urlencoding::encode(&msg)));
+        return Json(json!({
+            "success": false,
+            "error": format!("Parameter index {} not found", idx)
+        }));
     }
 }
 
@@ -713,29 +957,30 @@ async fn read_calibration_from_slave(
     Ok(value)
 }
 
-/// Write calibration page (GET /cal/write/:slave_id/:idx)
+/// Write calibration page (GET /cal/write/:device_id/:idx)
 pub async fn cal_write_page(
     State(state): State<AppState>,
-    Path((slave_id_str, idx)): Path<(String, usize)>,
+    Path((device_id_str, idx)): Path<(String, usize)>,
 ) -> Html<String> {
-    let slave_id = match uuid::Uuid::parse_str(&slave_id_str) {
-        Ok(id) => SlaveId(id),
+    let uuid = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
         Err(_) => {
             return Html(templates::page(
                 "Error",
-                r#"<p>Invalid slave ID</p><a href="/calibration">Back</a>"#,
+                r#"<p>Invalid device ID</p><a href="/calibration">Back</a>"#,
                 None,
-                Some("Invalid slave ID format"),
+                Some("Invalid device ID format"),
             ));
         }
     };
 
+    let slave_id = SlaveId(uuid);
     let Some(slave) = state.get_slave(slave_id).await else {
         return Html(templates::page(
             "Error",
-            r#"<p>Slave not found</p><a href="/calibration">Back</a>"#,
+            r#"<p>Device not found or not connected</p><a href="/calibration">Back</a>"#,
             None,
-            Some("Slave not found"),
+            Some("Device not found"),
         ));
     };
 
@@ -745,7 +990,7 @@ pub async fn cal_write_page(
     if let Some(param) = cal_manager.params().get(idx) {
         let current = cal_values.get(&param.name).map(|v| v.format());
         let content = templates::cal_write_page(
-            &slave_id_str,
+            &device_id_str,
             idx,
             &param.name,
             current.as_deref(),
@@ -761,22 +1006,23 @@ pub async fn cal_write_page(
     }
 }
 
-/// Write calibration API (POST /api/cal/write/:slave_id/:idx)
+/// Write calibration API (POST /api/cal/write/:device_id/:idx)
 pub async fn cal_write_api(
     State(state): State<AppState>,
-    Path((slave_id_str, idx)): Path<(String, usize)>,
+    Path((device_id_str, idx)): Path<(String, usize)>,
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let slave_id = match uuid::Uuid::parse_str(&slave_id_str) {
-        Ok(id) => SlaveId(id),
+    let uuid = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
         Err(_) => {
-            state.set_error("Invalid slave ID".to_string()).await;
+            state.set_error("Invalid device ID".to_string()).await;
             return Redirect::to("/calibration");
         }
     };
 
+    let slave_id = SlaveId(uuid);
     let Some(slave) = state.get_slave(slave_id).await else {
-        state.set_error("Slave not found".to_string()).await;
+        state.set_error("Device not found or not connected".to_string()).await;
         return Redirect::to("/calibration");
     };
 
@@ -872,116 +1118,70 @@ async fn write_calibration_to_slave(
 
 /// DAQ page (GET /daq)
 pub async fn daq_page(State(state): State<AppState>) -> Html<String> {
-    let current_slave = state.current_slave().await;
-    let current_slave_id = current_slave.as_ref().map(|s| s.id.to_string());
-
-    // Use current slave's DAQ manager, or aggregate from all if no current
-    let (measurements, selected_indices, daq_running, latest_values) = if let Some(ref slave) = current_slave {
-        let daq_manager = slave.daq_manager.read().await;
-        let daq_running = *slave.daq_running.read().await;
-
-        let all_meas = daq_manager.all_measurements();
-        let selected = daq_manager.selected_indices();
-
-        let measurements: Vec<_> = all_meas
-            .iter()
-            .enumerate()
-            .map(|(i, m)| (slave.id.to_string(), i, m.name.clone(), selected.contains(&i)))
-            .collect();
-
-        // Get latest DAQ values
-        let latest_values = if daq_running {
-            daq_manager
-                .get_latest_sample()
-                .await
-                .map(|r| {
-                    r.values
-                        .into_iter()
-                        .map(|(k, v)| (format!("[{}] {}", slave.display_name(), k), v))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        let selected_indices: Vec<_> = selected.iter().copied().collect();
-
-        (measurements, selected_indices, daq_running, latest_values)
-    } else {
-        // Aggregate from all slaves
-        let slaves = state.all_slaves().await;
-        if !slaves.is_empty() {
-            let mut all_measurements = Vec::new();
-            let mut all_selected = Vec::new();
-            let mut any_running = false;
-            let mut all_values = Vec::new();
-
-            for slave in slaves {
-                let daq_manager = slave.daq_manager.read().await;
-                let daq_running = *slave.daq_running.read().await;
-                any_running |= daq_running;
-
-                let selected = daq_manager.selected_indices();
-                let offset = all_measurements.len();
-
-                for (i, m) in daq_manager.all_measurements().iter().enumerate() {
-                    all_measurements.push((slave.id.to_string(), i + offset, m.name.clone(), selected.contains(&i)));
-                }
-
-                all_selected.extend(selected.iter().map(|&i| i + offset));
-
-                if daq_running {
-                    if let Some(r) = daq_manager.get_latest_sample().await {
-                        for (k, v) in r.values {
-                            all_values.push((format!("[{}] {}", slave.display_name(), k), v));
-                        }
-                    }
-                }
-            }
-
-            (all_measurements, all_selected, any_running, all_values)
-        } else {
-            // No slaves connected, use global DAQ data if available
-            let global_daq = state.global_daq_manager.read().await;
-            let measurements: Vec<_> = global_daq
-                .all_measurements()
-                .iter()
-                .enumerate()
-                .map(|(i, m)| ("global".to_string(), i, m.name.clone(), false))
-                .collect();
-            (measurements, Vec::new(), false, Vec::new())
-        }
-    };
-
-    let slaves = state.all_slaves().await;
-
-    // Convert SlaveState to tuple format for template
-    let mut slaves_data = Vec::new();
-    for s in &slaves {
-        let cal_count = s.cal_manager.read().await.params().len();
-        let meas_count = s.daq_manager.read().await.available_count();
-        slaves_data.push((
-            s.id.to_string(),
-            s.display_name(),
-            s.is_connected(),
-            cal_count,
-            meas_count,
-        ));
-    }
-
     let status = state.take_status().await;
     let error = state.take_error().await;
 
+    // Render empty DAQ page - variables loaded via API
     let content = templates::daq_page(
-        &measurements,
-        &selected_indices,
-        daq_running,
-        &latest_values,
-        &slaves_data,
-        current_slave_id.as_deref(),
+        &[],  // measurements
+        &[],  // selected_indices
+        false, // daq_running
+        &[],   // latest_values
+        &[],   // slaves
+        None,  // current_slave_id
     );
     Html(templates::page("DAQ", &content, status.as_deref(), error.as_deref()))
+}
+
+/// Get available DAQ measurements (GET /api/daq/available)
+pub async fn daq_available(State(state): State<AppState>) -> impl IntoResponse {
+    let mut variables: Vec<serde_json::Value> = Vec::new();
+
+    // First check connected slaves
+    let slaves = state.all_slaves().await;
+    for slave in &slaves {
+        let daq_manager = slave.daq_manager.read().await;
+        for (i, m) in daq_manager.all_measurements().iter().enumerate() {
+            variables.push(json!({
+                "device_id": slave.id.to_string(),
+                "device_name": slave.display_name(),
+                "idx": i,
+                "name": m.name,
+                "type": format!("{:?}", m.data_type),
+                "address_hex": format!("{:08X}", m.address),
+                "connected": slave.is_connected(),
+            }));
+        }
+    }
+
+    // Also check devices (for offline A2L data)
+    let devices = state.all_devices().await;
+    for device in devices {
+        // Skip if this device's slave is already in the list
+        if let Some(slave_id) = device.slave_id {
+            if slaves.iter().any(|s| s.id == slave_id) {
+                continue;
+            }
+        }
+
+        let daq_mgr = device.daq_manager.read().await;
+        for (i, m) in daq_mgr.all_measurements().iter().enumerate() {
+            variables.push(json!({
+                "device_id": device.id.clone(),
+                "device_name": device.name.clone(),
+                "idx": i,
+                "name": m.name,
+                "type": format!("{:?}", m.data_type),
+                "address_hex": format!("{:08X}", m.address),
+                "connected": device.connected,
+            }));
+        }
+    }
+
+    Json(json!({
+        "success": true,
+        "variables": variables,
+    }))
 }
 
 /// DAQ start API (GET /api/daq/start)
@@ -989,13 +1189,17 @@ pub async fn daq_start(State(state): State<AppState>) -> impl IntoResponse {
     let current_slave = state.current_slave().await;
 
     let Some(slave) = current_slave else {
-        state.set_error("No slave selected".to_string()).await;
-        return Redirect::to("/daq");
+        return Json(json!({
+            "success": false,
+            "error": "No slave selected"
+        }));
     };
 
     if !slave.is_connected() {
-        state.set_error("Not connected to XCP slave".to_string()).await;
-        return Redirect::to("/daq");
+        return Json(json!({
+            "success": false,
+            "error": "Not connected to XCP slave"
+        }));
     }
 
     // Clone what we need before the async block
@@ -1009,13 +1213,15 @@ pub async fn daq_start(State(state): State<AppState>) -> impl IntoResponse {
         Ok(_) => {
             *slave.daq_running.write().await = true;
             state.set_status(format!("DAQ started on {}", slave_name)).await;
+            Json(json!({ "success": true }))
         }
         Err(e) => {
-            state.set_error(format!("DAQ start failed: {}", e)).await;
+            Json(json!({
+                "success": false,
+                "error": format!("DAQ start failed: {}", e)
+            }))
         }
     }
-
-    Redirect::to("/daq")
 }
 
 /// DAQ stop API (GET /api/daq/stop)
@@ -1023,8 +1229,10 @@ pub async fn daq_stop(State(state): State<AppState>) -> impl IntoResponse {
     let current_slave = state.current_slave().await;
 
     let Some(slave) = current_slave else {
-        state.set_error("No slave selected".to_string()).await;
-        return Redirect::to("/daq");
+        return Json(json!({
+            "success": false,
+            "error": "No slave selected"
+        }));
     };
 
     // Clone what we need before the async block
@@ -1037,13 +1245,30 @@ pub async fn daq_stop(State(state): State<AppState>) -> impl IntoResponse {
         Ok(_) => {
             *slave.daq_running.write().await = false;
             state.set_status(format!("DAQ stopped on {}", slave_name)).await;
+            Json(json!({ "success": true }))
         }
         Err(e) => {
-            state.set_error(format!("DAQ stop failed: {}", e)).await;
+            Json(json!({
+                "success": false,
+                "error": format!("DAQ stop failed: {}", e)
+            }))
         }
     }
+}
 
-    Redirect::to("/daq")
+/// DAQ status API (GET /api/daq/status)
+pub async fn daq_status(State(state): State<AppState>) -> impl IntoResponse {
+    let current_slave = state.current_slave().await;
+
+    let running = if let Some(ref slave) = current_slave {
+        *slave.daq_running.read().await
+    } else {
+        false
+    };
+
+    Json(json!({
+        "running": running
+    }))
 }
 
 /// DAQ toggle measurement (POST /api/daq/toggle)
@@ -1051,28 +1276,41 @@ pub async fn daq_toggle(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let slave_id_str = form.get("slave_id").cloned();
+    // Support both slave_id and device_id parameters
+    let device_id_str = form.get("device_id").or_else(|| form.get("slave_id")).cloned();
     let idx_str = form.get("idx").cloned();
+    let selected = form.get("selected").map(|s| s == "true");
 
-    if let (Some(slave_id_str), Some(idx_str)) = (slave_id_str, idx_str) {
+    if let (Some(device_id_str), Some(idx_str)) = (device_id_str, idx_str) {
         if let Ok(idx) = idx_str.parse::<usize>() {
-            if let Ok(id) = uuid::Uuid::parse_str(&slave_id_str) {
-                let slave_id = SlaveId(id);
+            // Try to parse as UUID
+            if let Ok(uuid) = uuid::Uuid::parse_str(&device_id_str) {
+                let slave_id = SlaveId(uuid);
                 if let Some(slave) = state.get_slave(slave_id).await {
                     let mut daq_manager = slave.daq_manager.write().await;
                     let is_selected = daq_manager.selected_indices().contains(&idx);
 
-                    if is_selected {
-                        daq_manager.deselect_measurement(idx);
+                    // If "selected" parameter is provided, use it; otherwise toggle
+                    if let Some(should_select) = selected {
+                        if should_select && !is_selected {
+                            daq_manager.select_measurement(idx);
+                        } else if !should_select && is_selected {
+                            daq_manager.deselect_measurement(idx);
+                        }
                     } else {
-                        daq_manager.select_measurement(idx);
+                        // Toggle behavior
+                        if is_selected {
+                            daq_manager.deselect_measurement(idx);
+                        } else {
+                            daq_manager.select_measurement(idx);
+                        }
                     }
                 }
             }
         }
     }
 
-    Redirect::to("/daq")
+    Json(json!({ "success": true }))
 }
 
 /// DAQ clear data (GET /api/daq/clear)
@@ -1093,83 +1331,95 @@ pub async fn daq_clear(State(state): State<AppState>) -> impl IntoResponse {
         state.set_status("DAQ data cleared for all slaves".to_string()).await;
     }
 
-    Redirect::to("/daq")
+    Json(json!({ "success": true }))
 }
 
-/// DAQ data partial (GET /api/daq/data) - for AJAX updates
-pub async fn daq_data(State(state): State<AppState>) -> Html<String> {
-    let current_slave = state.current_slave().await;
+/// DAQ data API (POST /api/daq/data) - for AJAX updates with variable filter
+pub async fn daq_data(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // Get filter variables from payload
+    let filter_vars: Vec<(String, String)> = payload
+        .get("variables")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let device_id = v.get("device_id").and_then(|d| d.as_str()).unwrap_or("");
+                    let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    if !device_id.is_empty() && !name.is_empty() {
+                        Some((device_id.to_string(), name.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
-    let values = if let Some(slave) = current_slave {
-        let daq_manager = slave.daq_manager.read().await;
-        daq_manager
-            .get_latest_sample()
-            .await
-            .map(|r| {
-                r.values
-                    .into_iter()
-                    .map(|(k, v)| (format!("[{}] {}", slave.display_name(), k), v))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    } else {
-        // Aggregate from all running slaves
-        let slaves = state.all_slaves().await;
-        let mut all_values = Vec::new();
+    let filter_set: std::collections::HashSet<(String, String)> = filter_vars.into_iter().collect();
 
-        for slave in slaves {
-            if *slave.daq_running.read().await {
-                let daq_manager = slave.daq_manager.read().await;
-                if let Some(r) = daq_manager.get_latest_sample().await {
-                    for (k, v) in r.values {
-                        all_values.push((format!("[{}] {}", slave.display_name(), k), v));
+    let mut values: Vec<serde_json::Value> = Vec::new();
+
+    // Get values from all running slaves
+    let slaves = state.all_slaves().await;
+    for slave in slaves {
+        if *slave.daq_running.read().await {
+            let daq_manager = slave.daq_manager.read().await;
+            if let Some(r) = daq_manager.get_latest_sample().await {
+                for (k, v) in r.values {
+                    let device_id = slave.id.to_string();
+
+                    // Filter by selected variables if any
+                    if filter_set.is_empty() || filter_set.contains(&(device_id.clone(), k.clone())) {
+                        values.push(json!({
+                            "device_id": device_id,
+                            "var_name": k,
+                            "display_name": slave.display_name(),
+                            "value": format!("{:.6}", v)
+                        }));
                     }
                 }
             }
         }
+    }
 
-        all_values
-    };
-
-    Html(templates::daq_data_partial(&values))
+    Json(json!({
+        "success": true,
+        "values": values
+    }))
 }
 
 /// A2L page (GET /a2l)
 pub async fn a2l_page(State(state): State<AppState>) -> Html<String> {
-    let current_slave = state.current_slave().await;
+    let devices = state.all_devices().await;
 
-    // Get path from current slave or global state
-    let path = if let Some(ref slave) = current_slave {
-        slave.a2l_path.read().await.clone()
+    // Get path from current device or first device
+    let (path, cal_count, meas_count) = if let Some(current_device) = state.current_device().await {
+        let cal_mgr = current_device.cal_manager.read().await;
+        let daq_mgr = current_device.daq_manager.read().await;
+        (current_device.a2l_path.clone(), cal_mgr.params().len(), daq_mgr.available_count())
+    } else if let Some(first_device) = devices.first() {
+        let cal_mgr = first_device.cal_manager.read().await;
+        let daq_mgr = first_device.daq_manager.read().await;
+        (first_device.a2l_path.clone(), cal_mgr.params().len(), daq_mgr.available_count())
     } else {
-        state.global_a2l_path.read().await.clone()
+        (String::new(), 0, 0)
     };
 
-    // Get slave addresses from A2L
-    let slave_addresses = state.a2l_slave_addresses.read().await.clone();
+    // Get slave addresses from devices
+    let slave_addresses: Vec<String> = devices.iter().map(|d| d.address.clone()).collect();
 
-    // Get parameter/measurement counts from appropriate source
-    let (cal_count, meas_count) = if let Some(ref slave) = current_slave {
-        let cal_mgr = slave.cal_manager.read().await;
-        let daq_mgr = slave.daq_manager.read().await;
-        (cal_mgr.params().len(), daq_mgr.available_count())
-    } else {
-        let cal_mgr = state.global_cal_manager.read().await;
-        let daq_mgr = state.global_daq_manager.read().await;
-        (cal_mgr.params().len(), daq_mgr.available_count())
-    };
-
-    // Build current slave info for template
-    let current_slave_info = current_slave.map(|s| {
-        let id = s.id.to_string();
-        let name = s.display_name();
-        (id, name)
+    // Build current device info for template
+    let current_device_info = state.current_device().await.map(|d| {
+        (d.id.clone(), d.name.clone())
     });
 
     let status = state.take_status().await;
     let error = state.take_error().await;
 
-    let content = templates::a2l_page(&path, current_slave_info.as_ref(), &slave_addresses, cal_count, meas_count);
+    let content = templates::a2l_page(&path, current_device_info.as_ref(), &slave_addresses, cal_count, meas_count);
     Html(templates::page("A2L", &content, status.as_deref(), error.as_deref()))
 }
 
@@ -1180,7 +1430,6 @@ pub async fn a2l_load(
 ) -> impl IntoResponse {
     let mut file_data = None;
     let mut file_name = None;
-    let mut slave_id_str = None;
 
     // Process multipart form data
     while let Some(field) = multipart.next_field().await.unwrap_or(None) {
@@ -1201,12 +1450,6 @@ pub async fn a2l_load(
                             "error": format!("Failed to read file: {}", e)
                         }));
                     }
-                }
-            }
-        } else if name == "slave_id" {
-            if let Ok(value) = field.text().await {
-                if !value.is_empty() {
-                    slave_id_str = Some(value);
                 }
             }
         }
@@ -1249,167 +1492,125 @@ pub async fn a2l_load(
     if let Some(path) = path {
         use crate::A2lReader;
 
-        // Determine which slave to load A2L for
-        let target_slave = if let Some(id_str) = slave_id_str.filter(|s| !s.is_empty()) {
-            uuid::Uuid::parse_str(&id_str).ok().map(SlaveId)
-        } else {
-            *state.current_slave_id.read().await
+        // Parse A2L file to get device address
+        let (reader, addresses) = match tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || {
+                // Load A2L and get addresses without using ? in closure
+                let reader_result = A2lReader::load(&path);
+                match reader_result {
+                    Ok(reader) => {
+                        let addrs = reader.get_slave_addresses();
+                        Ok((reader, addrs))
+                    }
+                    Err(e) => Err(format!("A2L parse error: {:?}", e)),
+                }
+            }
+        }).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                return axum::Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to parse A2L: {}", e)
+                }));
+            }
+            Err(e) => {
+                return axum::Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Task error: {}", e)
+                }));
+            }
         };
 
-        match target_slave {
-            Some(slave_id) => {
-                // Load for specific slave
-                let mut client = state.client.lock().await;
+        // Get device address from A2L
+        let device_addr = addresses.first().cloned().unwrap_or_else(|| "127.0.0.1:5555".to_string());
 
-                match client.load_a2l_for_slave(slave_id, &path).await {
-                    Ok(_) => {
-                        // Update the slave state with loaded data
-                        if let Some(xcp_slave) = client.get_slave(slave_id) {
-                            let xcp_slave_guard = xcp_slave.lock().await;
-                            let cal_count = xcp_slave_guard.cal_manager.params().len();
-                            let meas_count = xcp_slave_guard.daq_manager.lock().await.available_count();
+        // Check for duplicate IP address
+        if state.address_exists(&device_addr).await {
+            return axum::Json(serde_json::json!({
+                "success": false,
+                "error": format!(
+                    "Device with address {} already exists. Each device must have a unique IP address.",
+                    device_addr
+                )
+            }));
+        }
 
-                            // Update slave state
-                            if let Some(slave_state) = state.get_slave(slave_id).await {
-                                *slave_state.a2l_path.write().await = path.to_string_lossy().to_string();
-                                // Copy the loaded managers to slave state
-                                *slave_state.cal_manager.write().await = xcp_slave_guard.cal_manager.clone();
-                                *slave_state.daq_manager.write().await = xcp_slave_guard.daq_manager.lock().await.clone();
-                                state.add_slave_state(slave_state).await;
-                            }
+        // Get A2L data
+        let characteristics = reader.get_characteristics();
+        let measurements = reader.get_measurements();
 
-                            let msg = format!(
-                                "Loaded A2L: {} cal params, {} measurements",
-                                cal_count, meas_count
-                            );
-                            state.set_status(msg.clone()).await;
+        // Store counts before consuming vectors
+        let cal_count = characteristics.len();
+        let meas_count = measurements.len();
 
-                            return axum::Json(serde_json::json!({
-                                "success": true,
-                                "message": msg,
-                                "path": path,
-                                "cal_count": cal_count,
-                                "meas_count": meas_count
-                            }));
-                        }
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to load A2L: {}", e);
-                        state.set_error(msg.clone()).await;
-                        return axum::Json(serde_json::json!({
-                            "success": false,
-                            "error": msg
-                        }));
-                    }
-                }
-            }
-            None => {
-                // No slave selected, load into global state for offline viewing
-                match tokio::task::spawn_blocking({
-                    let path = path.clone();
-                    move || A2lReader::load(&path)
-                }).await {
-                    Ok(Ok(reader)) => {
-                        let measurements = reader.get_measurements();
-                        let characteristics = reader.get_characteristics();
-                        let slave_addrs = reader.get_slave_addresses();
+        // Generate device ID and name
+        let device_id = uuid::Uuid::new_v4().to_string();
+        let a2l_filename = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
 
-                        // Store in global state for offline viewing
-                        {
-                            let mut cal_manager = state.global_cal_manager.write().await;
-                            cal_manager.clear_params();
-                            for ch in characteristics.clone() {
-                                if let Some(param) = convert_characteristic(ch) {
-                                    cal_manager.add_param(param);
-                                }
-                            }
-                        }
+        // Get current device count for naming (synchronous approximation)
+        let device_count = state.devices.read().await.len();
+        let device_name = std::path::Path::new(&a2l_filename)
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("Device{}", device_count + 1));
 
-                        {
-                            let mut daq_manager = state.global_daq_manager.write().await;
-                            daq_manager.clear_measurements();
-                            for m in measurements.clone() {
-                                if let Some(meas) = convert_measurement(m) {
-                                    daq_manager.add_measurement(meas);
-                                }
-                            }
-                        }
-
-                        // Store path and addresses
-                        *state.global_a2l_path.write().await = path.to_string_lossy().to_string();
-                        *state.a2l_slave_addresses.write().await = slave_addrs.clone();
-
-                        // Also store in current slave if available
-                        if let Some(slave) = state.current_slave().await {
-                            {
-                                let mut cal_manager = slave.cal_manager.write().await;
-                                cal_manager.clear_params();
-                                for ch in characteristics.clone() {
-                                    if let Some(param) = convert_characteristic(ch) {
-                                        cal_manager.add_param(param);
-                                    }
-                                }
-                            }
-
-                            {
-                                let mut daq_manager = slave.daq_manager.write().await;
-                                daq_manager.clear_measurements();
-                                for m in measurements.clone() {
-                                    if let Some(meas) = convert_measurement(m) {
-                                        daq_manager.add_measurement(meas);
-                                    }
-                                }
-                            }
-
-                            *slave.a2l_path.write().await = path.to_string_lossy().to_string();
-                        }
-
-                        let addr_info = if slave_addrs.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" Found {} slave address(es)", slave_addrs.len())
-                        };
-
-                        let msg = format!(
-                            "Loaded A2L: {} ({} params, {} measurements){}",
-                            path.display(), characteristics.len(), measurements.len(), addr_info
-                        );
-                        state.set_status(msg.clone()).await;
-
-                        return axum::Json(serde_json::json!({
-                            "success": true,
-                            "message": msg,
-                            "path": path,
-                            "cal_count": characteristics.len(),
-                            "meas_count": measurements.len(),
-                            "slave_addresses": slave_addrs
-                        }));
-                    }
-                    Ok(Err(e)) => {
-                        let msg = format!("Failed to load A2L: {}", e);
-                        state.set_error(msg.clone()).await;
-                        return axum::Json(serde_json::json!({
-                            "success": false,
-                            "error": msg
-                        }));
-                    }
-                    Err(_) => {
-                        let msg = "A2L loading task failed".to_string();
-                        state.set_error(msg.clone()).await;
-                        return axum::Json(serde_json::json!({
-                            "success": false,
-                            "error": msg
-                        }));
-                    }
-                }
+        // Create calibration and DAQ managers for this device
+        let mut cal_manager = CalibrationManager::new();
+        for ch in characteristics {
+            if let Some(param) = convert_characteristic(ch) {
+                cal_manager.add_param(param);
             }
         }
+
+        let mut daq_manager = DaqManager::new();
+        for m in measurements {
+            if let Some(meas) = convert_measurement(m) {
+                daq_manager.add_measurement(meas);
+            }
+        }
+
+        // Create and add device
+        let device = DeviceState {
+            id: device_id.clone(),
+            name: device_name,
+            address: device_addr.clone(),
+            a2l_path: path.to_string_lossy().to_string(),
+            connected: false,
+            slave_id: None,
+            cal_manager: Arc::new(RwLock::new(cal_manager)),
+            daq_manager: Arc::new(RwLock::new(daq_manager)),
+            cal_values: Arc::new(RwLock::new(HashMap::new())),
+            daq_running: Arc::new(RwLock::new(false)),
+        };
+
+        state.add_device(device).await;
+
+        state.set_status(format!(
+            "Added device {} with address {} ({} cal params, {} measurements)",
+            a2l_filename, device_addr, cal_count, meas_count
+        )).await;
+
+        return axum::Json(serde_json::json!({
+            "success": true,
+            "message": format!(
+                "Added device {} with address {}",
+                a2l_filename, device_addr
+            ),
+            "path": path,
+            "cal_count": cal_count,
+            "meas_count": meas_count,
+            "device_id": device_id,
+            "device_address": device_addr,
+        }));
     }
 
-    // No file uploaded
     axum::Json(serde_json::json!({
         "success": false,
-        "error": "No file uploaded"
+        "error": "No file provided"
     }))
 }
 

@@ -1,12 +1,12 @@
 <div class="card">
-    <h2>Calibration Parameters</h2>
-    <form method="GET" action="/calibration" class="search-box">
-        <div style="display: flex; gap: 0.5rem;">
-            <input type="text" name="search" placeholder="Search parameters..." autofocus style="flex: 2;">
-            <input type="text" name="slave" placeholder="Filter by slave..." style="flex: 1;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h2 style="margin: 0;">Calibration Parameters</h2>
+        <div>
+            <button class="secondary" onclick="readAllVars()" id="readAllBtn" style="margin-right: 0.5rem;">Read All</button>
+            <button id="addVarsBtn" class="btn" onclick="openModal()">+ Add Variables</button>
         </div>
-        <button type="submit" style="margin-top: 0.5rem;">Search</button>
-    </form>
+    </div>
+
     <table>
         <thead>
             <tr>
@@ -17,25 +17,370 @@
                 <th>Actions</th>
             </tr>
         </thead>
-        <tbody>
-            {{#if params}}
-                {{#each params}}
-                <tr>
-                    <td><span style="color: #888; font-size: 0.85em;">[{{slave_name}}]</span><br>{{name}}</td>
-                    <td>{{type_name}}</td>
-                    <td>0x{{address_hex}}</td>
-                    <td>{{#if value}}<span class="value-display">{{value}}</span>{{else}}-{{/if}}</td>
-                    <td>
-                        <div class="btn-group">
-                            <button onclick="location.href='/api/cal/read/{{slave_id}}/{{idx}}'" title="Read">R</button>
-                            <button onclick="location.href='/cal/write/{{slave_id}}/{{idx}}'" title="Write">W</button>
-                        </div>
-                    </td>
-                </tr>
-                {{/each}}
-            {{else}}
-                <tr><td colspan="5" style="text-align: center; color: #666;">No parameters loaded. Load an A2L file first.</td></tr>
-            {{/if}}
+        <tbody id="selectedVars">
+            <!-- Populated by JavaScript -->
         </tbody>
     </table>
+
+    <div id="emptyState" style="text-align: center; padding: 2rem; color: #666;">
+        <p>No variables selected.</p>
+        <p>Click "Add Variables" to select calibration parameters.</p>
+    </div>
 </div>
+
+<!-- Modal for variable selection -->
+<div id="varModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 800px; max-height: 80vh; overflow: hidden; display: flex; flex-direction: column;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem; border-bottom: 1px solid #444;">
+            <h3 style="margin: 0;">Select Calibration Variables</h3>
+            <button onclick="closeModal()" style="background: none; border: none; color: #fff; font-size: 1.5rem; cursor: pointer;">&times;</button>
+        </div>
+
+        <div class="modal-search" style="padding: 0.75rem 1rem; border-bottom: 1px solid #333;">
+            <input type="text" id="varSearch" placeholder="Search variables..." style="width: 100%;" oninput="filterVars()">
+        </div>
+
+        <div class="modal-body" style="flex: 1; overflow-y: auto; padding: 0.5rem 0;">
+            <table class="modal-table" style="width: 100%; border-collapse: collapse;">
+                <thead style="position: sticky; top: 0; background: #2a2a2a;">
+                    <tr>
+                        <th style="width: 40px; padding: 0.5rem;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll()"></th>
+                        <th style="text-align: left; padding: 0.5rem;">Name</th>
+                        <th style="text-align: left; padding: 0.5rem;">Device</th>
+                        <th style="text-align: left; padding: 0.5rem;">Type</th>
+                        <th style="text-align: left; padding: 0.5rem;">Address</th>
+                    </tr>
+                </thead>
+                <tbody id="availableVars">
+                    <!-- Populated by JavaScript -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="modal-footer" style="padding: 1rem; border-top: 1px solid #444; display: flex; justify-content: space-between; align-items: center;">
+            <span id="selectedCount">0 variables selected</span>
+            <div>
+                <button class="secondary" onclick="closeModal()" style="margin-right: 0.5rem;">Cancel</button>
+                <button class="btn" onclick="applySelection()">Apply Selection</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+.modal-content {
+    background: #1e1e1e;
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+.modal-table th, .modal-table td {
+    text-align: left;
+    padding: 0.5rem;
+    border-bottom: 1px solid #333;
+}
+.modal-table tr:hover {
+    background: #2a2a2a;
+}
+</style>
+
+<script>
+// All available variables from server
+let allVariables = [];
+// Currently selected variable keys (device_id:param_name)
+let selectedKeys = new Set();
+// Temporary selection in modal
+let tempSelectedKeys = new Set();
+
+// Load available variables on page load
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadAvailableVars();
+    loadSelectionFromStorage();
+    renderSelectedVars();
+});
+
+async function loadAvailableVars() {
+    try {
+        const response = await fetch('/api/cal/available');
+        const data = await response.json();
+        if (data.success) {
+            allVariables = data.variables;
+        }
+    } catch (e) {
+        console.error('Failed to load available variables:', e);
+    }
+}
+
+function loadSelectionFromStorage() {
+    const stored = localStorage.getItem('cal_selectedVars');
+    if (stored) {
+        try {
+            const arr = JSON.parse(stored);
+            selectedKeys = new Set(arr);
+        } catch (e) {
+            selectedKeys = new Set();
+        }
+    }
+}
+
+function saveSelectionToStorage() {
+    localStorage.setItem('cal_selectedVars', JSON.stringify([...selectedKeys]));
+}
+
+function openModal() {
+    tempSelectedKeys = new Set(selectedKeys);
+    renderAvailableVars();
+    document.getElementById('varModal').style.display = 'flex';
+    document.getElementById('varSearch').focus();
+}
+
+function closeModal() {
+    document.getElementById('varModal').style.display = 'none';
+}
+
+function renderAvailableVars() {
+    const tbody = document.getElementById('availableVars');
+    const searchTerm = document.getElementById('varSearch').value.toLowerCase();
+
+    const filtered = allVariables.filter(v =>
+        v.name.toLowerCase().includes(searchTerm) ||
+        v.device_name.toLowerCase().includes(searchTerm)
+    );
+
+    tbody.innerHTML = filtered.map(v => {
+        const key = `${v.device_id}:${v.name}`;
+        const checked = tempSelectedKeys.has(key) ? 'checked' : '';
+        return `
+            <tr>
+                <td><input type="checkbox" data-key="${key}" ${checked} onchange="toggleVar('${key}')"></td>
+                <td>${escapeHtml(v.name)}</td>
+                <td style="color: #888;">${escapeHtml(v.device_name)}</td>
+                <td>${v.type}</td>
+                <td style="font-family: monospace;">0x${v.address_hex}</td>
+            </tr>
+        `;
+    }).join('');
+
+    updateSelectedCount();
+    updateSelectAllCheckbox();
+}
+
+function filterVars() {
+    renderAvailableVars();
+}
+
+function toggleVar(key) {
+    if (tempSelectedKeys.has(key)) {
+        tempSelectedKeys.delete(key);
+    } else {
+        tempSelectedKeys.add(key);
+    }
+    updateSelectedCount();
+    updateSelectAllCheckbox();
+}
+
+function toggleSelectAll() {
+    const selectAll = document.getElementById('selectAll');
+    const searchTerm = document.getElementById('varSearch').value.toLowerCase();
+
+    const filtered = allVariables.filter(v =>
+        v.name.toLowerCase().includes(searchTerm) ||
+        v.device_name.toLowerCase().includes(searchTerm)
+    );
+
+    if (selectAll.checked) {
+        filtered.forEach(v => {
+            tempSelectedKeys.add(`${v.device_id}:${v.name}`);
+        });
+    } else {
+        filtered.forEach(v => {
+            tempSelectedKeys.delete(`${v.device_id}:${v.name}`);
+        });
+    }
+    renderAvailableVars();
+}
+
+function updateSelectedCount() {
+    document.getElementById('selectedCount').textContent =
+        `${tempSelectedKeys.size} variable${tempSelectedKeys.size !== 1 ? 's' : ''} selected`;
+}
+
+function updateSelectAllCheckbox() {
+    const selectAll = document.getElementById('selectAll');
+    const searchTerm = document.getElementById('varSearch').value.toLowerCase();
+
+    const filtered = allVariables.filter(v =>
+        v.name.toLowerCase().includes(searchTerm) ||
+        v.device_name.toLowerCase().includes(searchTerm)
+    );
+
+    if (filtered.length === 0) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+        return;
+    }
+
+    const allSelected = filtered.every(v => tempSelectedKeys.has(`${v.device_id}:${v.name}`));
+    const someSelected = filtered.some(v => tempSelectedKeys.has(`${v.device_id}:${v.name}`));
+
+    selectAll.checked = allSelected;
+    selectAll.indeterminate = someSelected && !allSelected;
+}
+
+function applySelection() {
+    selectedKeys = new Set(tempSelectedKeys);
+    saveSelectionToStorage();
+    closeModal();
+    renderSelectedVars();
+}
+
+function renderSelectedVars() {
+    const tbody = document.getElementById('selectedVars');
+    const emptyState = document.getElementById('emptyState');
+
+    const selectedVars = allVariables.filter(v =>
+        selectedKeys.has(`${v.device_id}:${v.name}`)
+    );
+
+    if (selectedVars.length === 0) {
+        tbody.innerHTML = '';
+        emptyState.style.display = 'block';
+        return;
+    }
+
+    emptyState.style.display = 'none';
+
+    tbody.innerHTML = selectedVars.map((v, idx) => {
+        const key = `${v.device_id}:${v.name}`;
+        return `
+            <tr>
+                <td>
+                    <span style="color: #888; font-size: 0.85em;">[${escapeHtml(v.device_name)}]</span><br>
+                    ${escapeHtml(v.name)}
+                </td>
+                <td>${v.type}</td>
+                <td style="font-family: monospace;">0x${v.address_hex}</td>
+                <td id="value-${key.replace(/:/g, '-')}">-</td>
+                <td>
+                    <div class="btn-group">
+                        <button onclick="readVar('${v.device_id}', ${v.idx})" title="Read">R</button>
+                        <button onclick="writeVar('${v.device_id}', ${v.idx}, '${escapeHtml(v.name)}')" title="Write">W</button>
+                        <button class="secondary" onclick="removeVar('${key}')" title="Remove">&times;</button>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+async function readVar(deviceId, idx) {
+    try {
+        const response = await fetch(`/api/cal/read/${deviceId}/${idx}`);
+        const data = await response.json();
+
+        if (data.success) {
+            // Find the variable and update its value
+            const v = allVariables.find(v => v.device_id === deviceId && v.idx === idx);
+            if (v) {
+                const key = `${v.device_id}:${v.name}`.replace(/:/g, '-');
+                const valueCell = document.getElementById(`value-${key}`);
+                if (valueCell) {
+                    valueCell.textContent = data.value;
+                    valueCell.style.color = '#00ff88';
+                }
+            }
+        } else {
+            alert('Error: ' + data.error);
+        }
+    } catch (e) {
+        alert('Failed to read: ' + e.message);
+    }
+}
+
+function writeVar(deviceId, idx, name) {
+    window.location.href = `/cal/write/${deviceId}/${idx}`;
+}
+
+function removeVar(key) {
+    selectedKeys.delete(key);
+    saveSelectionToStorage();
+    renderSelectedVars();
+}
+
+async function readAllVars() {
+    const selectedVars = allVariables.filter(v =>
+        selectedKeys.has(`${v.device_id}:${v.name}`)
+    );
+
+    if (selectedVars.length === 0) {
+        alert('No variables selected');
+        return;
+    }
+
+    const btn = document.getElementById('readAllBtn');
+    btn.disabled = true;
+    btn.textContent = 'Reading...';
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const v of selectedVars) {
+        try {
+            const response = await fetch(`/api/cal/read/${v.device_id}/${v.idx}`);
+            const data = await response.json();
+
+            if (data.success) {
+                const key = `${v.device_id}:${v.name}`.replace(/:/g, '-');
+                const valueCell = document.getElementById(`value-${key}`);
+                if (valueCell) {
+                    valueCell.textContent = data.value;
+                    valueCell.style.color = '#00ff88';
+                }
+                successCount++;
+            } else {
+                failCount++;
+            }
+        } catch (e) {
+            failCount++;
+        }
+    }
+
+    btn.disabled = false;
+    btn.textContent = 'Read All';
+
+    if (failCount > 0) {
+        console.log(`Read ${successCount} variables, ${failCount} failed`);
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Close modal on outside click
+document.getElementById('varModal').addEventListener('click', (e) => {
+    if (e.target.id === 'varModal') {
+        closeModal();
+    }
+});
+
+// Close modal on Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        closeModal();
+    }
+});
+</script>

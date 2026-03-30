@@ -214,7 +214,7 @@ mod tests {
     fn test_single_user_restriction_second_user_blocked() {
         // Given: First user is logged in (use unique IP to avoid conflict with other tests)
         clear_session();
-        let first_token = try_create_session("192.168.2.10").unwrap();
+        let _first_token = try_create_session("192.168.2.10").unwrap();
 
         // Verify first session is valid
         assert!(has_active_session(), "Should have active session after creation");

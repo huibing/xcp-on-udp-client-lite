@@ -3,13 +3,13 @@
     <form method="POST" action="/api/connect">
         <div class="form-group">
             <label for="name">Slave Name</label>
-            <input type="text" name="name" id="name" placeholder="ECU1" required>
+            <input type="text" name="name" id="name" value="{{default_name}}" required>
         </div>
         <div class="form-group">
             <label for="address">Slave Address</label>
             <select name="address" id="address">
                 {{#each addresses}}
-                <option value="{{this}}">{{this}}</option>
+                <option value="{{this.value}}">{{this.label}}</option>
                 {{/each}}
             </select>
         </div>

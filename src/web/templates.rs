@@ -1,11 +1,18 @@
 //! HTML Template Engine
 //!
 //! Uses Handlebars for template rendering with embedded template files.
-//! All templates are compiled into the binary using include_str!.
+//! All templates are compiled into the binary using rust-embed.
 
 use handlebars::Handlebars;
+use rust_embed::RustEmbed;
 use serde_json::json;
 use std::collections::HashMap;
+
+/// Embedded templates - automatically includes all files in templates/ directory
+#[derive(RustEmbed)]
+#[folder = "src/web/templates"]
+#[include = "*.hbs"]
+pub struct Templates;
 
 /// Template engine for rendering HTML pages
 pub struct TemplateEngine {
@@ -17,27 +24,19 @@ impl TemplateEngine {
     pub fn new() -> Self {
         let mut hbs = Handlebars::new();
 
-        // Register all templates
-        hbs.register_template_string("base", include_str!("templates/base.hbs"))
-            .expect("Failed to register base template");
-        hbs.register_template_string("login", include_str!("templates/login.hbs"))
-            .expect("Failed to register login template");
-        hbs.register_template_string("dashboard", include_str!("templates/dashboard.hbs"))
-            .expect("Failed to register dashboard template");
-        hbs.register_template_string("connect", include_str!("templates/connect.hbs"))
-            .expect("Failed to register connect template");
-        hbs.register_template_string("calibration", include_str!("templates/calibration.hbs"))
-            .expect("Failed to register calibration template");
-        hbs.register_template_string("cal_write", include_str!("templates/cal_write.hbs"))
-            .expect("Failed to register cal_write template");
-        hbs.register_template_string("daq", include_str!("templates/daq.hbs"))
-            .expect("Failed to register daq template");
-        hbs.register_template_string("daq_data", include_str!("templates/daq_data.hbs"))
-            .expect("Failed to register daq_data template");
-        hbs.register_template_string("a2l", include_str!("templates/a2l.hbs"))
-            .expect("Failed to register a2l template");
-        hbs.register_template_string("slaves", include_str!("templates/slaves.hbs"))
-            .expect("Failed to register slaves template");
+        // Register all embedded templates
+        for file in Templates::iter() {
+            let filename = file.as_ref();
+            // Extract template name from filename (e.g., "base.hbs" -> "base")
+            if let Some(name) = filename.strip_suffix(".hbs") {
+                if let Some(content) = Templates::get(filename) {
+                    let content_str = std::str::from_utf8(&content.data)
+                        .expect("Template is not valid UTF-8");
+                    hbs.register_template_string(name, content_str)
+                        .unwrap_or_else(|e| panic!("Failed to register {} template: {}", name, e));
+                }
+            }
+        }
 
         Self { hbs }
     }
@@ -50,7 +49,7 @@ impl TemplateEngine {
     }
 
     /// Render a full page with base layout
-    fn render_page(
+    fn _render_page(
         &self,
         title: &str,
         content_template: &str,
@@ -127,21 +126,45 @@ impl TemplateEngine {
     }
 
     /// Render connect page
-    pub fn connect_page(&self, addresses: &[String]) -> String {
-        // Provide default if empty
+    /// addresses: Vec of (address, Option<a2l_filename>)
+    pub fn connect_page(&self, addresses: &[(String, Option<String>)], default_name: &str) -> String {
+        // Build address list with optional A2L suffix
         let addresses_data: Vec<serde_json::Value> = if addresses.is_empty() {
-            vec![json!("127.0.0.1:5555 (default)")]
+            vec![json!({"value": "127.0.0.1:5555", "label": "127.0.0.1:5555 (default)"})]
         } else {
-            addresses.iter().map(|addr| json!(addr)).collect()
+            addresses
+                .iter()
+                .map(|(addr, a2l_name)| {
+                    let label = if let Some(name) = a2l_name {
+                        format!("{} [{}]", addr, name)
+                    } else {
+                        addr.clone()
+                    };
+                    json!({"value": addr, "label": label})
+                })
+                .collect()
         };
 
         let data = json!({
             "addresses": addresses_data,
+            "default_name": default_name,
         });
 
         // Note: Only render the content template, NOT wrapped in base template
         // The caller (routes.rs) will wrap it with templates::page()
         self.render("connect", &data)
+    }
+
+    /// Render connect page (device-based version)
+    pub fn connect_page_devices(&self, devices: &[serde_json::Value], default_name: &str) -> String {
+        let data = json!({
+            "devices": devices,
+            "default_name": default_name,
+        });
+
+        // Note: Only render the content template, NOT wrapped in base template
+        // The caller (routes.rs) will wrap it with templates::page()
+        self.render("connect_devices", &data)
     }
 
     /// Render calibration page
@@ -284,25 +307,6 @@ impl TemplateEngine {
         self.render("daq", &data)
     }
 
-    /// Render DAQ data partial (for AJAX updates)
-    pub fn daq_data_partial(&self, values: &[(String, f64)]) -> String {
-        let values_data: Vec<serde_json::Value> = values
-            .iter()
-            .map(|(name, value)| {
-                json!({
-                    "name": escape_html(name),
-                    "value": format!("{:.6}", value),
-                })
-            })
-            .collect();
-
-        let data = json!({
-            "values": values_data,
-        });
-
-        self.render("daq_data", &data)
-    }
-
     /// Render A2L page
     pub fn a2l_page(
         &self,
@@ -397,10 +401,16 @@ pub fn dashboard_page(
     engine.dashboard_page(slaves, current_slave, connected_count, total_cal, total_meas, daq_running)
 }
 
-/// Render connect page
-pub fn connect_page(addresses: &[String]) -> String {
+/// Render connect page (new device-based version)
+pub fn connect_page_devices(devices: &[serde_json::Value], default_name: &str) -> String {
     let engine = TemplateEngine::new();
-    engine.connect_page(addresses)
+    engine.connect_page_devices(devices, default_name)
+}
+
+/// Render connect page (legacy version)
+pub fn connect_page(addresses: &[(String, Option<String>)], default_name: &str) -> String {
+    let engine = TemplateEngine::new();
+    engine.connect_page(addresses, default_name)
 }
 
 /// Render slaves page
@@ -444,12 +454,6 @@ pub fn daq_page(
 ) -> String {
     let engine = TemplateEngine::new();
     engine.daq_page(measurements, selected_indices, daq_running, latest_values, slaves, current_slave_id)
-}
-
-/// Render DAQ data partial
-pub fn daq_data_partial(values: &[(String, f64)]) -> String {
-    let engine = TemplateEngine::new();
-    engine.daq_data_partial(values)
 }
 
 /// Render A2L page
@@ -517,8 +521,8 @@ mod tests {
     #[test]
     fn test_connect_page() {
         let engine = TemplateEngine::new();
-        let addresses = vec!["127.0.0.1:5555".to_string()];
-        let html = engine.connect_page(&addresses);
+        let addresses = vec![("127.0.0.1:5555".to_string(), None)];
+        let html = engine.connect_page(&addresses, "ECU1");
         assert!(html.contains("Connect to XCP Slave"));
         assert!(html.contains("127.0.0.1:5555"));
     }
@@ -526,32 +530,17 @@ mod tests {
     #[test]
     fn test_calibration_page() {
         let engine = TemplateEngine::new();
-        let params = vec![(
-            "ECU1".to_string(),
-            0,
-            "counter_max".to_string(),
-            "U32".to_string(),
-            0x80010000,
-            Some("100".to_string()),
-        )];
-        let html = engine.calibration_page(&params, 0);
-        assert!(html.contains("counter_max"));
-        assert!(html.contains("0x80010000"));
-    }
-
-    #[test]
-    fn test_daq_data_partial() {
-        let engine = TemplateEngine::new();
-        let values = vec![("test_var".to_string(), 42.5)];
-        let html = engine.daq_data_partial(&values);
-        assert!(html.contains("test_var"));
-        assert!(html.contains("42.500000"));
+        // New calibration template uses dynamic loading via modal
+        // Test that the page renders correctly with empty params
+        let html = engine.calibration_page(&[], 0);
+        assert!(html.contains("Add Variables"));
+        assert!(html.contains("No variables selected"));
     }
 
     #[test]
     fn test_a2l_page() {
         let engine = TemplateEngine::new();
-        let html = engine.a2l_page("/path/to/file.a2l");
+        let html = engine.a2l_page("/path/to/file.a2l", None, &[], 0, 0);
         assert!(html.contains("A2L File Management"));
         assert!(html.contains("/path/to/file.a2l"));
     }
