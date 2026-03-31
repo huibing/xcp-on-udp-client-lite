@@ -1258,6 +1258,30 @@ impl CalibrationManager {
             .unwrap_or(false)
     }
 
+    /// Find a page that allows XCP write access for a segment
+    ///
+    /// Returns the first page number that allows XCP write access,
+    /// or None if no such page exists.
+    ///
+    /// # Arguments
+    /// * `segment` - Segment number (0-255)
+    ///
+    /// # Returns
+    /// - Some(page_number) if a write-allowed page is found
+    /// - None if no pages allow write access
+    pub fn find_write_allowed_page(&self, segment: u8) -> Option<u8> {
+        self.memory_segments
+            .iter()
+            .find(|s| s.xcp_info.as_ref().map(|x| x.segment_number) == Some(segment))
+            .and_then(|s| s.xcp_info.as_ref())
+            .and_then(|xcp| {
+                xcp.pages
+                    .iter()
+                    .find(|p| p.is_write_allowed())
+                    .map(|p| p.page_number)
+            })
+    }
+
     /// Find which segment a characteristic belongs to based on its address
     ///
     /// # Returns
@@ -1569,5 +1593,29 @@ mod tests {
 
         // Non-existent segment
         assert!(!manager.is_segment_calibration_allowed(99), "Non-existent segment should not allow calibration");
+    }
+
+    #[test]
+    fn test_find_write_allowed_page() {
+        let manager = CalibrationManager::from_a2l("abc.a2l").expect("Failed to load abc.a2l");
+
+        // Segment 0: Page 0 no write, Page 1 has write
+        // -> should find page 1
+        let page = manager.find_write_allowed_page(0);
+        assert_eq!(page, Some(1), "Should find page 1 for segment 0");
+
+        // Segment 1: Page 0 no write, Page 1 has write
+        // -> should find page 1
+        let page = manager.find_write_allowed_page(1);
+        assert_eq!(page, Some(1), "Should find page 1 for segment 1");
+
+        // Segment 2 (CODE): No pages with write
+        // -> should return None
+        let page = manager.find_write_allowed_page(2);
+        assert_eq!(page, None, "Should not find any write-allowed page for CODE segment");
+
+        // Non-existent segment
+        let page = manager.find_write_allowed_page(99);
+        assert_eq!(page, None, "Should return None for non-existent segment");
     }
 }

@@ -329,6 +329,50 @@ impl XcpSlave {
         Ok(page)
     }
 
+    /// Set the current calibration page for a specific segment
+    ///
+    /// This command switches the active calibration page for the specified segment.
+    /// Use this to switch to a page with write permission when needed.
+    ///
+    /// # Arguments
+    /// * `segment` - Logical segment number (0-255)
+    /// * `page` - Page number to switch to (0-255)
+    /// * `mode` - Access mode: 0x01 for ECU access, 0x02 for XCP access, 0x03 for both
+    ///
+    /// # Returns
+    /// Ok(()) on success
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Switch to page 1 for XCP access on segment 0
+    /// slave.set_cal_page(0, 1, 0x02).await?;
+    /// ```
+    pub async fn set_cal_page(&mut self, segment: u8, page: u8, mode: u8) -> Result<(), SlaveError> {
+        let response = self.send_command_and_wait(&commands::set_cal_page(mode, segment, page)).await?;
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+
+        match parsed {
+            Response::Res(_) => {
+                // Update local segment page state
+                if let Some(state) = self.segment_pages.iter_mut().find(|s| s.segment == segment) {
+                    if mode & 0x02 != 0 {
+                        state.xcp_page = page;
+                    }
+                    if mode & 0x01 != 0 {
+                        state.ecu_page = Some(page);
+                    }
+                }
+                tracing::info!(
+                    "Set segment {} page to {} (mode=0x{:02X})",
+                    segment, page, mode
+                );
+                Ok(())
+            }
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
     /// Query and update the current page state for all segments
     ///
     /// This method queries the XCP access page for each segment defined in the A2L file.
@@ -402,6 +446,62 @@ impl XcpSlave {
         } else {
             false
         }
+    }
+
+    /// Find a page that allows XCP write access for a segment
+    ///
+    /// Returns the first page number that allows XCP write access,
+    /// or None if no such page exists.
+    ///
+    /// # Arguments
+    /// * `segment` - Segment number to search
+    ///
+    /// # Returns
+    /// - Some(page_number) if a write-allowed page is found
+    /// - None if no pages allow write access
+    pub fn find_write_allowed_page(&self, segment: u8) -> Option<u8> {
+        self.cal_manager.find_write_allowed_page(segment)
+    }
+
+    /// Switch to a page that allows write access for a segment
+    ///
+    /// This is a convenience method that finds a write-allowed page
+    /// and switches to it. Useful when `check_write_permission` returns
+    /// `CurrentPageNoWrite` error.
+    ///
+    /// # Arguments
+    /// * `segment` - Segment number to switch page for
+    ///
+    /// # Returns
+    /// - Ok(new_page) if successfully switched to a write-allowed page
+    /// - Err if no write-allowed page exists or switch failed
+    pub async fn switch_to_write_page(&mut self, segment: u8) -> Result<u8, SlaveError> {
+        // Find a page that allows write
+        let new_page = self.find_write_allowed_page(segment)
+            .ok_or_else(|| SlaveError::CalibrationWrite(
+                CalibrationWriteError::SegmentNoWriteAllowed(segment)
+            ))?;
+
+        // Check if we're already on that page
+        let current_page = self.segment_pages
+            .iter()
+            .find(|s| s.segment == segment)
+            .map(|s| s.xcp_page);
+
+        if current_page == Some(new_page) {
+            tracing::debug!("Already on write-allowed page {} for segment {}", new_page, segment);
+            return Ok(new_page);
+        }
+
+        // Switch to the write-allowed page
+        self.set_cal_page(segment, new_page, 0x02).await?;
+
+        tracing::info!(
+            "Switched segment {} to write-allowed page {}",
+            segment, new_page
+        );
+
+        Ok(new_page)
     }
 
     /// Check write permission for a calibration parameter
