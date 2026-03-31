@@ -53,7 +53,7 @@
             <table class="modal-table" style="width: 100%; border-collapse: collapse;">
                 <thead style="position: sticky; top: 0; background: #2a2a2a;">
                     <tr>
-                        <th style="width: 40px; padding: 0.5rem;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll()"></th>
+                        <th style="width: 40px; padding: 0.5rem;"><input type="checkbox" id="selectAll" onclick="toggleSelectAll()"></th>
                         <th style="text-align: left; padding: 0.5rem;">Name</th>
                         <th style="text-align: left; padding: 0.5rem;">Device</th>
                         <th style="text-align: left; padding: 0.5rem;">Type</th>
@@ -285,7 +285,7 @@ function renderAvailableVars() {
         const checked = tempSelectedKeys.has(key) ? 'checked' : '';
         return `
             <tr>
-                <td><input type="checkbox" data-key="${key}" ${checked} onchange="toggleVar('${key}')"></td>
+                <td><input type="checkbox" data-key="${key}" ${checked} onclick="toggleVar('${key}')"></td>
                 <td>${escapeHtml(v.name)}</td>
                 <td style="color: #888;">${escapeHtml(v.device_name)}</td>
                 <td>${v.type}</td>

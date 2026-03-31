@@ -303,6 +303,19 @@ pub async fn connect_all_devices(State(state): State<AppState>) -> impl IntoResp
 
         match client.connect_slave(&device.name, transport_config).await {
             Ok(slave_id) => {
+                // Load A2L file into XcpSlave for page mode support
+                if !device.a2l_path.is_empty() {
+                    if let Err(e) = client.load_a2l_for_slave(slave_id, &device.a2l_path).await {
+                        tracing::warn!("Failed to load A2L for slave {}: {}", device.name, e);
+                    } else if let Some(xcp_slave) = client.get_slave(slave_id) {
+                        // Query current page state from slave
+                        let mut xcp_slave_guard = xcp_slave.lock().await;
+                        if let Err(e) = xcp_slave_guard.update_segment_page_state().await {
+                            tracing::warn!("Failed to query page state for {}: {:?}", device.name, e);
+                        }
+                    }
+                }
+
                 // Get slave info from XcpClient
                 if let Some(xcp_slave) = client.get_slave(slave_id) {
                     let guard = xcp_slave.lock().await;
@@ -395,6 +408,21 @@ pub async fn connect_device(State(state): State<AppState>, Json(payload): Json<s
 
     match client.connect_slave(&device.name, transport_config).await {
         Ok(slave_id) => {
+            // Load A2L file into XcpSlave for page mode support
+            if !device.a2l_path.is_empty() {
+                if let Err(e) = client.load_a2l_for_slave(slave_id, &device.a2l_path).await {
+                    tracing::warn!("Failed to load A2L for slave {}: {}", device.name, e);
+                } else {
+                    // Query current page state from slave
+                    if let Some(xcp_slave) = client.get_slave(slave_id) {
+                        let mut xcp_slave_guard = xcp_slave.lock().await;
+                        if let Err(e) = xcp_slave_guard.update_segment_page_state().await {
+                            tracing::warn!("Failed to query page state for {}: {:?}", device.name, e);
+                        }
+                    }
+                }
+            }
+
             // Get slave info from XcpClient
             let info = if let Some(xcp_slave) = client.get_slave(slave_id) {
                 let guard = xcp_slave.lock().await;
