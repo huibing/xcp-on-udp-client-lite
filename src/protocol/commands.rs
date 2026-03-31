@@ -59,11 +59,28 @@ pub fn short_upload(mta: Mta, length: u8) -> Vec<u8> {
 
 /// Build DOWNLOAD command
 /// Write data to current MTA
-pub fn download(data: &[u8]) -> Vec<u8> {
-    let len = data.len() as u8;
+///
+/// For multi-packet transfers:
+/// - First packet: use this with total_size = total bytes to transfer
+/// - Subsequent packets: use download_next()
+pub fn download(total_size: u8, data: &[u8]) -> Vec<u8> {
     let mut cmd = Vec::with_capacity(2 + data.len());
     cmd.push(CommandCode::Download as u8);
-    cmd.push(len);
+    cmd.push(total_size); // Total bytes to transfer (not just this packet's data)
+    cmd.extend_from_slice(data);
+    cmd
+}
+
+/// Build DOWNLOAD_NEXT command
+/// Continue a multi-packet download transfer
+///
+/// # Arguments
+/// * `remaining` - Number of bytes remaining after this packet
+/// * `data` - Data bytes for this packet
+pub fn download_next(remaining: u8, data: &[u8]) -> Vec<u8> {
+    let mut cmd = Vec::with_capacity(2 + data.len());
+    cmd.push(CommandCode::DownloadNext as u8);
+    cmd.push(remaining); // Bytes remaining after this packet
     cmd.extend_from_slice(data);
     cmd
 }
@@ -324,11 +341,25 @@ mod tests {
 
     #[test]
     fn test_download_command() {
+        // Test DOWNLOAD with total_size parameter
         let data = vec![0x01, 0x02, 0x03, 0x04];
-        let cmd = download(&data);
+        let total_size = 100u8; // Total bytes to transfer
+        let cmd = download(total_size, &data);
         assert_eq!(cmd.len(), 6);
         assert_eq!(cmd[0], CommandCode::Download as u8);
-        assert_eq!(cmd[1], 4);
+        assert_eq!(cmd[1], 100); // Total size, not data.len()
+        assert_eq!(&cmd[2..], &data[..]);
+    }
+
+    #[test]
+    fn test_download_next_command() {
+        // Test DOWNLOAD_NEXT with remaining count
+        let data = vec![0x05, 0x06, 0x07];
+        let remaining = 50u8; // Bytes remaining after this packet
+        let cmd = download_next(remaining, &data);
+        assert_eq!(cmd.len(), 5);
+        assert_eq!(cmd[0], CommandCode::DownloadNext as u8);
+        assert_eq!(cmd[1], 50); // Remaining count
         assert_eq!(&cmd[2..], &data[..]);
     }
 

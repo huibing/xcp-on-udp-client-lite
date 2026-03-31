@@ -962,6 +962,17 @@ impl XcpSlave {
             .unwrap_or(247) // Default to 247 if not connected
     }
 
+    /// Get maximum data bytes per DOWNLOAD/DOWNLOAD_NEXT command
+    /// DOWNLOAD: [CMD, LEN, data...] - 2 bytes header
+    /// DOWNLOAD_NEXT: [CMD, REMAINING, data...] - 2 bytes header
+    /// So max data = max_cto - 2
+    pub fn max_download_block_size(&self) -> usize {
+        self.info.connect_info
+            .as_ref()
+            .map(|ci| (ci.max_cto as usize).saturating_sub(2))
+            .unwrap_or(253) // Default to 253 if not connected
+    }
+
     /// Read a large amount of data from slave, using SET_MTA + UPLOAD as needed
     /// This handles reads larger than what SHORT_UPLOAD can handle in one command
     ///
@@ -1015,36 +1026,109 @@ impl XcpSlave {
     }
 
     /// Write memory using SHORT_DOWNLOAD command (one-shot write)
+    ///
+    /// Note: SHORT_DOWNLOAD is limited to (MAX_CTO - 8) bytes.
+    /// For larger data, this will fall back to SET_MTA + DOWNLOAD + DOWNLOAD_NEXT.
     async fn write_memory_short_download(&self, mta: Mta, data: &[u8]) -> Result<(), SlaveError> {
-        let response = self
-            .send_command_and_wait(&commands::short_download(mta, data))
-            .await?;
-        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let max_short_download = self.max_download_size();
 
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        if data.len() <= max_short_download {
+            // Data fits in single SHORT_DOWNLOAD
+            let response = self
+                .send_command_and_wait(&commands::short_download(mta, data))
+                .await?;
+            let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+
+            match parsed {
+                Response::Res(_) => return Ok(()),
+                Response::Err(err) => return Err(SlaveError::Protocol(err)),
+                _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            }
         }
+
+        // Data too large for SHORT_DOWNLOAD, use SET_MTA + DOWNLOAD instead
+        tracing::debug!(
+            "Data size {} exceeds SHORT_DOWNLOAD limit {}, using DOWNLOAD instead",
+            data.len(), max_short_download
+        );
+        self.write_memory_download(mta, data).await
     }
 
     /// Write memory using SET_MTA + DOWNLOAD commands
     /// This is the mandatory method that all XCP slaves must support
+    ///
+    /// For data larger than (MAX_CTO - 2), uses DOWNLOAD + DOWNLOAD_NEXT for chunked transfer:
+    /// - First packet: DOWNLOAD with total_size = total bytes, partial data
+    /// - Subsequent packets: DOWNLOAD_NEXT with remaining count, more data
+    /// - Slave sends positive response only after all data received
     async fn write_memory_download(&self, mta: Mta, data: &[u8]) -> Result<(), SlaveError> {
         // First, set the MTA
         self.set_mta(mta).await?;
 
-        // Then, send DOWNLOAD command
-        let response = self
-            .send_command_and_wait(&commands::download(data))
-            .await?;
-        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let total_size = data.len();
+        let max_block = self.max_download_block_size();
 
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        // Check if data fits in a single DOWNLOAD command
+        if total_size <= max_block {
+            // Single packet: DOWNLOAD with total_size
+            let response = self
+                .send_command_and_wait(&commands::download(total_size as u8, data))
+                .await?;
+            let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+
+            return match parsed {
+                Response::Res(_) => Ok(()),
+                Response::Err(err) => Err(SlaveError::Protocol(err)),
+                _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            };
         }
+
+        // Multi-packet transfer
+        tracing::debug!(
+            "Writing {} bytes in chunks (max per packet: {})",
+            total_size, max_block
+        );
+
+        let mut offset = 0;
+        let mut remaining = total_size;
+
+        // First packet: DOWNLOAD with total size
+        let first_chunk_size = max_block.min(remaining);
+        let first_chunk = &data[offset..offset + first_chunk_size];
+
+        // Send DOWNLOAD (no response expected yet for multi-packet)
+        self.send_command_and_wait(&commands::download(total_size as u8, first_chunk))
+            .await?;
+
+        offset += first_chunk_size;
+        remaining -= first_chunk_size;
+
+        // Subsequent packets: DOWNLOAD_NEXT
+        while remaining > 0 {
+            let chunk_size = max_block.min(remaining);
+            let chunk = &data[offset..offset + chunk_size];
+            let remaining_after = remaining - chunk_size;
+
+            // Send DOWNLOAD_NEXT with remaining count after this packet
+            let response = self
+                .send_command_and_wait(&commands::download_next(remaining_after as u8, chunk))
+                .await?;
+
+            // Only the last packet expects a response
+            if remaining_after == 0 {
+                let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+                match parsed {
+                    Response::Res(_) => return Ok(()),
+                    Response::Err(err) => return Err(SlaveError::Protocol(err)),
+                    _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+                }
+            }
+
+            offset += chunk_size;
+            remaining -= chunk_size;
+        }
+
+        Ok(())
     }
 
     /// Set MTA for subsequent UPLOAD/DOWNLOAD operations
@@ -1072,15 +1156,67 @@ impl XcpSlave {
     }
 
     /// Download (write) data to current MTA
+    ///
+    /// For data larger than (MAX_CTO - 2), uses DOWNLOAD + DOWNLOAD_NEXT for chunked transfer.
+    /// Note: MTA must be set before calling this method.
     pub async fn download(&self, data: &[u8]) -> Result<(), SlaveError> {
-        let response = self.send_command_and_wait(&commands::download(data)).await?;
-        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let total_size = data.len();
+        let max_block = self.max_download_block_size();
 
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        // Check if data fits in a single DOWNLOAD command
+        if total_size <= max_block {
+            // Single packet
+            let response = self
+                .send_command_and_wait(&commands::download(total_size as u8, data))
+                .await?;
+            let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+
+            return match parsed {
+                Response::Res(_) => Ok(()),
+                Response::Err(err) => Err(SlaveError::Protocol(err)),
+                _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            };
         }
+
+        // Multi-packet transfer
+        let mut offset = 0;
+        let mut remaining = total_size;
+
+        // First packet: DOWNLOAD with total size
+        let first_chunk_size = max_block.min(remaining);
+        let first_chunk = &data[offset..offset + first_chunk_size];
+
+        self.send_command_and_wait(&commands::download(total_size as u8, first_chunk))
+            .await?;
+
+        offset += first_chunk_size;
+        remaining -= first_chunk_size;
+
+        // Subsequent packets: DOWNLOAD_NEXT
+        while remaining > 0 {
+            let chunk_size = max_block.min(remaining);
+            let chunk = &data[offset..offset + chunk_size];
+            let remaining_after = remaining - chunk_size;
+
+            let response = self
+                .send_command_and_wait(&commands::download_next(remaining_after as u8, chunk))
+                .await?;
+
+            // Only the last packet expects a response
+            if remaining_after == 0 {
+                let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+                match parsed {
+                    Response::Res(_) => return Ok(()),
+                    Response::Err(err) => return Err(SlaveError::Protocol(err)),
+                    _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+                }
+            }
+
+            offset += chunk_size;
+            remaining -= chunk_size;
+        }
+
+        Ok(())
     }
 
     /// Read a U32 value from memory
@@ -1397,6 +1533,111 @@ mod tests {
         let cal_err = CalibrationWriteError::SegmentNoWriteAllowed(1);
         let slave_err: SlaveError = cal_err.into();
         assert!(matches!(slave_err, SlaveError::CalibrationWrite(_)));
+    }
+
+    #[test]
+    fn test_max_download_block_size_calculation() {
+        // Test the calculation: max_cto - 2
+        // For max_cto = 8: max_download_block_size = 6
+        // For max_cto = 255: max_download_block_size = 253
+
+        // Test the formula directly
+        fn calculate_max_block(max_cto: u16) -> usize {
+            (max_cto as usize).saturating_sub(2)
+        }
+
+        assert_eq!(calculate_max_block(8), 6);
+        assert_eq!(calculate_max_block(255), 253);
+        assert_eq!(calculate_max_block(2), 0);
+        assert_eq!(calculate_max_block(1), 0); // saturating_sub handles underflow
+    }
+
+    #[test]
+    fn test_download_command_with_total_size() {
+        use crate::protocol::commands::download;
+        use crate::protocol::CommandCode;
+
+        // Test that download command includes total_size parameter
+        let data = vec![0x01, 0x02, 0x03];
+        let total_size = 100u8;
+        let cmd = download(total_size, &data);
+
+        assert_eq!(cmd[0], CommandCode::Download as u8);
+        assert_eq!(cmd[1], 100); // total_size, not data.len()
+        assert_eq!(&cmd[2..], &[0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn test_download_next_command() {
+        use crate::protocol::commands::download_next;
+        use crate::protocol::CommandCode;
+
+        // Test download_next command
+        let data = vec![0x04, 0x05, 0x06];
+        let remaining = 50u8;
+        let cmd = download_next(remaining, &data);
+
+        assert_eq!(cmd[0], CommandCode::DownloadNext as u8);
+        assert_eq!(cmd[1], 50); // remaining count
+        assert_eq!(&cmd[2..], &[0x04, 0x05, 0x06]);
+    }
+
+    #[test]
+    fn test_download_chunking_logic() {
+        // Test the chunking calculation logic
+        // Given: total_size = 20, max_block = 6
+        // Expected:
+        //   - First packet: DOWNLOAD with total=20, data[0..6]
+        //   - Second packet: DOWNLOAD_NEXT with remaining=14-6=8, data[6..12]
+        //   - Third packet: DOWNLOAD_NEXT with remaining=8-6=2, data[12..18]
+        //   - Fourth packet: DOWNLOAD_NEXT with remaining=0, data[18..20]
+
+        let total_size = 20usize;
+        let max_block = 6usize;
+        let data: Vec<u8> = (0..total_size as u8).collect();
+
+        let mut chunks = Vec::new();
+        let mut offset = 0;
+        let mut remaining = total_size;
+
+        // First chunk (DOWNLOAD)
+        let first_chunk_size = max_block.min(remaining);
+        chunks.push(("DOWNLOAD", total_size as u8, data[offset..offset + first_chunk_size].to_vec()));
+        offset += first_chunk_size;
+        remaining -= first_chunk_size;
+
+        // Subsequent chunks (DOWNLOAD_NEXT)
+        while remaining > 0 {
+            let chunk_size = max_block.min(remaining);
+            let remaining_after = remaining - chunk_size;
+            chunks.push(("DOWNLOAD_NEXT", remaining_after as u8, data[offset..offset + chunk_size].to_vec()));
+            offset += chunk_size;
+            remaining -= chunk_size;
+        }
+
+        // Verify chunk count
+        assert_eq!(chunks.len(), 4);
+
+        // Verify first chunk (DOWNLOAD with total size)
+        assert_eq!(chunks[0].0, "DOWNLOAD");
+        assert_eq!(chunks[0].1, 20); // total size
+        assert_eq!(chunks[0].2.len(), 6);
+        assert_eq!(chunks[0].2, vec![0, 1, 2, 3, 4, 5]);
+
+        // Verify second chunk
+        assert_eq!(chunks[1].0, "DOWNLOAD_NEXT");
+        assert_eq!(chunks[1].1, 8); // remaining after this packet (20-6-6=8)
+        assert_eq!(chunks[1].2, vec![6, 7, 8, 9, 10, 11]);
+
+        // Verify third chunk
+        assert_eq!(chunks[2].0, "DOWNLOAD_NEXT");
+        assert_eq!(chunks[2].1, 2); // remaining after this packet (8-6=2)
+        assert_eq!(chunks[2].2, vec![12, 13, 14, 15, 16, 17]);
+
+        // Verify last chunk (remaining = 0)
+        assert_eq!(chunks[3].0, "DOWNLOAD_NEXT");
+        assert_eq!(chunks[3].1, 0); // no remaining after last packet
+        assert_eq!(chunks[3].2, vec![18, 19]);
     }
 }
 
