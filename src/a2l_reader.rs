@@ -934,6 +934,65 @@ impl A2lReader {
         None
     }
 
+    /// Check if an optional XCP command is supported
+    ///
+    /// Parses OPTIONAL_CMD enum in IF_DATA to check if a specific command is supported.
+    /// Common optional commands: SHORT_UPLOAD, SHORT_DOWNLOAD, DOWNLOAD, DOWNLOAD_MAX, etc.
+    ///
+    /// # Arguments
+    /// * `command_name` - Name of the command (e.g., "SHORT_DOWNLOAD", "SHORT_UPLOAD")
+    ///
+    /// # Returns
+    /// - true if the command is listed in OPTIONAL_CMD enum
+    /// - false if the command is not listed or commented out
+    pub fn supports_optional_command(&self, command_name: &str) -> bool {
+        for module in &self.file.project.module {
+            for if_data in &module.if_data {
+                if let Some(ref generic) = if_data.ifdata_items {
+                    let content = format!("{:?}", generic);
+                    if Self::check_optional_cmd_supported(&content, command_name) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a command is in the OPTIONAL_CMD list
+    ///
+    /// The OPTIONAL_CMD list appears in IF_DATA and shows which optional commands
+    /// the slave supports. In the Debug format, the data appears as:
+    /// `"OPTIONAL_CMD": [GenericIfDataTaggedItem { ... items: [EnumItem(0, "SHORT_UPLOAD"), ...] }]`
+    ///
+    /// Commands that are NOT supported appear as comments in the A2L source,
+    /// but after parsing they're simply not in the list.
+    fn check_optional_cmd_supported(content: &str, command_name: &str) -> bool {
+        // Look for the command name in EnumItem format
+        // The Debug format shows: EnumItem(0, "SHORT_UPLOAD")
+        let enum_item_pattern_lower = format!("enumitem(0, \"{}\")", command_name.to_lowercase());
+
+        // Case-insensitive search
+        let content_lower = content.to_lowercase();
+
+        // Check if the command appears as an EnumItem in the OPTIONAL_CMD block
+        // First find the OPTIONAL_CMD section, then check for the command
+        if let Some(pos) = content_lower.find("\"optional_cmd\"") {
+            // Find the next closing bracket or the start of the next tag
+            let after_tag = &content[pos..];
+
+            // Look for the EnumItem pattern in a reasonable window after the tag
+            let search_window = after_tag.chars().take(5000).collect::<String>();
+            let search_window_lower = search_window.to_lowercase();
+
+            if search_window_lower.contains(&enum_item_pattern_lower) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Parse debug content to find addresses
     fn parse_debug_content(content: &str, addresses: &mut Vec<String>) {
         // Look for Block with tag: "XCP_ON_UDP_IP" pattern
@@ -1661,5 +1720,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_supports_optional_command() {
+        let reader = A2lReader::load("abc.a2l").expect("Failed to load abc.a2l");
+
+        // Check for commands that are supported
+        assert!(
+            reader.supports_optional_command("SHORT_UPLOAD"),
+            "SHORT_UPLOAD should be supported"
+        );
+        assert!(
+            reader.supports_optional_command("DOWNLOAD"),
+            "DOWNLOAD should be supported"
+        );
+        assert!(
+            reader.supports_optional_command("SET_CAL_PAGE"),
+            "SET_CAL_PAGE should be supported"
+        );
+
+        // SHORT_DOWNLOAD is commented out in abc.a2l
+        assert!(
+            !reader.supports_optional_command("SHORT_DOWNLOAD"),
+            "SHORT_DOWNLOAD should NOT be supported (commented out in A2L)"
+        );
     }
 }

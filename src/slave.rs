@@ -461,6 +461,14 @@ impl XcpSlave {
             .map(|s| s.xcp_page)
     }
 
+    /// Check if SHORT_DOWNLOAD command is supported
+    ///
+    /// If false, write operations will use SET_MTA + DOWNLOAD instead.
+    /// This is determined from the OPTIONAL_CMD enum in A2L IF_DATA.
+    pub fn supports_short_download(&self) -> bool {
+        self.cal_manager.supports_short_download()
+    }
+
     /// Check if a specific segment allows write access on its current page
     ///
     /// This checks the A2L page definition for write access permission
@@ -991,10 +999,44 @@ impl XcpSlave {
         Ok(result)
     }
 
-    /// Write memory to slave using SHORT_DOWNLOAD
+    /// Write memory to slave
+    ///
+    /// Automatically selects the appropriate command based on slave capabilities:
+    /// - If SHORT_DOWNLOAD is supported (per A2L OPTIONAL_CMD), uses SHORT_DOWNLOAD
+    /// - Otherwise, uses SET_MTA + DOWNLOAD (mandatory in XCP)
     pub async fn write_memory(&self, mta: Mta, data: &[u8]) -> Result<(), SlaveError> {
+        if self.cal_manager.supports_short_download() {
+            // Use SHORT_DOWNLOAD (one-shot write with address)
+            self.write_memory_short_download(mta, data).await
+        } else {
+            // Use SET_MTA + DOWNLOAD (mandatory, always supported)
+            self.write_memory_download(mta, data).await
+        }
+    }
+
+    /// Write memory using SHORT_DOWNLOAD command (one-shot write)
+    async fn write_memory_short_download(&self, mta: Mta, data: &[u8]) -> Result<(), SlaveError> {
         let response = self
             .send_command_and_wait(&commands::short_download(mta, data))
+            .await?;
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Write memory using SET_MTA + DOWNLOAD commands
+    /// This is the mandatory method that all XCP slaves must support
+    async fn write_memory_download(&self, mta: Mta, data: &[u8]) -> Result<(), SlaveError> {
+        // First, set the MTA
+        self.set_mta(mta).await?;
+
+        // Then, send DOWNLOAD command
+        let response = self
+            .send_command_and_wait(&commands::download(data))
             .await?;
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 

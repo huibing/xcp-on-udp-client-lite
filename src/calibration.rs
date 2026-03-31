@@ -271,6 +271,9 @@ pub struct CalibrationManager {
     params: Vec<CalibrationParam>,
     /// Memory segments from A2L file
     memory_segments: Vec<A2lMemorySegment>,
+    /// Whether SHORT_DOWNLOAD command is supported
+    /// If false, must use DOWNLOAD command instead
+    supports_short_download: bool,
 }
 
 impl CalibrationManager {
@@ -280,6 +283,7 @@ impl CalibrationManager {
         Self {
             params: Vec::new(),
             memory_segments: Vec::new(),
+            supports_short_download: true, // Default to true for backwards compatibility
         }
     }
 
@@ -289,12 +293,15 @@ impl CalibrationManager {
         let characteristics = reader.get_characteristics();
         let memory_segments = reader.get_memory_segments();
 
+        // Check if SHORT_DOWNLOAD is supported
+        let supports_short_download = reader.supports_optional_command("SHORT_DOWNLOAD");
+
         let params = characteristics
             .into_iter()
             .filter_map(Self::convert_characteristic)
             .collect();
 
-        Ok(Self { params, memory_segments })
+        Ok(Self { params, memory_segments, supports_short_download })
     }
 
     /// Convert A2L characteristic to CalibrationParam
@@ -1225,6 +1232,14 @@ impl CalibrationManager {
         &self.memory_segments
     }
 
+    /// Check if SHORT_DOWNLOAD command is supported
+    ///
+    /// If false, must use DOWNLOAD command instead (which is mandatory in XCP).
+    /// This is determined from the OPTIONAL_CMD enum in A2L IF_DATA.
+    pub fn supports_short_download(&self) -> bool {
+        self.supports_short_download
+    }
+
     /// Find a memory segment by its segment number
     fn find_segment_by_number(&self, segment: u8) -> Option<&A2lMemorySegment> {
         self.memory_segments
@@ -1664,5 +1679,16 @@ mod tests {
         // Non-existent segment
         let page = manager.find_read_only_page(99);
         assert_eq!(page, None, "Should return None for non-existent segment");
+    }
+
+    #[test]
+    fn test_supports_short_download() {
+        let manager = CalibrationManager::from_a2l("abc.a2l").expect("Failed to load abc.a2l");
+
+        // SHORT_DOWNLOAD is commented out in abc.a2l OPTIONAL_CMD enum
+        assert!(
+            !manager.supports_short_download(),
+            "SHORT_DOWNLOAD should NOT be supported based on A2L OPTIONAL_CMD"
+        );
     }
 }
