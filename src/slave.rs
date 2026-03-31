@@ -125,6 +125,30 @@ pub enum CalibrationWriteError {
     WriteFailed(String),
 }
 
+/// Page mode for user-friendly page switching
+///
+/// Users typically don't care about segment numbers - they just want to
+/// either calibrate (working mode) or view reference data (reference mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PageMode {
+    /// Working page - allows calibration (write access)
+    /// Switches all segments to a page that allows XCP write access
+    Working,
+    /// Reference page - read-only mode
+    /// Switches all segments to a page without write access
+    Reference,
+}
+
+impl PageMode {
+    /// Get a human-readable description
+    pub fn description(&self) -> &'static str {
+        match self {
+            PageMode::Working => "Working (calibration enabled)",
+            PageMode::Reference => "Reference (read-only)",
+        }
+    }
+}
+
 /// Segment page state - stores the current active page for each segment
 #[derive(Debug, Clone)]
 pub struct SegmentPageState {
@@ -502,6 +526,160 @@ impl XcpSlave {
         );
 
         Ok(new_page)
+    }
+
+    /// Find a read-only (reference) page for a segment
+    ///
+    /// Returns the first page number that does NOT allow XCP write access,
+    /// or None if all pages allow write access.
+    ///
+    /// # Arguments
+    /// * `segment` - Segment number to search
+    ///
+    /// # Returns
+    /// - Some(page_number) if a read-only page is found
+    /// - None if all pages allow write access
+    pub fn find_read_only_page(&self, segment: u8) -> Option<u8> {
+        self.cal_manager.find_read_only_page(segment)
+    }
+
+    /// Find the appropriate page for a given mode
+    ///
+    /// # Arguments
+    /// * `segment` - Segment number
+    /// * `mode` - Page mode (Working or Reference)
+    ///
+    /// # Returns
+    /// - Some(page_number) if a matching page is found
+    /// - None if no matching page exists for this segment
+    pub fn find_page_for_mode(&self, segment: u8, mode: PageMode) -> Option<u8> {
+        match mode {
+            PageMode::Working => self.find_write_allowed_page(segment),
+            PageMode::Reference => self.find_read_only_page(segment),
+        }
+    }
+
+    /// Switch all segments to the specified page mode
+    ///
+    /// This is the user-friendly API for page switching. Users don't need to
+    /// know about segment numbers - they just want to either calibrate (Working)
+    /// or view reference data (Reference).
+    ///
+    /// This method will:
+    /// 1. Iterate over all segments that have page information
+    /// 2. For each segment, find the appropriate page for the requested mode
+    /// 3. Switch to that page (if different from current page)
+    ///
+    /// # Arguments
+    /// * `mode` - Page mode: Working (calibration enabled) or Reference (read-only)
+    ///
+    /// # Returns
+    /// A vector of (segment, new_page) pairs for segments that were actually switched.
+    /// Segments that were already on the correct page are not included.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Switch to working mode for calibration
+    /// let switched = slave.switch_all_pages(PageMode::Working).await?;
+    /// println!("Switched {} segments to working page", switched.len());
+    ///
+    /// // Switch back to reference (read-only) mode
+    /// let switched = slave.switch_all_pages(PageMode::Reference).await?;
+    /// ```
+    pub async fn switch_all_pages(&mut self, mode: PageMode) -> Result<Vec<(u8, u8)>, SlaveError> {
+        let mut switched = Vec::new();
+        let num_segments = self.cal_manager.get_memory_segment_count();
+
+        if num_segments == 0 {
+            tracing::debug!("No memory segments defined, nothing to switch");
+            return Ok(switched);
+        }
+
+        tracing::info!(
+            "Switching all {} segments to {} mode",
+            num_segments,
+            mode.description()
+        );
+
+        for segment in 0..num_segments {
+            let segment = segment as u8;
+
+            // Find the appropriate page for this mode
+            let target_page = match self.find_page_for_mode(segment, mode) {
+                Some(page) => page,
+                None => {
+                    tracing::debug!(
+                        "Segment {} has no {:?} page, skipping",
+                        segment, mode
+                    );
+                    continue;
+                }
+            };
+
+            // Check current page
+            let current_page = self.segment_pages
+                .iter()
+                .find(|s| s.segment == segment)
+                .map(|s| s.xcp_page);
+
+            if current_page == Some(target_page) {
+                tracing::debug!(
+                    "Segment {} already on {} page {}",
+                    segment, mode.description(), target_page
+                );
+                continue;
+            }
+
+            // Switch to the target page
+            match self.set_cal_page(segment, target_page, 0x02).await {
+                Ok(()) => {
+                    tracing::info!(
+                        "Segment {} switched to {} page {}",
+                        segment, mode.description(), target_page
+                    );
+                    switched.push((segment, target_page));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to switch segment {} to page {}: {:?}",
+                        segment, target_page, e
+                    );
+                    // Continue with other segments even if one fails
+                }
+            }
+        }
+
+        tracing::info!(
+            "Page switch complete: {} segments switched to {} mode",
+            switched.len(),
+            mode.description()
+        );
+
+        Ok(switched)
+    }
+
+    /// Get the current effective page mode
+    ///
+    /// Analyzes all segments and returns the overall mode:
+    /// - PageMode::Working if at least one segment is on a write-allowed page
+    /// - PageMode::Reference if all segments are on read-only pages
+    ///
+    /// This is useful for UI display to show the current calibration state.
+    pub fn get_current_page_mode(&self) -> PageMode {
+        let num_segments = self.cal_manager.get_memory_segment_count();
+
+        if num_segments == 0 {
+            // No segments defined, default to working for backwards compatibility
+            return PageMode::Working;
+        }
+
+        for state in &self.segment_pages {
+            if self.cal_manager.is_page_write_allowed(state.segment, state.xcp_page) {
+                return PageMode::Working;
+            }
+        }
+
+        PageMode::Reference
     }
 
     /// Check write permission for a calibration parameter

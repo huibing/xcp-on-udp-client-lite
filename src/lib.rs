@@ -16,7 +16,7 @@ pub use client::XcpClient;
 pub use calibration::{CalibrationParam, CalibrationValue, CalibrationType, CalibrationManager};
 pub use daq::{DaqManager, Measurement, DaqRecord, DaqConfiguration, OdtEntryConfig, CompuMethod};
 pub use a2l_reader::{A2lReader, A2lMeasurement, A2lCharacteristic, A2lDataType};
-pub use slave::{XcpSlave, SlaveId, SlaveInfo, SlaveEvent, SlaveError, SegmentPageState, CalibrationWriteError};
+pub use slave::{XcpSlave, SlaveId, SlaveInfo, SlaveEvent, SlaveError, SegmentPageState, CalibrationWriteError, PageMode};
 pub use variable::{DeviceVariable, VariableType, VariableFilter, VariableSearchManager, VariableSummary};
 
 // Re-export for TUI use
