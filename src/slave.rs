@@ -453,23 +453,22 @@ impl XcpSlave {
         &self.segment_pages
     }
 
+    /// Get the current XCP page for a segment
+    fn get_current_xcp_page(&self, segment: u8) -> Option<u8> {
+        self.segment_pages
+            .iter()
+            .find(|s| s.segment == segment)
+            .map(|s| s.xcp_page)
+    }
+
     /// Check if a specific segment allows write access on its current page
     ///
     /// This checks the A2L page definition for write access permission
     /// on the currently active page for XCP access.
     pub fn is_write_allowed_for_segment(&self, segment: u8) -> bool {
-        // Find the current page state for this segment
-        let current_page = self.segment_pages
-            .iter()
-            .find(|s| s.segment == segment)
-            .map(|s| s.xcp_page);
-
-        if let Some(page_num) = current_page {
-            // Check the A2L definition for this page
-            self.cal_manager.is_page_write_allowed(segment, page_num)
-        } else {
-            false
-        }
+        self.get_current_xcp_page(segment)
+            .map(|page_num| self.cal_manager.is_page_write_allowed(segment, page_num))
+            .unwrap_or(false)
     }
 
     /// Find a page that allows XCP write access for a segment
@@ -507,12 +506,7 @@ impl XcpSlave {
             ))?;
 
         // Check if we're already on that page
-        let current_page = self.segment_pages
-            .iter()
-            .find(|s| s.segment == segment)
-            .map(|s| s.xcp_page);
-
-        if current_page == Some(new_page) {
+        if self.get_current_xcp_page(segment) == Some(new_page) {
             tracing::debug!("Already on write-allowed page {} for segment {}", new_page, segment);
             return Ok(new_page);
         }
@@ -617,12 +611,7 @@ impl XcpSlave {
             };
 
             // Check current page
-            let current_page = self.segment_pages
-                .iter()
-                .find(|s| s.segment == segment)
-                .map(|s| s.xcp_page);
-
-            if current_page == Some(target_page) {
+            if self.get_current_xcp_page(segment) == Some(target_page) {
                 tracing::debug!(
                     "Segment {} already on {} page {}",
                     segment, mode.description(), target_page
@@ -720,12 +709,7 @@ impl XcpSlave {
                 }
 
                 // Find current page for this segment
-                let current_page = self.segment_pages
-                    .iter()
-                    .find(|s| s.segment == seg_num)
-                    .map(|s| s.xcp_page);
-
-                match current_page {
+                match self.get_current_xcp_page(seg_num) {
                     None => Err(CalibrationWriteError::PageStateNotInitialized),
                     Some(page_num) => {
                         // Step 4: Check if current page allows write

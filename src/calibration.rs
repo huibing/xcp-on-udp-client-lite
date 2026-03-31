@@ -1225,6 +1225,13 @@ impl CalibrationManager {
         &self.memory_segments
     }
 
+    /// Find a memory segment by its segment number
+    fn find_segment_by_number(&self, segment: u8) -> Option<&A2lMemorySegment> {
+        self.memory_segments
+            .iter()
+            .find(|s| s.xcp_info.as_ref().map(|x| x.segment_number) == Some(segment))
+    }
+
     /// Check if a specific page in a segment allows write access
     ///
     /// # Arguments
@@ -1234,9 +1241,7 @@ impl CalibrationManager {
     /// # Returns
     /// true if the page allows XCP write access
     pub fn is_page_write_allowed(&self, segment: u8, page: u8) -> bool {
-        self.memory_segments
-            .iter()
-            .find(|s| s.xcp_info.as_ref().map(|x| x.segment_number) == Some(segment))
+        self.find_segment_by_number(segment)
             .and_then(|s| s.xcp_info.as_ref())
             .and_then(|xcp| xcp.pages.iter().find(|p| p.page_number == page))
             .map(|p| p.is_write_allowed())
@@ -1251,9 +1256,7 @@ impl CalibrationManager {
     /// # Returns
     /// true if the segment has at least one page that allows XCP write access
     pub fn is_segment_calibration_allowed(&self, segment: u8) -> bool {
-        self.memory_segments
-            .iter()
-            .find(|s| s.xcp_info.as_ref().map(|x| x.segment_number) == Some(segment))
+        self.find_segment_by_number(segment)
             .map(|s| s.is_calibration_allowed())
             .unwrap_or(false)
     }
@@ -1270,9 +1273,7 @@ impl CalibrationManager {
     /// - Some(page_number) if a write-allowed page is found
     /// - None if no pages allow write access
     pub fn find_write_allowed_page(&self, segment: u8) -> Option<u8> {
-        self.memory_segments
-            .iter()
-            .find(|s| s.xcp_info.as_ref().map(|x| x.segment_number) == Some(segment))
+        self.find_segment_by_number(segment)
             .and_then(|s| s.xcp_info.as_ref())
             .and_then(|xcp| {
                 xcp.pages
@@ -1294,9 +1295,7 @@ impl CalibrationManager {
     /// - Some(page_number) if a read-only page is found
     /// - None if all pages allow write access
     pub fn find_read_only_page(&self, segment: u8) -> Option<u8> {
-        self.memory_segments
-            .iter()
-            .find(|s| s.xcp_info.as_ref().map(|x| x.segment_number) == Some(segment))
+        self.find_segment_by_number(segment)
             .and_then(|s| s.xcp_info.as_ref())
             .and_then(|xcp| {
                 xcp.pages
