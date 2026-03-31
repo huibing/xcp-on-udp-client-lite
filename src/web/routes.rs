@@ -1133,6 +1133,119 @@ async fn write_calibration_to_slave(
     }
 }
 
+/// Get page mode for all connected devices (GET /api/cal/pagemode)
+pub async fn get_page_mode(State(state): State<AppState>) -> impl IntoResponse {
+    let mut devices: Vec<serde_json::Value> = Vec::new();
+
+    // Get page mode from connected slaves
+    let client = state.client.lock().await;
+    let slaves = state.all_slaves().await;
+
+    for slave_state in &slaves {
+        if !slave_state.is_connected() {
+            continue;
+        }
+
+        // Get the page mode from XcpSlave if available
+        let page_mode = if let Some(xcp_slave) = client.get_slave(slave_state.id) {
+            let xcp_slave_guard = xcp_slave.lock().await;
+            xcp_slave_guard.get_current_page_mode()
+        } else {
+            crate::slave::PageMode::Reference
+        };
+
+        devices.push(json!({
+            "device_id": slave_state.id.to_string(),
+            "device_name": slave_state.display_name(),
+            "page_mode": match page_mode {
+                crate::slave::PageMode::Working => "working",
+                crate::slave::PageMode::Reference => "reference",
+            },
+            "page_mode_description": page_mode.description(),
+        }));
+    }
+
+    Json(json!({
+        "success": true,
+        "devices": devices,
+    }))
+}
+
+/// Switch page mode for a device (POST /api/cal/pagemode/:device_id)
+pub async fn switch_page_mode(
+    State(state): State<AppState>,
+    Path(device_id_str): Path<String>,
+    Json(payload): Json<HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Get the mode from payload
+    let mode_str = payload.get("mode").cloned().unwrap_or_else(|| "reference".to_string());
+    let mode = match mode_str.as_str() {
+        "working" => crate::slave::PageMode::Working,
+        "reference" => crate::slave::PageMode::Reference,
+        _ => {
+            return Json(json!({
+                "success": false,
+                "error": "Invalid mode. Use 'working' or 'reference'."
+            }));
+        }
+    };
+
+    // Try to parse as UUID
+    let uuid = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(json!({
+                "success": false,
+                "error": "Invalid device ID"
+            }));
+        }
+    };
+
+    let slave_id = SlaveId(uuid);
+
+    // Get the XcpSlave and switch pages
+    let client = state.client.lock().await;
+    if let Some(xcp_slave) = client.get_slave(slave_id) {
+        let mut xcp_slave_guard = xcp_slave.lock().await;
+
+        // Check if connected
+        if !xcp_slave_guard.info.connected {
+            return Json(json!({
+                "success": false,
+                "error": "Device not connected"
+            }));
+        }
+
+        // Switch pages
+        match xcp_slave_guard.switch_all_pages(mode).await {
+            Ok(segments_switched) => {
+                let new_mode = xcp_slave_guard.get_current_page_mode();
+                Json(json!({
+                    "success": true,
+                    "message": format!("Switched {} segment(s) to {} mode", segments_switched.len(), new_mode.description()),
+                    "page_mode": match new_mode {
+                        crate::slave::PageMode::Working => "working",
+                        crate::slave::PageMode::Reference => "reference",
+                    },
+                    "page_mode_description": new_mode.description(),
+                    "segments_switched": segments_switched.len(),
+                }))
+            }
+            Err(e) => {
+                Json(json!({
+                    "success": false,
+                    "error": e.to_string()
+                }))
+            }
+        }
+    } else {
+        Json(json!({
+            "success": false,
+            "error": "Device not found"
+        }))
+    }
+}
+
 /// DAQ page (GET /daq)
 pub async fn daq_page(State(state): State<AppState>) -> Html<String> {
     let status = state.take_status().await;
@@ -1680,6 +1793,7 @@ pub async fn a2l_load(
             daq_manager: Arc::new(RwLock::new(daq_manager)),
             cal_values: Arc::new(RwLock::new(HashMap::new())),
             daq_running: Arc::new(RwLock::new(false)),
+            page_mode: Arc::new(RwLock::new(crate::slave::PageMode::Reference)),
         };
 
         state.add_device(device).await;

@@ -6,7 +6,7 @@
 
 use crate::calibration::{CalibrationManager, CalibrationValue};
 use crate::daq::DaqManager;
-use crate::slave::{SlaveId, SlaveInfo};
+use crate::slave::{PageMode, SlaveId, SlaveInfo};
 use crate::variable::{DeviceVariable, VariableSearchManager};
 use crate::web::templates::TemplateEngine;
 use crate::XcpClient;
@@ -41,6 +41,8 @@ pub struct DeviceState {
     pub cal_values: Arc<RwLock<HashMap<String, CalibrationValue>>>,
     /// DAQ running status
     pub daq_running: Arc<RwLock<bool>>,
+    /// Current page mode (Working or Reference)
+    pub page_mode: Arc<RwLock<PageMode>>,
 }
 
 impl DeviceState {
@@ -59,6 +61,7 @@ impl DeviceState {
             daq_manager: Arc::new(RwLock::new(DaqManager::new())),
             cal_values: Arc::new(RwLock::new(HashMap::new())),
             daq_running: Arc::new(RwLock::new(false)),
+            page_mode: Arc::new(RwLock::new(PageMode::Reference)), // Default to Reference (read-only)
         }
     }
 

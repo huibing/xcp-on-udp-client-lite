@@ -79,6 +79,8 @@ impl WebServer {
             .route("/api/cal/read/:device_id/:idx", get(routes::cal_read))
             .route("/cal/write/:device_id/:idx", get(routes::cal_write_page))
             .route("/api/cal/write/:device_id/:idx", post(routes::cal_write_api))
+            .route("/api/cal/pagemode", get(routes::get_page_mode))
+            .route("/api/cal/pagemode/:device_id", post(routes::switch_page_mode))
             // DAQ
             .route("/daq", get(routes::daq_page))
             .route("/api/daq/available", get(routes::daq_available))

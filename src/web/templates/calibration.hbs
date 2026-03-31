@@ -7,6 +7,15 @@
         </div>
     </div>
 
+    <!-- Page Mode Section -->
+    <div id="pageModeSection" style="display: none; margin-bottom: 1rem; padding: 1rem; background: #2a2a2a; border-radius: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+            <div id="pageModeDevices">
+                <!-- Device page modes will be populated here -->
+            </div>
+        </div>
+    </div>
+
     <table>
         <thead>
             <tr>
@@ -93,6 +102,46 @@
 .modal-table tr:hover {
     background: #2a2a2a;
 }
+/* Toggle Switch Styles */
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 24px;
+}
+.toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #555;
+    transition: 0.3s;
+    border-radius: 24px;
+}
+.toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: 0.3s;
+    border-radius: 50%;
+}
+.toggle-switch input:checked + .toggle-slider {
+    background-color: #4CAF50;
+}
+.toggle-switch input:checked + .toggle-slider:before {
+    transform: translateX(24px);
+}
 </style>
 
 <script>
@@ -102,13 +151,86 @@ let allVariables = [];
 let selectedKeys = new Set();
 // Temporary selection in modal
 let tempSelectedKeys = new Set();
+// Page mode data for connected devices
+let pageModeData = [];
 
 // Load available variables on page load
 document.addEventListener('DOMContentLoaded', async () => {
     await loadAvailableVars();
+    await loadPageModes();
     loadSelectionFromStorage();
     renderSelectedVars();
 });
+
+async function loadPageModes() {
+    try {
+        const response = await fetch('/api/cal/pagemode');
+        const data = await response.json();
+        if (data.success) {
+            pageModeData = data.devices;
+            renderPageModeSection();
+        }
+    } catch (e) {
+        console.error('Failed to load page modes:', e);
+    }
+}
+
+function renderPageModeSection() {
+    const section = document.getElementById('pageModeSection');
+    const container = document.getElementById('pageModeDevices');
+
+    if (pageModeData.length === 0) {
+        section.style.display = 'none';
+        return;
+    }
+
+    section.style.display = 'block';
+    container.innerHTML = pageModeData.map(device => {
+        const isWorking = device.page_mode === 'working';
+        return `
+            <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem; background: #1e1e1e; border-radius: 6px;">
+                <span style="color: #888; font-size: 0.9em;">${escapeHtml(device.device_name)}</span>
+                <label class="toggle-switch" title="Toggle between Working (calibration enabled) and Reference (read-only)">
+                    <input type="checkbox"
+                           ${isWorking ? 'checked' : ''}
+                           onchange="switchPageMode('${device.device_id}', this.checked ? 'working' : 'reference')">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span style="font-size: 0.85em; color: ${isWorking ? '#4CAF50' : '#888'};">
+                    ${isWorking ? '✏️ Working' : '📖 Reference'}
+                </span>
+            </div>
+        `;
+    }).join('');
+}
+
+async function switchPageMode(deviceId, mode) {
+    try {
+        const response = await fetch(`/api/cal/pagemode/${deviceId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: mode })
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            // Update local state
+            const device = pageModeData.find(d => d.device_id === deviceId);
+            if (device) {
+                device.page_mode = data.page_mode;
+                device.page_mode_description = data.page_mode_description;
+            }
+            renderPageModeSection();
+        } else {
+            alert('Failed to switch page mode: ' + data.error);
+            // Re-render to reset the toggle
+            renderPageModeSection();
+        }
+    } catch (e) {
+        alert('Error switching page mode: ' + e.message);
+        renderPageModeSection();
+    }
+}
 
 async function loadAvailableVars() {
     try {
