@@ -1,6 +1,6 @@
 //! Calibration Parameter Management
 
-use crate::a2l_reader::{A2lCharacteristic, A2lDataType, A2lReader};
+use crate::a2l_reader::{A2lCharacteristic, A2lDataType, A2lMemorySegment, A2lReader};
 use crate::client::XcpClient;
 use crate::daq::CompuMethod;
 use crate::protocol::Mta;
@@ -269,6 +269,8 @@ impl CalibrationParam {
 #[derive(Clone)]
 pub struct CalibrationManager {
     params: Vec<CalibrationParam>,
+    /// Memory segments from A2L file
+    memory_segments: Vec<A2lMemorySegment>,
 }
 
 impl CalibrationManager {
@@ -277,6 +279,7 @@ impl CalibrationManager {
     pub fn new() -> Self {
         Self {
             params: Vec::new(),
+            memory_segments: Vec::new(),
         }
     }
 
@@ -284,13 +287,14 @@ impl CalibrationManager {
     pub fn from_a2l<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let reader = A2lReader::load(path)?;
         let characteristics = reader.get_characteristics();
+        let memory_segments = reader.get_memory_segments();
 
         let params = characteristics
             .into_iter()
             .filter_map(Self::convert_characteristic)
             .collect();
 
-        Ok(Self { params })
+        Ok(Self { params, memory_segments })
     }
 
     /// Convert A2L characteristic to CalibrationParam
@@ -1210,6 +1214,81 @@ impl CalibrationManager {
             }
         }
     }
+
+    /// Get the number of memory segments
+    pub fn get_memory_segment_count(&self) -> usize {
+        self.memory_segments.len()
+    }
+
+    /// Get all memory segments
+    pub fn get_memory_segments(&self) -> &[A2lMemorySegment] {
+        &self.memory_segments
+    }
+
+    /// Check if a specific page in a segment allows write access
+    ///
+    /// # Arguments
+    /// * `segment` - Segment number (0-255)
+    /// * `page` - Page number (0-255)
+    ///
+    /// # Returns
+    /// true if the page allows XCP write access
+    pub fn is_page_write_allowed(&self, segment: u8, page: u8) -> bool {
+        self.memory_segments
+            .iter()
+            .find(|s| s.xcp_info.as_ref().map(|x| x.segment_number) == Some(segment))
+            .and_then(|s| s.xcp_info.as_ref())
+            .and_then(|xcp| xcp.pages.iter().find(|p| p.page_number == page))
+            .map(|p| p.is_write_allowed())
+            .unwrap_or(false)
+    }
+
+    /// Check if a segment allows calibration (has at least one page with write access)
+    ///
+    /// # Arguments
+    /// * `segment` - Segment number (0-255)
+    ///
+    /// # Returns
+    /// true if the segment has at least one page that allows XCP write access
+    pub fn is_segment_calibration_allowed(&self, segment: u8) -> bool {
+        self.memory_segments
+            .iter()
+            .find(|s| s.xcp_info.as_ref().map(|x| x.segment_number) == Some(segment))
+            .map(|s| s.is_calibration_allowed())
+            .unwrap_or(false)
+    }
+
+    /// Find which segment a characteristic belongs to based on its address
+    ///
+    /// # Returns
+    /// The segment number if found, or None if not in any segment
+    pub fn find_segment_for_address(&self, address: u32, address_ext: u8) -> Option<u8> {
+        for seg in &self.memory_segments {
+            // Check if address falls within this segment
+            if address >= seg.address && address < seg.address + seg.size {
+                // Check address extension matches
+                if let Some(ref xcp) = seg.xcp_info {
+                    if xcp.address_extension == address_ext {
+                        return Some(xcp.segment_number);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if write access is allowed for a characteristic at the given address
+    ///
+    /// This combines segment lookup with page write permission check
+    pub fn is_write_allowed_for_address(&self, address: u32, address_ext: u8, current_page: u8) -> bool {
+        if let Some(segment) = self.find_segment_for_address(address, address_ext) {
+            self.is_page_write_allowed(segment, current_page)
+        } else {
+            // If not in any segment, default to allowing write
+            // (for backwards compatibility with A2L files without segment info)
+            true
+        }
+    }
 }
 
 impl Default for CalibrationManager {
@@ -1420,5 +1499,75 @@ mod tests {
 
         // Wrong count should fail
         assert!(manager.parse_value(&param, "1, 2, 3").is_err());
+    }
+
+    #[test]
+    fn test_memory_segment_from_a2l() {
+        // Test that CalibrationManager loads memory segments from A2L
+        let manager = CalibrationManager::from_a2l("abc.a2l").expect("Failed to load abc.a2l");
+
+        // Should have 3 segments
+        assert_eq!(manager.get_memory_segment_count(), 3);
+
+        // Check segment names
+        let segments = manager.get_memory_segments();
+        assert!(segments.iter().any(|s| s.name == "segment_0_type_data"));
+        assert!(segments.iter().any(|s| s.name == "segment_1_type_offline_data"));
+        assert!(segments.iter().any(|s| s.name == "segment_2_type_code"));
+    }
+
+    #[test]
+    fn test_is_page_write_allowed() {
+        let manager = CalibrationManager::from_a2l("abc.a2l").expect("Failed to load abc.a2l");
+
+        // Segment 0:
+        // - Page 0: XCP_WRITE_ACCESS_NOT_ALLOWED
+        // - Page 1: XCP_WRITE_ACCESS_WITH_ECU_ONLY
+        assert!(!manager.is_page_write_allowed(0, 0), "Page 0 should not allow write");
+        assert!(manager.is_page_write_allowed(0, 1), "Page 1 should allow write");
+
+        // Segment 2 (CODE segment):
+        // - Page 0: XCP_WRITE_ACCESS_NOT_ALLOWED
+        assert!(!manager.is_page_write_allowed(2, 0), "CODE segment page 0 should not allow write");
+    }
+
+    #[test]
+    fn test_find_segment_for_address() {
+        let manager = CalibrationManager::from_a2l("abc.a2l").expect("Failed to load abc.a2l");
+
+        // Segment 0: address 0xA0380000, size 0x40000
+        // An address within segment 0
+        let segment = manager.find_segment_for_address(0xA0380000 + 0x1000, 0);
+        assert_eq!(segment, Some(0));
+
+        // Address outside all segments
+        let segment = manager.find_segment_for_address(0x00000000, 0);
+        assert_eq!(segment, None);
+    }
+
+    #[test]
+    fn test_empty_manager_segment_count() {
+        let manager = CalibrationManager::new();
+        assert_eq!(manager.get_memory_segment_count(), 0);
+    }
+
+    #[test]
+    fn test_is_segment_calibration_allowed() {
+        let manager = CalibrationManager::from_a2l("abc.a2l").expect("Failed to load abc.a2l");
+
+        // Segment 0: has pages 0 (no write) and 1 (write allowed)
+        // -> segment allows calibration
+        assert!(manager.is_segment_calibration_allowed(0), "Segment 0 should allow calibration");
+
+        // Segment 1: has pages 0 (no write) and 1 (write allowed)
+        // -> segment allows calibration
+        assert!(manager.is_segment_calibration_allowed(1), "Segment 1 should allow calibration");
+
+        // Segment 2 (CODE): has only page 0 (no write)
+        // -> segment does NOT allow calibration
+        assert!(!manager.is_segment_calibration_allowed(2), "Segment 2 (CODE) should NOT allow calibration");
+
+        // Non-existent segment
+        assert!(!manager.is_segment_calibration_allowed(99), "Non-existent segment should not allow calibration");
     }
 }

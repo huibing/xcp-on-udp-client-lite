@@ -149,6 +149,154 @@ pub struct A2lCharacteristic {
     pub max: f64,
 }
 
+/// XCP checksum algorithm types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XcpChecksum {
+    Add11,
+    Add12,
+    Add14,
+    Add22,
+    Add24,
+    Add44,
+    Crc16,
+    Crc16Citt,
+    Crc32,
+    UserDefined(u8),
+}
+
+impl XcpChecksum {
+    /// Parse from string representation (e.g., "XCP_CRC_32")
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "XCP_ADD_11" => Some(Self::Add11),
+            "XCP_ADD_12" => Some(Self::Add12),
+            "XCP_ADD_14" => Some(Self::Add14),
+            "XCP_ADD_22" => Some(Self::Add22),
+            "XCP_ADD_24" => Some(Self::Add24),
+            "XCP_ADD_44" => Some(Self::Add44),
+            "XCP_CRC_16" => Some(Self::Crc16),
+            "XCP_CRC_16_CITT" => Some(Self::Crc16Citt),
+            "XCP_CRC_32" => Some(Self::Crc32),
+            s if s.starts_with("XCP_USER_DEFINED") => {
+                // Extract the value from enum format if present
+                None // Will be parsed separately
+            }
+            _ => None,
+        }
+    }
+}
+
+/// XCP write access permission for a page
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XcpWriteAccess {
+    /// XCP write access not allowed
+    NotAllowed,
+    /// XCP write access with ECU only
+    WithEcuOnly,
+    /// XCP write access always allowed
+    Always,
+}
+
+impl XcpWriteAccess {
+    /// Check if XCP write is allowed
+    pub fn is_write_allowed(&self) -> bool {
+        match self {
+            Self::NotAllowed => false,
+            Self::WithEcuOnly => true,
+            Self::Always => true,
+        }
+    }
+}
+
+/// XCP read access permission for a page
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XcpReadAccess {
+    /// XCP read access with ECU only
+    WithEcuOnly,
+    /// XCP read access always allowed
+    Always,
+}
+
+/// ECU access mode for a page
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EcuAccessMode {
+    /// ECU access with XCP only
+    WithXcpOnly,
+    /// ECU access always
+    Always,
+}
+
+/// XCP Page information within a memory segment
+#[derive(Debug, Clone)]
+pub struct XcpPage {
+    /// Page number (0-indexed)
+    pub page_number: u8,
+    /// ECU access mode
+    pub ecu_access: EcuAccessMode,
+    /// XCP read access mode
+    pub xcp_read_access: XcpReadAccess,
+    /// XCP write access mode - this is critical for calibration!
+    pub xcp_write_access: XcpWriteAccess,
+}
+
+impl XcpPage {
+    /// Check if this page allows XCP write access
+    pub fn is_write_allowed(&self) -> bool {
+        self.xcp_write_access.is_write_allowed()
+    }
+}
+
+/// XCP-specific segment information from IF_DATA
+#[derive(Debug, Clone)]
+pub struct XcpSegmentInfo {
+    /// Segment logical number
+    pub segment_number: u8,
+    /// Number of pages in this segment
+    pub num_pages: u8,
+    /// Address extension for this segment
+    pub address_extension: u8,
+    /// Checksum algorithm (if specified)
+    pub checksum: Option<XcpChecksum>,
+    /// Page information
+    pub pages: Vec<XcpPage>,
+}
+
+impl XcpSegmentInfo {
+    /// Check if any page in this segment allows XCP write access
+    pub fn is_write_allowed(&self) -> bool {
+        self.pages.iter().any(|p| p.is_write_allowed())
+    }
+}
+
+/// Memory segment information from A2L
+#[derive(Debug, Clone)]
+pub struct A2lMemorySegment {
+    /// Segment name
+    pub name: String,
+    /// Segment description
+    pub description: String,
+    /// Program type (DATA, CODE, OFFLINE_DATA, etc.)
+    pub prg_type: String,
+    /// Memory type (FLASH, RAM, EEPROM, etc.)
+    pub memory_type: String,
+    /// Memory attribute (INTERN, EXTERN)
+    pub attribute: String,
+    /// Base address of the segment
+    pub address: u32,
+    /// Size of the segment in bytes
+    pub size: u32,
+    /// XCP-specific segment information (from IF_DATA XCPplus)
+    pub xcp_info: Option<XcpSegmentInfo>,
+}
+
+impl A2lMemorySegment {
+    /// Check if this segment allows XCP write access (calibration)
+    /// Returns true if the segment has XCP info and at least one page allows write
+    pub fn is_calibration_allowed(&self) -> bool {
+        self.xcp_info.as_ref().map_or(false, |xcp| xcp.is_write_allowed())
+    }
+}
+
 /// A2L file reader and parser
 pub struct A2lReader {
     file: a2lfile::A2lFile,
@@ -875,6 +1023,281 @@ impl A2lReader {
 
         None
     }
+
+    /// Get all memory segments from the A2L file
+    /// This extracts both the basic MEMORY_SEGMENT info and XCP-specific
+    /// SEGMENT/PAGE information from IF_DATA XCPplus blocks
+    pub fn get_memory_segments(&self) -> Vec<A2lMemorySegment> {
+        let mut segments = Vec::new();
+
+        for module in &self.file.project.module {
+            if let Some(mod_par) = &module.mod_par {
+                for mem_seg in &mod_par.memory_segment {
+                    let segment = self.parse_memory_segment(mem_seg);
+                    segments.push(segment);
+                }
+            }
+        }
+
+        segments
+    }
+
+    /// Parse a single memory segment
+    fn parse_memory_segment(&self, mem_seg: &a2lfile::MemorySegment) -> A2lMemorySegment {
+        let name = mem_seg.name.clone();
+        let description = mem_seg.long_identifier.clone();
+        let prg_type = format!("{:?}", mem_seg.prg_type);
+        let memory_type = format!("{:?}", mem_seg.memory_type);
+        let attribute = format!("{:?}", mem_seg.attribute);
+        let address = mem_seg.address;
+        let size = mem_seg.size;
+
+        // Parse XCP-specific info from IF_DATA
+        let xcp_info = self.parse_xcp_segment_info(&mem_seg.if_data);
+
+        A2lMemorySegment {
+            name,
+            description,
+            prg_type,
+            memory_type,
+            attribute,
+            address,
+            size,
+            xcp_info,
+        }
+    }
+
+    /// Parse XCP-specific SEGMENT info from IF_DATA blocks
+    fn parse_xcp_segment_info(&self, if_data_list: &[a2lfile::IfData]) -> Option<XcpSegmentInfo> {
+        for if_data in if_data_list {
+            if let Some(ref generic) = if_data.ifdata_items {
+                if let Some(info) = Self::extract_xcp_segment_info(generic) {
+                    return Some(info);
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract XCP SEGMENT info from GenericIfData
+    /// Format in debug output:
+    /// Block { items: [TaggedUnion({"XCPplus": [...TaggedStruct({"SEGMENT": [...]})]})] }
+    /// SEGMENT block items: [UChar(segment_number), UChar(num_pages), UChar(address_ext), UChar(compression), UChar(encryption), TaggedStruct({"CHECKSUM": [...], "PAGE": [...]})]
+    fn extract_xcp_segment_info(generic: &a2lfile::GenericIfData) -> Option<XcpSegmentInfo> {
+        let content = format!("{:?}", generic);
+
+        // Find SEGMENT tagged item
+        if let Some(segment_start) = Self::find_tagged_struct_item(&content, "SEGMENT") {
+            // Parse the segment data
+            let segment_data = &content[segment_start..];
+
+            // Extract UChar values: segment_number, num_pages, address_extension, compression, encryption
+            let segment_number = Self::extract_nth_uchar(segment_data, 0).unwrap_or(0);
+            let num_pages = Self::extract_nth_uchar(segment_data, 1).unwrap_or(0);
+            let address_extension = Self::extract_nth_uchar(segment_data, 2).unwrap_or(0);
+
+            // Parse checksum
+            let checksum = Self::extract_checksum_from_segment(segment_data);
+
+            // Parse pages
+            let pages = Self::extract_pages_from_segment(segment_data);
+
+            return Some(XcpSegmentInfo {
+                segment_number,
+                num_pages,
+                address_extension,
+                checksum,
+                pages,
+            });
+        }
+        None
+    }
+
+    /// Find a TaggedStruct item by tag name and return its start position
+    fn find_tagged_struct_item(content: &str, tag: &str) -> Option<usize> {
+        // Look for pattern: tag: "SEGMENT"
+        let search_pattern = format!("tag: \"{}\"", tag);
+        content.find(&search_pattern).map(|pos| {
+            // Find the Block { after this position
+            if let Some(block_pos) = content[pos..].find("Block {") {
+                pos + block_pos
+            } else {
+                pos
+            }
+        })
+    }
+
+    /// Extract the nth UChar value from a string
+    /// Format: UChar(1, (value, true))
+    /// The actual value is the first number inside the inner parentheses
+    fn extract_nth_uchar(content: &str, n: usize) -> Option<u8> {
+        Self::extract_uchar_values(content).nth(n)
+    }
+
+    /// Extract all UChar values from a string in a single pass
+    /// Returns an iterator of u8 values
+    fn extract_uchar_values(content: &str) -> impl Iterator<Item = u8> + '_ {
+        let mut pos = 0;
+        std::iter::from_fn(move || {
+            while let Some(uchar_pos) = content[pos..].find("UChar(") {
+                let start = pos + uchar_pos + 6; // After "UChar("
+
+                // Find the matching closing parenthesis for UChar(...)
+                let mut depth = 1;
+                let mut end = 0;
+                for (i, c) in content[start..].char_indices() {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if end > 0 {
+                    let uchar_content = &content[start..start + end];
+                    // Format: "1, (0, true)" where the actual value is 0 inside (0, true)
+                    if let Some(inner_start) = uchar_content.find('(') {
+                        let inner = &uchar_content[inner_start + 1..];
+                        if let Some(comma_pos) = inner.find(',') {
+                            let value_str = &inner[..comma_pos];
+                            if let Ok(value) = value_str.trim().parse::<u8>() {
+                                pos = start + end + 1;
+                                return Some(value);
+                            }
+                        }
+                    }
+                    pos = start + end + 1;
+                } else {
+                    break;
+                }
+            }
+            None
+        })
+    }
+
+    /// Extract checksum from SEGMENT data using the XcpChecksum enum
+    fn extract_checksum_from_segment(segment_data: &str) -> Option<XcpChecksum> {
+        // Use find_enum_items to find all EnumItem values and try to parse as checksum
+        Self::find_enum_items(segment_data)
+            .find_map(|s| XcpChecksum::from_str(s))
+    }
+
+    /// Extract all PAGE info from SEGMENT data
+    fn extract_pages_from_segment(segment_data: &str) -> Vec<XcpPage> {
+        let mut pages = Vec::new();
+
+        // Find all PAGE blocks
+        let mut search_pos = 0;
+        while let Some(page_pos) = Self::find_tagged_struct_item(&segment_data[search_pos..], "PAGE") {
+            let abs_pos = search_pos + page_pos;
+
+            // Find the PAGE block content
+            if let Some(block_start) = segment_data[abs_pos..].find("Block {") {
+                let block_content = &segment_data[abs_pos + block_start..];
+
+                // Find the end of this block
+                if let Some(block_end) = Self::find_block_end(block_content) {
+                    let page_block = &block_content[..block_end];
+
+                    // Parse PAGE
+                    if let Some(page) = Self::parse_page_block(page_block) {
+                        pages.push(page);
+                    }
+
+                    search_pos = abs_pos + block_start + block_end;
+                    continue;
+                }
+            }
+            search_pos = abs_pos + 4;
+        }
+
+        pages
+    }
+
+    /// Parse a single PAGE block
+    fn parse_page_block(page_block: &str) -> Option<XcpPage> {
+        // Extract page number (first UChar)
+        let page_number = Self::extract_nth_uchar(page_block, 0)?;
+
+        // Extract access modes from EnumItem strings
+        let ecu_access = Self::parse_ecu_access_mode(page_block);
+        let xcp_read_access = Self::parse_xcp_read_access(page_block);
+        let xcp_write_access = Self::parse_xcp_write_access(page_block);
+
+        Some(XcpPage {
+            page_number,
+            ecu_access,
+            xcp_read_access,
+            xcp_write_access,
+        })
+    }
+
+    /// Parse ECU access mode from PAGE block
+    fn parse_ecu_access_mode(page_block: &str) -> EcuAccessMode {
+        Self::find_enum_items(page_block)
+            .find_map(|s| match s {
+                "ECU_ACCESS_WITH_XCP_ONLY" => Some(EcuAccessMode::WithXcpOnly),
+                "ECU_ACCESS_ALWAYS" => Some(EcuAccessMode::Always),
+                _ => None,
+            })
+            .unwrap_or(EcuAccessMode::WithXcpOnly)
+    }
+
+    /// Parse XCP read access mode from PAGE block
+    fn parse_xcp_read_access(page_block: &str) -> XcpReadAccess {
+        Self::find_enum_items(page_block)
+            .find_map(|s| match s {
+                "XCP_READ_ACCESS_WITH_ECU_ONLY" => Some(XcpReadAccess::WithEcuOnly),
+                "XCP_READ_ACCESS_ALWAYS" => Some(XcpReadAccess::Always),
+                _ => None,
+            })
+            .unwrap_or(XcpReadAccess::WithEcuOnly)
+    }
+
+    /// Parse XCP write access mode from PAGE block
+    /// This is the critical field for determining if calibration is allowed
+    fn parse_xcp_write_access(page_block: &str) -> XcpWriteAccess {
+        Self::find_enum_items(page_block)
+            .find_map(|s| match s {
+                "XCP_WRITE_ACCESS_NOT_ALLOWED" => Some(XcpWriteAccess::NotAllowed),
+                "XCP_WRITE_ACCESS_WITH_ECU_ONLY" => Some(XcpWriteAccess::WithEcuOnly),
+                "XCP_WRITE_ACCESS_ALWAYS" => Some(XcpWriteAccess::Always),
+                _ => None,
+            })
+            .unwrap_or(XcpWriteAccess::NotAllowed)
+    }
+
+    /// Find all EnumItem string values in a block
+    /// Pattern: EnumItem(1, "VALUE")
+    fn find_enum_items(content: &str) -> impl Iterator<Item = &'_ str> {
+        let mut pos = 0;
+        std::iter::from_fn(move || {
+            while let Some(enum_pos) = content[pos..].find("EnumItem(") {
+                let start = pos + enum_pos + 9; // After "EnumItem("
+                if let Some(end) = content[start..].find(')') {
+                    let enum_content = &content[start..start + end];
+                    // Format: "1, \"VALUE\"" - extract the string inside quotes
+                    if let Some(quote_start) = enum_content.find('"') {
+                        if let Some(quote_end) = enum_content[quote_start + 1..].find('"') {
+                            let value = &enum_content[quote_start + 1..quote_start + 1 + quote_end];
+                            pos = start + end + 1;
+                            return Some(value);
+                        }
+                    }
+                    pos = start + end + 1;
+                } else {
+                    break;
+                }
+            }
+            None
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1079,6 +1502,162 @@ mod tests {
             for if_data in &module.if_data {
                 if let Some(ref generic) = if_data.ifdata_items {
                     println!("GenericIfData Debug: {:?}", generic);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_memory_segments_abc_a2l() {
+        // Test parsing memory segments from abc.a2l
+        // This file has 3 segments:
+        // - segment_0: 2 pages, page 0 NOT_ALLOWED, page 1 WITH_ECU_ONLY -> calibration allowed
+        // - segment_1: 2 pages, page 0 NOT_ALLOWED, page 1 WITH_ECU_ONLY -> calibration allowed
+        // - segment_2: 1 page, NOT_ALLOWED -> calibration NOT allowed
+        let reader = A2lReader::load("abc.a2l").expect("Failed to load abc.a2l");
+        let segments = reader.get_memory_segments();
+
+        println!("Found {} memory segments in abc.a2l:", segments.len());
+        for seg in &segments {
+            println!(
+                "  - {} @ 0x{:08X}, size={}, calibration_allowed={}",
+                seg.name, seg.address, seg.size, seg.is_calibration_allowed()
+            );
+            if let Some(ref xcp) = seg.xcp_info {
+                println!(
+                    "    XCP: segment_number={}, address_ext={}, pages={}",
+                    xcp.segment_number, xcp.address_extension, xcp.num_pages
+                );
+                for page in &xcp.pages {
+                    println!(
+                        "      page {}: write_allowed={}",
+                        page.page_number,
+                        page.is_write_allowed()
+                    );
+                }
+            }
+        }
+
+        assert_eq!(segments.len(), 3, "abc.a2l should have 3 memory segments");
+
+        // Check segment_0
+        let seg0 = segments.iter().find(|s| s.name == "segment_0_type_data").expect("segment_0 not found");
+        assert_eq!(seg0.address, 0xA0380000);
+        assert_eq!(seg0.size, 0x40000);
+        assert!(seg0.is_calibration_allowed(), "segment_0 should allow calibration");
+
+        // Check segment_2 (CODE segment - should NOT allow calibration)
+        let seg2 = segments.iter().find(|s| s.name == "segment_2_type_code").expect("segment_2 not found");
+        assert!(!seg2.is_calibration_allowed(), "segment_2 should NOT allow calibration");
+    }
+
+    #[test]
+    fn test_get_memory_segments_xcp_dft_a2l() {
+        // Test parsing memory segments from xcp_dft.a2l
+        // This file has 2 segments, both with 1 page each allowing write access
+        let reader = A2lReader::load("xcp_dft.a2l").expect("Failed to load xcp_dft.a2l");
+        let segments = reader.get_memory_segments();
+
+        println!("Found {} memory segments in xcp_dft.a2l:", segments.len());
+        for seg in &segments {
+            println!(
+                "  - {} @ 0x{:08X}, size={}, calibration_allowed={}",
+                seg.name, seg.address, seg.size, seg.is_calibration_allowed()
+            );
+        }
+
+        assert!(segments.len() >= 2, "xcp_dft.a2l should have at least 2 memory segments");
+
+        // All segments in xcp_dft.a2l should allow calibration
+        for seg in &segments {
+            assert!(
+                seg.is_calibration_allowed(),
+                "Segment {} should allow calibration",
+                seg.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_xcp_write_access_parsing() {
+        // Test that XCP write access strings are correctly parsed
+        let reader = A2lReader::load("abc.a2l").expect("Failed to load abc.a2l");
+        let segments = reader.get_memory_segments();
+
+        // Find segment_0 which has 2 pages with different write access
+        let seg0 = segments.iter().find(|s| s.name == "segment_0_type_data").expect("segment_0 not found");
+        let xcp_info = seg0.xcp_info.as_ref().expect("segment_0 should have XCP info");
+
+        assert_eq!(xcp_info.pages.len(), 2, "segment_0 should have 2 pages");
+
+        // Page 0 should NOT allow write
+        let page0 = &xcp_info.pages[0];
+        assert_eq!(page0.page_number, 0);
+        assert!(!page0.is_write_allowed(), "Page 0 should NOT allow write");
+
+        // Page 1 should allow write (WITH_ECU_ONLY)
+        let page1 = &xcp_info.pages[1];
+        assert_eq!(page1.page_number, 1);
+        assert!(page1.is_write_allowed(), "Page 1 should allow write");
+    }
+
+    #[test]
+    fn test_checksum_parsing() {
+        // Test that checksum type is correctly parsed
+        let reader = A2lReader::load("abc.a2l").expect("Failed to load abc.a2l");
+        let segments = reader.get_memory_segments();
+
+        for seg in &segments {
+            if let Some(ref xcp) = seg.xcp_info {
+                assert!(
+                    xcp.checksum.is_some(),
+                    "Segment {} should have checksum info",
+                    seg.name
+                );
+                if let Some(checksum) = &xcp.checksum {
+                    assert!(
+                        matches!(checksum, XcpChecksum::Crc32),
+                        "Segment {} should have CRC32 checksum",
+                        seg.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_address_extension_parsing() {
+        // Test that address extension is correctly parsed from IF_DATA
+        let reader = A2lReader::load("abc.a2l").expect("Failed to load abc.a2l");
+        let segments = reader.get_memory_segments();
+
+        for seg in &segments {
+            if let Some(ref xcp) = seg.xcp_info {
+                // All segments in abc.a2l have address extension 0
+                assert_eq!(
+                    xcp.address_extension, 0,
+                    "Segment {} should have address extension 0",
+                    seg.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // Run with: cargo test test_debug_segment_format -- --ignored --nocapture
+    fn test_debug_segment_format() {
+        // This test prints the actual IF_DATA format for memory segments
+        let reader = A2lReader::load("abc.a2l").expect("Failed to load abc.a2l");
+
+        for module in &reader.file.project.module {
+            if let Some(mod_par) = &module.mod_par {
+                for mem_seg in &mod_par.memory_segment {
+                    println!("=== MEMORY_SEGMENT: {} ===", mem_seg.name);
+                    for if_data in &mem_seg.if_data {
+                        if let Some(ref generic) = if_data.ifdata_items {
+                            println!("IF_DATA GenericIfData: {:?}", generic);
+                        }
+                    }
                 }
             }
         }

@@ -227,12 +227,19 @@ pub fn get_daq_resolution_info() -> Vec<u8> {
 }
 
 /// Build GET_CAL_PAGE command
-pub fn get_cal_page(mode: u8, segment: u8, page: u8) -> Vec<u8> {
+/// Query the current active calibration page for a segment
+///
+/// # Arguments
+/// * `mode` - Access mode: 0x01 = ECU access, 0x02 = XCP access
+/// * `segment` - Logical data segment number (0-255)
+///
+/// # Returns
+/// Command packet without transport layer header
+pub fn get_cal_page(mode: u8, segment: u8) -> Vec<u8> {
     vec![
         CommandCode::GetCalPage as u8,
         mode,
         segment,
-        page,
     ]
 }
 
@@ -500,5 +507,26 @@ mod tests {
         assert_eq!(cmd.len(), 9);
         assert_eq!(cmd[0], CommandCode::DownloadMax as u8);
         assert_eq!(&cmd[1..], &data[..]);
+    }
+
+    #[test]
+    fn test_get_cal_page_command() {
+        // Test GET_CAL_PAGE for XCP access on segment 0
+        let cmd = get_cal_page(0x02, 0);
+        assert_eq!(cmd.len(), 3);
+        assert_eq!(cmd[0], CommandCode::GetCalPage as u8);
+        assert_eq!(cmd[1], 0x02); // XCP access mode
+        assert_eq!(cmd[2], 0);     // Segment 0
+    }
+
+    #[test]
+    fn test_set_cal_page_command() {
+        // Test SET_CAL_PAGE for XCP access on segment 0, page 1
+        let cmd = set_cal_page(0x02, 0, 1);
+        assert_eq!(cmd.len(), 4);
+        assert_eq!(cmd[0], CommandCode::SetCalPage as u8);
+        assert_eq!(cmd[1], 0x02); // XCP access mode
+        assert_eq!(cmd[2], 0);     // Segment 0
+        assert_eq!(cmd[3], 1);     // Page 1
     }
 }

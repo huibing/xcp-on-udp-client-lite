@@ -215,6 +215,21 @@ pub fn parse_checksum(data: &[u8]) -> Result<(u8, u32), String> {
     Ok((checksum_type, checksum_value))
 }
 
+/// Parse GET_CAL_PAGE response
+/// Response format (after RES byte):
+/// BYTE 0: reserved
+/// BYTE 1: reserved
+/// BYTE 2: Logical data page number (current active page)
+pub fn parse_cal_page_response(data: &[u8]) -> Result<u8, String> {
+    if data.len() < 3 {
+        return Err("GET_CAL_PAGE response too short".to_string());
+    }
+
+    // Byte 0, 1: reserved
+    // Byte 2: page number
+    Ok(data[2])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +461,27 @@ mod tests {
         assert_eq!(ErrorCode::from(0x23), ErrorCode::AccessDenied);
         assert_eq!(ErrorCode::from(0x24), ErrorCode::AccessLocked);
         assert_eq!(ErrorCode::from(0xFF), ErrorCode::Unknown(0xFF));
+    }
+
+    #[test]
+    fn test_parse_cal_page_response_valid() {
+        // Response: [reserved, reserved, page_number]
+        let data = vec![0x00, 0x00, 0x01];
+        let page = parse_cal_page_response(&data).unwrap();
+        assert_eq!(page, 1);
+    }
+
+    #[test]
+    fn test_parse_cal_page_response_page_zero() {
+        // Page 0 is valid
+        let data = vec![0x00, 0x00, 0x00];
+        let page = parse_cal_page_response(&data).unwrap();
+        assert_eq!(page, 0);
+    }
+
+    #[test]
+    fn test_parse_cal_page_response_too_short() {
+        let data = vec![0x00, 0x00];
+        assert!(parse_cal_page_response(&data).is_err());
     }
 }

@@ -97,6 +97,43 @@ pub enum SlaveError {
 
     #[error("A2L error: {0}")]
     A2lError(String),
+
+    #[error("Calibration write error: {0}")]
+    CalibrationWrite(#[from] CalibrationWriteError),
+}
+
+/// Calibration write error types
+/// These errors indicate why a calibration write operation failed
+#[derive(Debug, thiserror::Error)]
+pub enum CalibrationWriteError {
+    #[error("Address 0x{0:08X} (ext {1}) is not within any defined memory segment")]
+    AddressNotInSegment(u32, u8),
+
+    #[error("Segment {0} has no pages that allow XCP write access")]
+    SegmentNoWriteAllowed(u8),
+
+    #[error("Current page {page} in segment {segment} does not allow XCP write access. Please switch to a page with write permission.")]
+    CurrentPageNoWrite { segment: u8, page: u8 },
+
+    #[error("Page state not initialized. Call update_segment_page_state() first.")]
+    PageStateNotInitialized,
+
+    #[error("Type mismatch: {0}")]
+    TypeMismatch(String),
+
+    #[error("Write failed: {0}")]
+    WriteFailed(String),
+}
+
+/// Segment page state - stores the current active page for each segment
+#[derive(Debug, Clone)]
+pub struct SegmentPageState {
+    /// Segment number
+    pub segment: u8,
+    /// Current active page for XCP access (0-255)
+    pub xcp_page: u8,
+    /// Current active page for ECU access (0-255)
+    pub ecu_page: Option<u8>,
 }
 
 /// Single XCP Slave connection context
@@ -121,6 +158,9 @@ pub struct XcpSlave {
 
     /// A2L file path
     pub a2l_path: Option<PathBuf>,
+
+    /// Current page state for each segment (keyed by segment number)
+    segment_pages: Vec<SegmentPageState>,
 }
 
 impl XcpSlave {
@@ -171,6 +211,7 @@ impl XcpSlave {
             cal_manager: CalibrationManager::new(),
             daq_manager: Arc::new(Mutex::new(DaqManager::new())),
             a2l_path: None,
+            segment_pages: Vec::new(),
         };
 
         // Send CONNECT command
@@ -264,6 +305,348 @@ impl XcpSlave {
         Ok(id_string)
     }
 
+    /// Get the current calibration page for a specific segment
+    ///
+    /// # Arguments
+    /// * `segment` - Logical segment number (0-255)
+    /// * `mode` - Access mode: 0x01 for ECU access, 0x02 for XCP access
+    ///
+    /// # Returns
+    /// The current active page number for the specified segment and access mode
+    pub async fn get_cal_page(&self, segment: u8, mode: u8) -> Result<u8, SlaveError> {
+        let response = self.send_command_and_wait(&commands::get_cal_page(mode, segment)).await?;
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+
+        let res_data = match parsed {
+            Response::Res(data) => data,
+            Response::Err(err) => return Err(SlaveError::Protocol(err)),
+            _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        };
+
+        let page = super::protocol::parse_cal_page_response(&res_data)
+            .map_err(|e| SlaveError::ParseError(e.to_string()))?;
+
+        Ok(page)
+    }
+
+    /// Query and update the current page state for all segments
+    ///
+    /// This method queries the XCP access page for each segment defined in the A2L file.
+    /// It should be called after loading A2L data to determine which pages are currently active.
+    ///
+    /// # Returns
+    /// A reference to the updated segment page state vector
+    pub async fn update_segment_page_state(&mut self) -> Result<&[SegmentPageState], SlaveError> {
+        // Get the number of segments from A2L data
+        let num_segments = self.cal_manager.get_memory_segment_count();
+
+        if num_segments == 0 {
+            tracing::debug!("No memory segments defined, skipping GET_CAL_PAGE");
+            return Ok(&self.segment_pages);
+        }
+
+        self.segment_pages.clear();
+
+        // Query XCP access page for each segment
+        // Mode 0x02 = XCP access
+        for segment in 0..num_segments {
+            match self.get_cal_page(segment as u8, 0x02).await {
+                Ok(xcp_page) => {
+                    tracing::debug!(
+                        "Segment {} current XCP page: {}",
+                        segment, xcp_page
+                    );
+                    self.segment_pages.push(SegmentPageState {
+                        segment: segment as u8,
+                        xcp_page,
+                        ecu_page: None, // Don't query ECU page by default
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to get cal page for segment {}: {:?}",
+                        segment, e
+                    );
+                    // Still add the segment with default page 0
+                    self.segment_pages.push(SegmentPageState {
+                        segment: segment as u8,
+                        xcp_page: 0,
+                        ecu_page: None,
+                    });
+                }
+            }
+        }
+
+        Ok(&self.segment_pages)
+    }
+
+    /// Get the current segment page state
+    pub fn get_segment_pages(&self) -> &[SegmentPageState] {
+        &self.segment_pages
+    }
+
+    /// Check if a specific segment allows write access on its current page
+    ///
+    /// This checks the A2L page definition for write access permission
+    /// on the currently active page for XCP access.
+    pub fn is_write_allowed_for_segment(&self, segment: u8) -> bool {
+        // Find the current page state for this segment
+        let current_page = self.segment_pages
+            .iter()
+            .find(|s| s.segment == segment)
+            .map(|s| s.xcp_page);
+
+        if let Some(page_num) = current_page {
+            // Check the A2L definition for this page
+            self.cal_manager.is_page_write_allowed(segment, page_num)
+        } else {
+            false
+        }
+    }
+
+    /// Check write permission for a calibration parameter
+    ///
+    /// This performs all the necessary checks before a calibration write:
+    /// 1. Find the segment containing the parameter's address
+    /// 2. Check if the segment has any write-allowed pages
+    /// 3. Check if the current active page allows write
+    ///
+    /// # Returns
+    /// - Ok(segment, page) if write is allowed
+    /// - Err with specific error if write is not allowed
+    pub fn check_write_permission(&self, address: u32, address_ext: u8) -> Result<(u8, u8), CalibrationWriteError> {
+        // Step 1: Find the segment for this address
+        let segment = self.cal_manager.find_segment_for_address(address, address_ext);
+
+        match segment {
+            None => {
+                // Address not in any segment - check if we have segment info at all
+                if self.cal_manager.get_memory_segment_count() == 0 {
+                    // No segments defined in A2L - allow write for backwards compatibility
+                    // Return a dummy segment/page
+                    Ok((0, 0))
+                } else {
+                    // Segments are defined but address doesn't match any
+                    Err(CalibrationWriteError::AddressNotInSegment(address, address_ext))
+                }
+            }
+            Some(seg_num) => {
+                // Step 2: Check if this segment has any write-allowed pages
+                if !self.cal_manager.is_segment_calibration_allowed(seg_num) {
+                    return Err(CalibrationWriteError::SegmentNoWriteAllowed(seg_num));
+                }
+
+                // Step 3: Check if page state is initialized
+                if self.segment_pages.is_empty() {
+                    return Err(CalibrationWriteError::PageStateNotInitialized);
+                }
+
+                // Find current page for this segment
+                let current_page = self.segment_pages
+                    .iter()
+                    .find(|s| s.segment == seg_num)
+                    .map(|s| s.xcp_page);
+
+                match current_page {
+                    None => Err(CalibrationWriteError::PageStateNotInitialized),
+                    Some(page_num) => {
+                        // Step 4: Check if current page allows write
+                        if !self.cal_manager.is_page_write_allowed(seg_num, page_num) {
+                            Err(CalibrationWriteError::CurrentPageNoWrite {
+                                segment: seg_num,
+                                page: page_num,
+                            })
+                        } else {
+                            Ok((seg_num, page_num))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Write a calibration parameter value with permission checks
+    ///
+    /// This method performs the following steps:
+    /// 1. Check write permission for the parameter's address
+    /// 2. If not allowed, return an appropriate error
+    /// 3. If allowed, perform the write operation
+    ///
+    /// # Arguments
+    /// * `param_name` - Name of the calibration parameter
+    /// * `value` - Value to write
+    ///
+    /// # Returns
+    /// Ok(()) on success, or an error describing why the write failed
+    pub async fn write_calibration_value(
+        &mut self,
+        param_name: &str,
+        value: &crate::calibration::CalibrationValue,
+    ) -> Result<(), SlaveError> {
+        // Get the parameter
+        let param = self.cal_manager.get_param(param_name)
+            .ok_or_else(|| SlaveError::A2lError(format!("Parameter '{}' not found", param_name)))?;
+
+        let mta = param.mta();
+
+        // Check write permission
+        self.check_write_permission(mta.address, mta.extension)
+            .map_err(SlaveError::CalibrationWrite)?;
+
+        // Permission granted - perform the write
+        self.write_value_direct(param, value).await
+    }
+
+    /// Write a calibration value directly (without permission checks)
+    ///
+    /// This is an internal method that performs the actual XCP write operation.
+    /// External callers should use `write_calibration_value` which includes permission checks.
+    async fn write_value_direct(
+        &self,
+        param: &crate::calibration::CalibrationParam,
+        value: &crate::calibration::CalibrationValue,
+    ) -> Result<(), SlaveError> {
+        use crate::calibration::{CalibrationType, CalibrationValue};
+
+        let mta = param.mta();
+
+        // Validate type match and write
+        match (&param.data_type, value) {
+            (CalibrationType::U8, CalibrationValue::U8(v)) => {
+                self.write_u8(mta, *v).await?;
+            }
+            (CalibrationType::U16, CalibrationValue::U16(v)) => {
+                self.write_memory(mta, &v.to_le_bytes()).await?;
+            }
+            (CalibrationType::U32, CalibrationValue::U32(v)) => {
+                self.write_u32(mta, *v).await?;
+            }
+            (CalibrationType::U64, CalibrationValue::U64(v)) => {
+                self.write_memory(mta, &v.to_le_bytes()).await?;
+            }
+            (CalibrationType::I8, CalibrationValue::I8(v)) => {
+                self.write_u8(mta, *v as u8).await?;
+            }
+            (CalibrationType::I16, CalibrationValue::I16(v)) => {
+                self.write_memory(mta, &v.to_le_bytes()).await?;
+            }
+            (CalibrationType::I32, CalibrationValue::I32(v)) => {
+                self.write_memory(mta, &v.to_le_bytes()).await?;
+            }
+            (CalibrationType::I64, CalibrationValue::I64(v)) => {
+                self.write_memory(mta, &v.to_le_bytes()).await?;
+            }
+            (CalibrationType::F32, CalibrationValue::F32(v)) => {
+                self.write_memory(mta, &v.to_le_bytes()).await?;
+            }
+            (CalibrationType::F64, CalibrationValue::F64(v)) => {
+                self.write_memory(mta, &v.to_le_bytes()).await?;
+            }
+            (CalibrationType::Bool, CalibrationValue::Bool(v)) => {
+                self.write_u8(mta, if *v { 1 } else { 0 }).await?;
+            }
+            // Array types
+            (CalibrationType::U8Array(_), CalibrationValue::U8Array(v)) => {
+                self.write_u8_array(mta, v).await?;
+            }
+            (CalibrationType::U16Array(_), CalibrationValue::U16Array(v)) => {
+                let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::U32Array(_), CalibrationValue::U32Array(v)) => {
+                let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::U64Array(_), CalibrationValue::U64Array(v)) => {
+                let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::I8Array(_), CalibrationValue::I8Array(v)) => {
+                let flat: Vec<u8> = v.iter().map(|&x| x as u8).collect();
+                self.write_u8_array(mta, &flat).await?;
+            }
+            (CalibrationType::I16Array(_), CalibrationValue::I16Array(v)) => {
+                let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::I32Array(_), CalibrationValue::I32Array(v)) => {
+                let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::I64Array(_), CalibrationValue::I64Array(v)) => {
+                let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::F32Array(_), CalibrationValue::F32Array(v)) => {
+                let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::F64Array(_), CalibrationValue::F64Array(v)) => {
+                let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::BoolArray(_), CalibrationValue::BoolArray(v)) => {
+                let flat: Vec<u8> = v.iter().map(|&x| if x { 1 } else { 0 }).collect();
+                self.write_u8_array(mta, &flat).await?;
+            }
+            // Matrix types
+            (CalibrationType::U8Matrix(_, _), CalibrationValue::U8Matrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().copied().collect();
+                self.write_u8_array(mta, &flat).await?;
+            }
+            (CalibrationType::U16Matrix(_, _), CalibrationValue::U16Matrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::U32Matrix(_, _), CalibrationValue::U32Matrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::U64Matrix(_, _), CalibrationValue::U64Matrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::I8Matrix(_, _), CalibrationValue::I8Matrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().map(|&x| x as u8).collect();
+                self.write_u8_array(mta, &flat).await?;
+            }
+            (CalibrationType::I16Matrix(_, _), CalibrationValue::I16Matrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::I32Matrix(_, _), CalibrationValue::I32Matrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::I64Matrix(_, _), CalibrationValue::I64Matrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::F32Matrix(_, _), CalibrationValue::F32Matrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::F64Matrix(_, _), CalibrationValue::F64Matrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                self.write_memory(mta, &flat).await?;
+            }
+            (CalibrationType::BoolMatrix(_, _), CalibrationValue::BoolMatrix(mat)) => {
+                let flat: Vec<u8> = mat.iter().flatten().map(|&x| if x { 1 } else { 0 }).collect();
+                self.write_u8_array(mta, &flat).await?;
+            }
+            _ => {
+                return Err(SlaveError::CalibrationWrite(
+                    CalibrationWriteError::TypeMismatch(format!(
+                        "Type mismatch for parameter {}",
+                        param.name
+                    ))
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Read memory from slave using SHORT_UPLOAD
     pub async fn read_memory(&self, mta: Mta, length: u8) -> Result<Vec<u8>, SlaveError> {
         // SHORT_UPLOAD response: [RES, data...]
@@ -297,6 +680,16 @@ impl XcpSlave {
             .as_ref()
             .map(|ci| (ci.max_cto as usize).saturating_sub(1))
             .unwrap_or(254) // Default to 254 if not connected
+    }
+
+    /// Get maximum bytes that can be written in a single SHORT_DOWNLOAD command
+    /// SHORT_DOWNLOAD: [CMD, LEN, reserved, ext, addr(4), data...]
+    /// So max data = max_cto - 8 (header overhead)
+    pub fn max_download_size(&self) -> usize {
+        self.info.connect_info
+            .as_ref()
+            .map(|ci| (ci.max_cto as usize).saturating_sub(8))
+            .unwrap_or(247) // Default to 247 if not connected
     }
 
     /// Read a large amount of data from slave, using SET_MTA + UPLOAD as needed
@@ -669,6 +1062,37 @@ mod tests {
         let err = SlaveError::DaqError("test".to_string());
         assert!(err.to_string().contains("DAQ error"));
         assert!(err.to_string().contains("test"));
+    }
+
+    #[test]
+    fn test_calibration_write_error_display() {
+        // Test AddressNotInSegment error
+        let err = CalibrationWriteError::AddressNotInSegment(0x12345678, 0x02);
+        assert!(err.to_string().contains("0x12345678"));
+        assert!(err.to_string().contains("not within any defined memory segment"));
+
+        // Test SegmentNoWriteAllowed error
+        let err = CalibrationWriteError::SegmentNoWriteAllowed(2);
+        assert!(err.to_string().contains("Segment 2"));
+        assert!(err.to_string().contains("no pages that allow XCP write access"));
+
+        // Test CurrentPageNoWrite error
+        let err = CalibrationWriteError::CurrentPageNoWrite { segment: 0, page: 0 };
+        assert!(err.to_string().contains("page 0"));
+        assert!(err.to_string().contains("segment 0"));
+        assert!(err.to_string().contains("Please switch to a page with write permission"));
+
+        // Test PageStateNotInitialized error
+        let err = CalibrationWriteError::PageStateNotInitialized;
+        assert!(err.to_string().contains("update_segment_page_state()"));
+    }
+
+    #[test]
+    fn test_calibration_write_error_from_slave_error() {
+        // Test that CalibrationWriteError can be converted to SlaveError
+        let cal_err = CalibrationWriteError::SegmentNoWriteAllowed(1);
+        let slave_err: SlaveError = cal_err.into();
+        assert!(matches!(slave_err, SlaveError::CalibrationWrite(_)));
     }
 }
 
