@@ -123,6 +123,138 @@ enum DimensionKind {
     Matrix,
 }
 
+/// Characteristic type from A2L file
+/// Determines how the characteristic is interpreted and displayed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharacteristicType {
+    /// Scalar value (VALUE)
+    Value,
+    /// 1D lookup table with axis (CURVE)
+    Curve,
+    /// 2D lookup table with row and column axes (MAP)
+    Map,
+    /// Value block - array/matrix without axis semantics (VAL_BLK)
+    ValBlk,
+}
+
+impl CharacteristicType {
+    /// Get the string representation for JSON serialization
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Value => "VALUE",
+            Self::Curve => "CURVE",
+            Self::Map => "MAP",
+            Self::ValBlk => "VAL_BLK",
+        }
+    }
+}
+
+/// Storage order for matrix/map data in memory
+/// Determines how 2D data is linearized in memory
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StorageOrder {
+    /// Row-major order: data stored row by row
+    /// Matrix [[1,2,3],[4,5,6],[7,8,9]] stored as [1,2,3,4,5,6,7,8,9]
+    #[default]
+    RowDir,
+    /// Column-major order: data stored column by column
+    /// Matrix [[1,2,3],[4,5,6],[7,8,9]] stored as [1,4,7,2,5,8,3,6,9]
+    ColumnDir,
+}
+
+impl StorageOrder {
+    /// Get the string representation for JSON serialization
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RowDir => "ROW_DIR",
+            Self::ColumnDir => "COLUMN_DIR",
+        }
+    }
+}
+
+/// Describes how axis points are obtained for CURVE/MAP characteristics
+#[derive(Debug, Clone)]
+pub enum AxisPointSource {
+    /// Axis points stored in memory (AXIS_PTS reference)
+    /// Contains: address, address_extension, data_type, num_points
+    Memory {
+        address: u32,
+        address_ext: u8,
+        data_type: A2lDataType,
+        num_points: usize,
+    },
+    /// Fixed axis calculated as: offset + i * 2^shift (FIX_AXIS_PAR)
+    /// Formula: axis_value[i] = offset + i * (2^shift)
+    Calculated {
+        offset: f64,
+        shift: i32,
+        num_points: usize,
+    },
+    /// Fixed axis with distance: offset + i * distance (FIX_AXIS_PAR_DIST)
+    /// Formula: axis_value[i] = offset + i * distance
+    CalculatedDist {
+        offset: f64,
+        distance: f64,
+        num_points: usize,
+    },
+    /// Explicit list of axis values (FIX_AXIS_PAR_LIST)
+    Explicit { values: Vec<f64> },
+}
+
+/// Complete axis information for CURVE or MAP characteristics
+#[derive(Debug, Clone)]
+pub struct AxisInfo {
+    /// Input quantity name (the physical meaning of this axis)
+    pub name: String,
+    /// Physical unit
+    pub unit: Option<String>,
+    /// Minimum axis value
+    pub min: f64,
+    /// Maximum axis value
+    pub max: f64,
+    /// Number of axis points
+    pub num_points: usize,
+    /// Source of axis point values
+    pub point_source: AxisPointSource,
+}
+
+impl AxisInfo {
+    /// Get axis point values without reading from XCP slave.
+    /// Only works for calculated or explicit axis sources.
+    /// Returns None for Memory sources which require XCP communication.
+    pub fn get_static_values(&self) -> Option<Vec<f64>> {
+        match &self.point_source {
+            AxisPointSource::Memory { .. } => None,
+            AxisPointSource::Calculated { offset, shift, num_points } => {
+                let multiplier = 2f64.powi(*shift);
+                Some((0..*num_points).map(|i| offset + i as f64 * multiplier).collect())
+            }
+            AxisPointSource::CalculatedDist { offset, distance, num_points } => {
+                Some((0..*num_points).map(|i| offset + i as f64 * distance).collect())
+            }
+            AxisPointSource::Explicit { values } => Some(values.clone()),
+        }
+    }
+
+    /// Check if this axis requires XCP communication to get values
+    pub fn requires_memory_read(&self) -> bool {
+        matches!(self.point_source, AxisPointSource::Memory { .. })
+    }
+
+    /// Serialize axis info to JSON for API responses
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": &self.name,
+            "unit": &self.unit,
+            "min": self.min,
+            "max": self.max,
+            "num_points": self.num_points,
+            "values": self.get_static_values(),
+            "requires_memory_read": self.requires_memory_read(),
+        })
+    }
+}
+
 /// Measurement information from A2L
 #[derive(Debug, Clone)]
 pub struct A2lMeasurement {
@@ -147,6 +279,14 @@ pub struct A2lCharacteristic {
     pub unit: Option<String>,
     pub min: f64,
     pub max: f64,
+    /// Characteristic type (VALUE, CURVE, MAP, VAL_BLK)
+    pub characteristic_type: CharacteristicType,
+    /// Axis information for CURVE (1 axis) and MAP (2 axes) types
+    /// Empty for VALUE and VAL_BLK types
+    pub axis_info: Vec<AxisInfo>,
+    /// Storage order for matrix/map data (ROW_DIR or COLUMN_DIR)
+    /// Only relevant for MAP and VAL_BLK with 2D dimensions
+    pub storage_order: StorageOrder,
 }
 
 /// XCP checksum algorithm types
@@ -413,6 +553,15 @@ impl A2lReader {
         let min = ch.lower_limit;
         let max = ch.upper_limit;
 
+        // Parse characteristic type
+        let characteristic_type = Self::parse_characteristic_type(ch);
+
+        // Parse axis information for CURVE and MAP types
+        let axis_info = self.parse_axis_info(ch, module);
+
+        // Parse storage order from record layout
+        let storage_order = self.parse_storage_order(ch, module);
+
         Some(A2lCharacteristic {
             name,
             description,
@@ -422,7 +571,201 @@ impl A2lReader {
             unit,
             min,
             max,
+            characteristic_type,
+            axis_info,
+            storage_order,
         })
+    }
+
+    /// Parse characteristic type from A2L
+    fn parse_characteristic_type(ch: &a2lfile::Characteristic) -> CharacteristicType {
+        match ch.characteristic_type {
+            a2lfile::CharacteristicType::Value => CharacteristicType::Value,
+            a2lfile::CharacteristicType::Curve => CharacteristicType::Curve,
+            a2lfile::CharacteristicType::Map => CharacteristicType::Map,
+            a2lfile::CharacteristicType::ValBlk => CharacteristicType::ValBlk,
+            // ASCII, Cuboid, Cube4, Cube5 are treated as VAL_BLK for now
+            _ => CharacteristicType::ValBlk,
+        }
+    }
+
+    /// Parse storage order from RECORD_LAYOUT FNC_VALUES index_mode
+    /// Returns ROW_DIR by default if not specified
+    fn parse_storage_order(
+        &self,
+        ch: &a2lfile::Characteristic,
+        module: &a2lfile::Module,
+    ) -> StorageOrder {
+        // Find the record layout
+        let record_layout_name = &ch.deposit;
+        let record_layout = module
+            .record_layout
+            .iter()
+            .find(|rl| rl.get_name() == record_layout_name);
+
+        // Get index_mode from FNC_VALUES
+        if let Some(rl) = record_layout {
+            if let Some(fnc_values) = &rl.fnc_values {
+                return match fnc_values.index_mode {
+                    a2lfile::IndexMode::ColumnDir => StorageOrder::ColumnDir,
+                    a2lfile::IndexMode::RowDir => StorageOrder::RowDir,
+                    // Other modes (ALTERNATE_*) default to RowDir
+                    _ => StorageOrder::RowDir,
+                };
+            }
+        }
+
+        // Default to ROW_DIR
+        StorageOrder::RowDir
+    }
+
+    /// Parse axis information from AXIS_DESCR blocks
+    fn parse_axis_info(
+        &self,
+        ch: &a2lfile::Characteristic,
+        module: &a2lfile::Module,
+    ) -> Vec<AxisInfo> {
+        ch.axis_descr
+            .iter()
+            .filter_map(|axis_descr| self.parse_single_axis_info(axis_descr, module))
+            .collect()
+    }
+
+    /// Parse a single AXIS_DESCR block into AxisInfo
+    fn parse_single_axis_info(
+        &self,
+        axis_descr: &a2lfile::AxisDescr,
+        module: &a2lfile::Module,
+    ) -> Option<AxisInfo> {
+        let name = axis_descr.input_quantity.clone();
+        let num_points = axis_descr.max_axis_points as usize;
+        let min = axis_descr.lower_limit;
+        let max = axis_descr.upper_limit;
+
+        // Get unit from phys_unit or conversion method
+        let unit = axis_descr
+            .phys_unit
+            .as_ref()
+            .map(|pu| pu.unit.clone())
+            .or_else(|| self.get_unit_for_conversion(&axis_descr.conversion));
+
+        // Determine the axis point source
+        let point_source = if let Some(fix_axis_par_list) = &axis_descr.fix_axis_par_list {
+            // FIX_AXIS_PAR_LIST: explicit list of axis values
+            AxisPointSource::Explicit {
+                values: fix_axis_par_list.axis_pts_value_list.clone(),
+            }
+        } else if let Some(fix_axis_par_dist) = &axis_descr.fix_axis_par_dist {
+            // FIX_AXIS_PAR_DIST: offset + i * distance
+            AxisPointSource::CalculatedDist {
+                offset: fix_axis_par_dist.offset as f64,
+                distance: fix_axis_par_dist.distance as f64,
+                num_points,
+            }
+        } else if let Some(fix_axis_par) = &axis_descr.fix_axis_par {
+            // FIX_AXIS_PAR: offset + i * 2^shift
+            AxisPointSource::Calculated {
+                offset: fix_axis_par.offset as f64,
+                shift: fix_axis_par.shift as i32,
+                num_points,
+            }
+        } else if let Some(axis_pts_ref) = &axis_descr.axis_pts_ref {
+            // AXIS_PTS_REF: reference to AXIS_PTS block
+            self.resolve_axis_pts_reference(&axis_pts_ref.axis_points, module, num_points)
+                .unwrap_or_else(|| {
+                    // Fallback: create from limits
+                    Self::create_fallback_axis_source(min, max, num_points)
+                })
+        } else {
+            // No explicit axis source - create from limits
+            Self::create_fallback_axis_source(min, max, num_points)
+        };
+
+        Some(AxisInfo {
+            name,
+            unit,
+            min,
+            max,
+            num_points,
+            point_source,
+        })
+    }
+
+    /// Resolve AXIS_PTS reference to get axis point source
+    fn resolve_axis_pts_reference(
+        &self,
+        axis_pts_name: &str,
+        module: &a2lfile::Module,
+        num_points: usize,
+    ) -> Option<AxisPointSource> {
+        // Find the AXIS_PTS block
+        let axis_pts = module
+            .axis_pts
+            .iter()
+            .find(|ap| ap.get_name() == axis_pts_name)?;
+
+        let address = axis_pts.address;
+        let address_ext = axis_pts
+            .ecu_address_extension
+            .as_ref()
+            .map(|ext| ext.extension as u8)
+            .unwrap_or(0);
+
+        // Get the data type from the deposit record layout
+        let data_type = self.get_axis_pts_datatype(axis_pts, module)?;
+
+        Some(AxisPointSource::Memory {
+            address,
+            address_ext,
+            data_type,
+            num_points,
+        })
+    }
+
+    /// Get the data type for an AXIS_PTS block
+    fn get_axis_pts_datatype(
+        &self,
+        axis_pts: &a2lfile::AxisPts,
+        module: &a2lfile::Module,
+    ) -> Option<A2lDataType> {
+        // Find the record layout
+        let record_layout = module
+            .record_layout
+            .iter()
+            .find(|rl| rl.get_name() == axis_pts.deposit_record)?;
+
+        // Get axis point data type from AXIS_PTS_X block in record layout
+        if let Some(axis_pts_layout) = &record_layout.axis_pts_x {
+            Some(Self::convert_a2l_datatype(&axis_pts_layout.datatype))
+        } else {
+            // Fallback to FNC_VALUES if AXIS_PTS_X not present
+            if let Some(fnc_values) = &record_layout.fnc_values {
+                Some(Self::convert_a2l_datatype(&fnc_values.datatype))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Create a fallback axis source from min/max limits
+    fn create_fallback_axis_source(min: f64, max: f64, num_points: usize) -> AxisPointSource {
+        if num_points <= 1 {
+            AxisPointSource::Explicit {
+                values: vec![min],
+            }
+        } else {
+            // Linear interpolation between min and max
+            let step = if num_points > 1 {
+                (max - min) / (num_points - 1) as f64
+            } else {
+                0.0
+            };
+            AxisPointSource::CalculatedDist {
+                offset: min,
+                distance: step,
+                num_points,
+            }
+        }
     }
 
     /// Get address extension for a characteristic from its memory segment
@@ -1745,5 +2088,104 @@ mod tests {
             !reader.supports_optional_command("SHORT_DOWNLOAD"),
             "SHORT_DOWNLOAD should NOT be supported (commented out in A2L)"
         );
+    }
+
+    #[test]
+    fn test_axis_point_source_calculated() {
+        // Test FIX_AXIS_PAR style: offset + i * 2^shift
+        let source = AxisPointSource::Calculated {
+            offset: 0.0,
+            shift: 1, // 2^1 = 2
+            num_points: 5,
+        };
+
+        let axis_info = AxisInfo {
+            name: "test_axis".to_string(),
+            unit: Some("rpm".to_string()),
+            min: 0.0,
+            max: 1000.0,
+            num_points: 5,
+            point_source: source,
+        };
+
+        let values = axis_info.get_static_values().unwrap();
+        assert_eq!(values, vec![0.0, 2.0, 4.0, 6.0, 8.0]);
+        assert!(!axis_info.requires_memory_read());
+    }
+
+    #[test]
+    fn test_axis_point_source_calculated_dist() {
+        // Test FIX_AXIS_PAR_DIST style: offset + i * distance
+        let source = AxisPointSource::CalculatedDist {
+            offset: 100.0,
+            distance: 50.0,
+            num_points: 5,
+        };
+
+        let axis_info = AxisInfo {
+            name: "test_axis".to_string(),
+            unit: Some("Nm".to_string()),
+            min: 100.0,
+            max: 300.0,
+            num_points: 5,
+            point_source: source,
+        };
+
+        let values = axis_info.get_static_values().unwrap();
+        assert_eq!(values, vec![100.0, 150.0, 200.0, 250.0, 300.0]);
+        assert!(!axis_info.requires_memory_read());
+    }
+
+    #[test]
+    fn test_axis_point_source_explicit() {
+        // Test FIX_AXIS_PAR_LIST style: explicit values
+        let source = AxisPointSource::Explicit {
+            values: vec![0.0, 100.0, 500.0, 1000.0],
+        };
+
+        let axis_info = AxisInfo {
+            name: "explicit_axis".to_string(),
+            unit: None,
+            min: 0.0,
+            max: 1000.0,
+            num_points: 4,
+            point_source: source,
+        };
+
+        let values = axis_info.get_static_values().unwrap();
+        assert_eq!(values, vec![0.0, 100.0, 500.0, 1000.0]);
+        assert!(!axis_info.requires_memory_read());
+    }
+
+    #[test]
+    fn test_axis_point_source_memory() {
+        // Test AXIS_PTS reference style: requires memory read
+        let source = AxisPointSource::Memory {
+            address: 0x1000,
+            address_ext: 2,
+            data_type: A2lDataType::F32,
+            num_points: 10,
+        };
+
+        let axis_info = AxisInfo {
+            name: "memory_axis".to_string(),
+            unit: Some("deg".to_string()),
+            min: -180.0,
+            max: 180.0,
+            num_points: 10,
+            point_source: source,
+        };
+
+        // Should return None for static values (requires memory read)
+        assert!(axis_info.get_static_values().is_none());
+        assert!(axis_info.requires_memory_read());
+    }
+
+    #[test]
+    fn test_characteristic_type_values() {
+        // Test CharacteristicType enum
+        assert_eq!(CharacteristicType::Value, CharacteristicType::Value);
+        assert_ne!(CharacteristicType::Curve, CharacteristicType::Map);
+        assert_ne!(CharacteristicType::Map, CharacteristicType::ValBlk);
     }
 }
