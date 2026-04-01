@@ -15,13 +15,18 @@ use tokio::sync::RwLock;
 #[allow(unused)]
 use serde_json::json;
 
-use crate::calibration::{CalibrationManager, CalibrationValue};
+use crate::calibration::{CalibrationManager, CalibrationParam, CalibrationValue};
 use crate::daq::DaqManager;
 use crate::slave::SlaveId;
 use crate::transport::TransportConfig;
 use crate::web::auth::{clear_session, try_create_session, verify_credentials};
 use crate::web::state::{AppState, DeviceState, SlaveState};
 use crate::web::templates;
+
+/// Helper function to serialize calibration parameter info including axis data
+fn serialize_cal_param(p: &CalibrationParam, device_id: &str, device_name: &str, idx: usize, connected: bool) -> serde_json::Value {
+    p.to_json(device_id, device_name, idx, connected)
+}
 
 /// Login page (GET /login)
 pub async fn login_page(Query(params): Query<HashMap<String, String>>) -> Html<String> {
@@ -622,15 +627,13 @@ pub async fn cal_available(State(state): State<AppState>) -> impl IntoResponse {
     for slave in &slaves {
         let cal_manager = slave.cal_manager.read().await;
         for (i, p) in cal_manager.params().iter().enumerate() {
-            variables.push(json!({
-                "device_id": slave.id.to_string(),
-                "device_name": slave.display_name(),
-                "idx": i,
-                "name": p.name,
-                "type": p.data_type.type_name(),
-                "address_hex": format!("{:08X}", p.address),
-                "connected": slave.is_connected(),
-            }));
+            variables.push(serialize_cal_param(
+                p,
+                &slave.id.to_string(),
+                &slave.display_name(),
+                i,
+                slave.is_connected(),
+            ));
         }
     }
 
@@ -646,15 +649,13 @@ pub async fn cal_available(State(state): State<AppState>) -> impl IntoResponse {
 
         let cal_mgr = device.cal_manager.read().await;
         for (i, p) in cal_mgr.params().iter().enumerate() {
-            variables.push(json!({
-                "device_id": device.id.clone(),
-                "device_name": device.name.clone(),
-                "idx": i,
-                "name": p.name,
-                "type": p.data_type.type_name(),
-                "address_hex": format!("{:08X}", p.address),
-                "connected": device.connected,
-            }));
+            variables.push(serialize_cal_param(
+                p,
+                &device.id,
+                &device.name,
+                i,
+                device.connected,
+            ));
         }
     }
 
@@ -742,12 +743,16 @@ pub async fn cal_read(
                     let value_str = value.format();
                     tracing::info!("Successfully read {} = {}", param.name, value_str);
                     slave.cal_values.write().await.insert(param.name.clone(), value.clone());
-                    return Json(json!({
-                        "success": true,
-                        "name": param.name,
-                        "value": value_str,
-                        "device_name": slave.display_name()
-                    }));
+
+                    // Build response using parameter's to_json for base metadata
+                    let mut base = param.to_json("", &slave.display_name(), 0, true);
+                    if let serde_json::Value::Object(ref mut map) = base {
+                        map.remove("device_id");
+                        map.remove("idx");
+                        map.insert("success".to_string(), serde_json::json!(true));
+                        map.insert("value".to_string(), serde_json::json!(value_str));
+                    }
+                    return Json(base);
                 }
                 Err(e) => {
                     tracing::error!("Failed to read {}: {}", param.name, e);
