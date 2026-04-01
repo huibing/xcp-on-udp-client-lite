@@ -20,5 +20,11 @@ Thumbs.db
 # DAQ output
 daq_data.csv
 
+# A2L/AML files
 *.a2l
 *.aml
+
+# Web test artifacts
+web_test/logs/
+web_test/node_modules/
+web_test/screenshots/
