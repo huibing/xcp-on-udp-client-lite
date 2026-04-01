@@ -39,7 +39,7 @@
 
 <!-- Modal for variable selection -->
 <div id="varModal" class="modal" style="display: none;">
-    <div class="modal-content" style="max-width: 800px; max-height: 80vh; overflow: hidden; display: flex; flex-direction: column;">
+    <div class="modal-content" style="width: 80%; min-width: 600px; max-width: 1200px; max-height: 80vh; overflow: hidden; display: flex; flex-direction: column;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem; border-bottom: 1px solid #444;">
             <h3 style="margin: 0;">Select Calibration Variables</h3>
             <button onclick="closeModal()" style="background: none; border: none; color: #fff; font-size: 1.5rem; cursor: pointer;">&times;</button>
@@ -49,21 +49,24 @@
             <input type="text" id="varSearch" placeholder="Search variables..." style="width: 100%;" oninput="filterVars()">
         </div>
 
-        <div class="modal-body" style="flex: 1; overflow-y: auto; padding: 0.5rem 0;">
-            <table class="modal-table" style="width: 100%; border-collapse: collapse;">
-                <thead style="position: sticky; top: 0; background: #2a2a2a;">
+        <div class="modal-body" id="modalBody" style="flex: 1; overflow-y: auto; padding: 0.5rem 0;">
+            <table class="modal-table" style="width: 100%; border-collapse: collapse; table-layout: fixed;">
+                <thead style="position: sticky; top: 0; background: #2a2a2a; z-index: 1;">
                     <tr>
                         <th style="width: 40px; padding: 0.5rem;"><input type="checkbox" id="selectAll" onclick="toggleSelectAll()"></th>
-                        <th style="text-align: left; padding: 0.5rem;">Name</th>
-                        <th style="text-align: left; padding: 0.5rem;">Device</th>
-                        <th style="text-align: left; padding: 0.5rem;">Type</th>
-                        <th style="text-align: left; padding: 0.5rem;">Address</th>
+                        <th style="text-align: left; padding: 0.5rem; width: 30%;">Name</th>
+                        <th style="text-align: left; padding: 0.5rem; width: 20%;">Device</th>
+                        <th style="text-align: left; padding: 0.5rem; width: 15%;">Type</th>
+                        <th style="text-align: left; padding: 0.5rem; width: 15%;">Address</th>
                     </tr>
                 </thead>
                 <tbody id="availableVars">
-                    <!-- Populated by JavaScript -->
+                    <!-- Populated by JavaScript (lazy loading) -->
                 </tbody>
             </table>
+            <div id="loadingIndicator" style="text-align: center; padding: 1rem; color: #666; display: none;">
+                Loading more variables...
+            </div>
         </div>
 
         <div class="modal-footer" style="padding: 1rem; border-top: 1px solid #444; display: flex; justify-content: space-between; align-items: center;">
@@ -153,12 +156,16 @@ let selectedKeys = new Set();
 let tempSelectedKeys = new Set();
 // Page mode data for connected devices
 let pageModeData = [];
+// Lazy loading state
+let displayedCount = 0;
+const BATCH_SIZE = 50;
+let isLoadingMore = false;
+let filteredVariables = [];
 
 // Load available variables on page load
 document.addEventListener('DOMContentLoaded', async () => {
     await loadAvailableVars();
     await loadPageModes();
-    loadSelectionFromStorage();
     renderSelectedVars();
 });
 
@@ -244,55 +251,115 @@ async function loadAvailableVars() {
     }
 }
 
-function loadSelectionFromStorage() {
-    const stored = localStorage.getItem('cal_selectedVars');
-    if (stored) {
-        try {
-            const arr = JSON.parse(stored);
-            selectedKeys = new Set(arr);
-        } catch (e) {
-            selectedKeys = new Set();
-        }
-    }
-}
-
-function saveSelectionToStorage() {
-    localStorage.setItem('cal_selectedVars', JSON.stringify([...selectedKeys]));
-}
-
 function openModal() {
     tempSelectedKeys = new Set(selectedKeys);
+    // Reset lazy loading state
+    displayedCount = 0;
+    filteredVariables = [];
+    isLoadingMore = false;
     renderAvailableVars();
     document.getElementById('varModal').style.display = 'flex';
     document.getElementById('varSearch').focus();
+    // Setup scroll listener for lazy loading
+    setupScrollListener();
 }
 
 function closeModal() {
     document.getElementById('varModal').style.display = 'none';
 }
 
+function setupScrollListener() {
+    const modalBody = document.getElementById('modalBody');
+    // Remove existing listener by cloning
+    const newModalBody = modalBody.cloneNode(true);
+    modalBody.parentNode.replaceChild(newModalBody, modalBody);
+    // Re-get the reference after replacement
+    const freshModalBody = document.getElementById('modalBody');
+    freshModalBody.addEventListener('scroll', handleScroll);
+}
+
+function handleScroll() {
+    const modalBody = document.getElementById('modalBody');
+    const loadingIndicator = document.getElementById('loadingIndicator');
+
+    // Check if scrolled near bottom
+    if (modalBody.scrollTop + modalBody.clientHeight >= modalBody.scrollHeight - 100) {
+        if (!isLoadingMore && displayedCount < filteredVariables.length) {
+            loadMoreVars();
+        }
+    }
+}
+
+function loadMoreVars() {
+    if (isLoadingMore || displayedCount >= filteredVariables.length) return;
+
+    isLoadingMore = true;
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    loadingIndicator.style.display = 'block';
+
+    // Simulate small delay for better UX
+    setTimeout(() => {
+        const tbody = document.getElementById('availableVars');
+        const nextBatch = filteredVariables.slice(displayedCount, displayedCount + BATCH_SIZE);
+
+        const html = nextBatch.map(v => {
+            const key = `${v.device_id}:${v.name}`;
+            const checked = tempSelectedKeys.has(key) ? 'checked' : '';
+            return `
+                <tr>
+                    <td><input type="checkbox" data-key="${key}" ${checked} onclick="toggleVar('${key}')"></td>
+                    <td style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(v.name)}">${escapeHtml(v.name)}</td>
+                    <td style="color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(v.device_name)}</td>
+                    <td>${v.type}</td>
+                    <td style="font-family: monospace;">0x${v.address_hex}</td>
+                </tr>
+            `;
+        }).join('');
+
+        tbody.insertAdjacentHTML('beforeend', html);
+        displayedCount += nextBatch.length;
+
+        loadingIndicator.style.display = displayedCount < filteredVariables.length ? 'block' : 'none';
+        isLoadingMore = false;
+    }, 50);
+}
+
 function renderAvailableVars() {
     const tbody = document.getElementById('availableVars');
     const searchTerm = document.getElementById('varSearch').value.toLowerCase();
 
-    const filtered = allVariables.filter(v =>
+    // Filter all variables
+    filteredVariables = allVariables.filter(v =>
         v.name.toLowerCase().includes(searchTerm) ||
         v.device_name.toLowerCase().includes(searchTerm)
     );
 
-    tbody.innerHTML = filtered.map(v => {
+    // Reset display count
+    displayedCount = 0;
+
+    // Clear tbody
+    tbody.innerHTML = '';
+
+    // Render first batch
+    const firstBatch = filteredVariables.slice(0, BATCH_SIZE);
+    tbody.innerHTML = firstBatch.map(v => {
         const key = `${v.device_id}:${v.name}`;
         const checked = tempSelectedKeys.has(key) ? 'checked' : '';
         return `
             <tr>
                 <td><input type="checkbox" data-key="${key}" ${checked} onclick="toggleVar('${key}')"></td>
-                <td>${escapeHtml(v.name)}</td>
-                <td style="color: #888;">${escapeHtml(v.device_name)}</td>
+                <td style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(v.name)}">${escapeHtml(v.name)}</td>
+                <td style="color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(v.device_name)}</td>
                 <td>${v.type}</td>
                 <td style="font-family: monospace;">0x${v.address_hex}</td>
             </tr>
         `;
     }).join('');
+
+    displayedCount = firstBatch.length;
+
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    loadingIndicator.style.display = displayedCount < filteredVariables.length ? 'block' : 'none';
 
     updateSelectedCount();
     updateSelectAllCheckbox();
@@ -310,23 +377,20 @@ function toggleVar(key) {
     }
     updateSelectedCount();
     updateSelectAllCheckbox();
+    for (const v of tempSelectedKeys) {
+        console.log(v);
+    }
 }
 
 function toggleSelectAll() {
     const selectAll = document.getElementById('selectAll');
-    const searchTerm = document.getElementById('varSearch').value.toLowerCase();
-
-    const filtered = allVariables.filter(v =>
-        v.name.toLowerCase().includes(searchTerm) ||
-        v.device_name.toLowerCase().includes(searchTerm)
-    );
 
     if (selectAll.checked) {
-        filtered.forEach(v => {
+        filteredVariables.forEach(v => {
             tempSelectedKeys.add(`${v.device_id}:${v.name}`);
         });
     } else {
-        filtered.forEach(v => {
+        filteredVariables.forEach(v => {
             tempSelectedKeys.delete(`${v.device_id}:${v.name}`);
         });
     }
@@ -340,21 +404,15 @@ function updateSelectedCount() {
 
 function updateSelectAllCheckbox() {
     const selectAll = document.getElementById('selectAll');
-    const searchTerm = document.getElementById('varSearch').value.toLowerCase();
 
-    const filtered = allVariables.filter(v =>
-        v.name.toLowerCase().includes(searchTerm) ||
-        v.device_name.toLowerCase().includes(searchTerm)
-    );
-
-    if (filtered.length === 0) {
+    if (filteredVariables.length === 0) {
         selectAll.checked = false;
         selectAll.indeterminate = false;
         return;
     }
 
-    const allSelected = filtered.every(v => tempSelectedKeys.has(`${v.device_id}:${v.name}`));
-    const someSelected = filtered.some(v => tempSelectedKeys.has(`${v.device_id}:${v.name}`));
+    const allSelected = filteredVariables.every(v => tempSelectedKeys.has(`${v.device_id}:${v.name}`));
+    const someSelected = filteredVariables.some(v => tempSelectedKeys.has(`${v.device_id}:${v.name}`));
 
     selectAll.checked = allSelected;
     selectAll.indeterminate = someSelected && !allSelected;
@@ -362,7 +420,6 @@ function updateSelectAllCheckbox() {
 
 function applySelection() {
     selectedKeys = new Set(tempSelectedKeys);
-    saveSelectionToStorage();
     closeModal();
     renderSelectedVars();
 }
@@ -436,7 +493,6 @@ function writeVar(deviceId, idx, name) {
 
 function removeVar(key) {
     selectedKeys.delete(key);
-    saveSelectionToStorage();
     renderSelectedVars();
 }
 
