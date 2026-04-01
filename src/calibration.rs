@@ -1,6 +1,6 @@
 //! Calibration Parameter Management
 
-use crate::a2l_reader::{A2lCharacteristic, A2lDataType, A2lMemorySegment, A2lReader};
+use crate::a2l_reader::{A2lCharacteristic, A2lDataType, A2lMemorySegment, A2lReader, AxisInfo, CharacteristicType, StorageOrder};
 use crate::client::XcpClient;
 use crate::daq::CompuMethod;
 use crate::protocol::Mta;
@@ -203,6 +203,61 @@ fn format_matrix<T: std::fmt::Debug>(mat: &[Vec<T>]) -> String {
     format!("[\n  {}]", rows.join(",\n  "))
 }
 
+/// Convert a flat array to a 2D matrix based on storage order
+///
+/// For ROW_DIR: matrix[r][c] = flat[r * cols + c]
+/// For COLUMN_DIR: matrix[r][c] = flat[c * rows + r]
+fn flat_to_matrix<T: Clone>(flat: &[T], rows: usize, cols: usize, order: StorageOrder) -> Vec<Vec<T>> {
+    let mut matrix = Vec::with_capacity(rows);
+    match order {
+        StorageOrder::RowDir => {
+            // Row-major: data stored row by row
+            for r in 0..rows {
+                let row: Vec<T> = flat[r * cols..(r + 1) * cols].to_vec();
+                matrix.push(row);
+            }
+        }
+        StorageOrder::ColumnDir => {
+            // Column-major: data stored column by column
+            // matrix[r][c] = flat[c * rows + r]
+            for r in 0..rows {
+                let mut row = Vec::with_capacity(cols);
+                for c in 0..cols {
+                    row.push(flat[c * rows + r].clone());
+                }
+                matrix.push(row);
+            }
+        }
+    }
+    matrix
+}
+
+/// Convert a 2D matrix to a flat array based on storage order
+///
+/// For ROW_DIR: flat[r * cols + c] = matrix[r][c]
+/// For COLUMN_DIR: flat[c * rows + r] = matrix[r][c]
+fn matrix_to_flat<T: Clone>(matrix: &[Vec<T>], rows: usize, cols: usize, order: StorageOrder) -> Vec<T> {
+    let mut flat = Vec::with_capacity(rows * cols);
+    match order {
+        StorageOrder::RowDir => {
+            // Row-major: store row by row
+            for row in matrix {
+                flat.extend(row.iter().cloned());
+            }
+        }
+        StorageOrder::ColumnDir => {
+            // Column-major: store column by column
+            // flat[c * rows + r] = matrix[r][c]
+            for c in 0..cols {
+                for r in 0..rows {
+                    flat.push(matrix[r][c].clone());
+                }
+            }
+        }
+    }
+    flat
+}
+
 /// Calibration parameter definition
 #[derive(Debug, Clone)]
 pub struct CalibrationParam {
@@ -216,6 +271,14 @@ pub struct CalibrationParam {
     pub max: Option<f64>,
     /// COMPU_METHOD for converting between raw and physical values
     pub compu_method: CompuMethod,
+    /// Characteristic type (VALUE, CURVE, MAP, VAL_BLK)
+    pub characteristic_type: CharacteristicType,
+    /// Axis information for CURVE (1 axis) and MAP (2 axes) types
+    /// Empty for VALUE and VAL_BLK types
+    pub axis_info: Vec<AxisInfo>,
+    /// Storage order for matrix/map data (ROW_DIR or COLUMN_DIR)
+    /// Only relevant for MAP and VAL_BLK with 2D dimensions
+    pub storage_order: StorageOrder,
 }
 
 impl CalibrationParam {
@@ -231,6 +294,9 @@ impl CalibrationParam {
             min: None,
             max: None,
             compu_method: CompuMethod::Identical,
+            characteristic_type: CharacteristicType::Value,
+            axis_info: Vec::new(),
+            storage_order: StorageOrder::RowDir,
         }
     }
 
@@ -262,6 +328,58 @@ impl CalibrationParam {
     /// Get MTA for this parameter
     pub fn mta(&self) -> Mta {
         Mta::new(self.address, self.address_ext)
+    }
+
+    /// Check if this is a CURVE type (1D lookup table)
+    pub fn is_curve(&self) -> bool {
+        self.characteristic_type == CharacteristicType::Curve
+    }
+
+    /// Check if this is a MAP type (2D lookup table)
+    pub fn is_map(&self) -> bool {
+        self.characteristic_type == CharacteristicType::Map
+    }
+
+    /// Check if this has axis information
+    pub fn has_axis(&self) -> bool {
+        !self.axis_info.is_empty()
+    }
+
+    /// Serialize parameter metadata to JSON (without value).
+    /// Used for API responses that need parameter info but not the current value.
+    pub fn to_json(&self, device_id: &str, device_name: &str, idx: usize, connected: bool) -> serde_json::Value {
+        let axis_info: Vec<serde_json::Value> = self.axis_info.iter().map(|axis| axis.to_json()).collect();
+        serde_json::json!({
+            "device_id": device_id,
+            "device_name": device_name,
+            "idx": idx,
+            "name": self.name,
+            "type": self.data_type.type_name(),
+            "address_hex": format!("{:08X}", self.address),
+            "connected": connected,
+            "characteristic_type": self.characteristic_type.as_str(),
+            "axis_info": axis_info,
+            "storage_order": self.storage_order.as_str(),
+        })
+    }
+
+    /// Get axis values that don't require XCP communication.
+    /// Returns None for axes that require memory reads.
+    pub fn get_static_axis_values(&self) -> Option<Vec<Vec<f64>>> {
+        if self.axis_info.is_empty() {
+            return None;
+        }
+
+        let mut result = Vec::new();
+        for axis in &self.axis_info {
+            if let Some(values) = axis.get_static_values() {
+                result.push(values);
+            } else {
+                // Axis requires memory read
+                return None;
+            }
+        }
+        Some(result)
     }
 }
 
@@ -320,6 +438,11 @@ impl CalibrationManager {
         if let Some(unit) = ch.unit {
             param = param.with_unit(&unit);
         }
+
+        // Set characteristic type, axis info, and storage order
+        param.characteristic_type = ch.characteristic_type;
+        param.axis_info = ch.axis_info;
+        param.storage_order = ch.storage_order;
 
         Some(param)
     }
@@ -554,24 +677,14 @@ impl CalibrationManager {
             CalibrationType::U8Matrix(rows, cols) => {
                 let total = rows * cols;
                 let flat: Vec<u8> = data.iter().take(total).copied().collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<u8> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::U8Matrix(matrix)
+                CalibrationValue::U8Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
             CalibrationType::U16Matrix(rows, cols) => {
                 let total = rows * cols;
                 let flat: Vec<u16> = (0..total)
                     .map(|i| u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]))
                     .collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<u16> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::U16Matrix(matrix)
+                CalibrationValue::U16Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
             CalibrationType::U32Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -585,12 +698,7 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<u32> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::U32Matrix(matrix)
+                CalibrationValue::U32Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
             CalibrationType::U64Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -608,34 +716,19 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<u64> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::U64Matrix(matrix)
+                CalibrationValue::U64Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
             CalibrationType::I8Matrix(rows, cols) => {
                 let total = rows * cols;
                 let flat: Vec<i8> = data.iter().take(total).map(|&b| b as i8).collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<i8> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::I8Matrix(matrix)
+                CalibrationValue::I8Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
             CalibrationType::I16Matrix(rows, cols) => {
                 let total = rows * cols;
                 let flat: Vec<i16> = (0..total)
                     .map(|i| i16::from_le_bytes([data[i * 2], data[i * 2 + 1]]))
                     .collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<i16> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::I16Matrix(matrix)
+                CalibrationValue::I16Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
             CalibrationType::I32Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -649,12 +742,7 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<i32> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::I32Matrix(matrix)
+                CalibrationValue::I32Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
             CalibrationType::I64Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -672,12 +760,7 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<i64> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::I64Matrix(matrix)
+                CalibrationValue::I64Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
             CalibrationType::F32Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -691,12 +774,7 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<f32> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::F32Matrix(matrix)
+                CalibrationValue::F32Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
             CalibrationType::F64Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -714,22 +792,12 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<f64> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::F64Matrix(matrix)
+                CalibrationValue::F64Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
             CalibrationType::BoolMatrix(rows, cols) => {
                 let total = rows * cols;
                 let flat: Vec<bool> = data.iter().take(total).map(|&b| b != 0).collect();
-                let mut matrix = Vec::with_capacity(*rows);
-                for r in 0..*rows {
-                    let row: Vec<bool> = flat[r * cols..(r + 1) * cols].to_vec();
-                    matrix.push(row);
-                }
-                CalibrationValue::BoolMatrix(matrix)
+                CalibrationValue::BoolMatrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
             }
         };
 
@@ -825,49 +893,59 @@ impl CalibrationManager {
                 client.write_u8_array(mta, &flat).await.map_err(|e| e.to_string())?
             }
             // Matrix types
-            (CalibrationType::U8Matrix(_, _), CalibrationValue::U8Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().copied().collect();
+            (CalibrationType::U8Matrix(rows, cols), CalibrationValue::U8Matrix(mat)) => {
+                let flat: Vec<u8> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 client.write_u8_array(mta, &flat).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::U16Matrix(_, _), CalibrationValue::U16Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+            (CalibrationType::U16Matrix(rows, cols), CalibrationValue::U16Matrix(mat)) => {
+                let flat: Vec<u16> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+                let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::U32Matrix(_, _), CalibrationValue::U32Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+            (CalibrationType::U32Matrix(rows, cols), CalibrationValue::U32Matrix(mat)) => {
+                let flat: Vec<u32> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+                let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::U64Matrix(_, _), CalibrationValue::U64Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+            (CalibrationType::U64Matrix(rows, cols), CalibrationValue::U64Matrix(mat)) => {
+                let flat: Vec<u64> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+                let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::I8Matrix(_, _), CalibrationValue::I8Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().map(|&x| x as u8).collect();
-                client.write_u8_array(mta, &flat).await.map_err(|e| e.to_string())?
+            (CalibrationType::I8Matrix(rows, cols), CalibrationValue::I8Matrix(mat)) => {
+                let flat: Vec<i8> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+                let bytes: Vec<u8> = flat.iter().map(|&x| x as u8).collect();
+                client.write_u8_array(mta, &bytes).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::I16Matrix(_, _), CalibrationValue::I16Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+            (CalibrationType::I16Matrix(rows, cols), CalibrationValue::I16Matrix(mat)) => {
+                let flat: Vec<i16> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+                let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::I32Matrix(_, _), CalibrationValue::I32Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+            (CalibrationType::I32Matrix(rows, cols), CalibrationValue::I32Matrix(mat)) => {
+                let flat: Vec<i32> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+                let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::I64Matrix(_, _), CalibrationValue::I64Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+            (CalibrationType::I64Matrix(rows, cols), CalibrationValue::I64Matrix(mat)) => {
+                let flat: Vec<i64> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+                let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::F32Matrix(_, _), CalibrationValue::F32Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+            (CalibrationType::F32Matrix(rows, cols), CalibrationValue::F32Matrix(mat)) => {
+                let flat: Vec<f32> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+                let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::F64Matrix(_, _), CalibrationValue::F64Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+            (CalibrationType::F64Matrix(rows, cols), CalibrationValue::F64Matrix(mat)) => {
+                let flat: Vec<f64> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+                let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::BoolMatrix(_, _), CalibrationValue::BoolMatrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().map(|&x| if x { 1 } else { 0 }).collect();
-                client.write_u8_array(mta, &flat).await.map_err(|e| e.to_string())?
+            (CalibrationType::BoolMatrix(rows, cols), CalibrationValue::BoolMatrix(mat)) => {
+                let flat: Vec<bool> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+                let bytes: Vec<u8> = flat.iter().map(|&x| if x { 1 } else { 0 }).collect();
+                client.write_u8_array(mta, &bytes).await.map_err(|e| e.to_string())?
             }
             _ => return Err(format!("Type mismatch for parameter {}", param.name)),
         }
@@ -1690,5 +1768,180 @@ mod tests {
             !manager.supports_short_download(),
             "SHORT_DOWNLOAD should NOT be supported based on A2L OPTIONAL_CMD"
         );
+    }
+
+    #[test]
+    fn test_calibration_param_characteristic_type() {
+        let mut param = CalibrationParam::new("test_param", 0x1000, 0, CalibrationType::U8);
+        assert_eq!(param.characteristic_type, CharacteristicType::Value);
+        assert!(!param.is_curve());
+        assert!(!param.is_map());
+        assert!(!param.has_axis());
+
+        // Change to CURVE type
+        param.characteristic_type = CharacteristicType::Curve;
+        assert!(param.is_curve());
+        assert!(!param.is_map());
+
+        // Change to MAP type
+        param.characteristic_type = CharacteristicType::Map;
+        assert!(!param.is_curve());
+        assert!(param.is_map());
+    }
+
+    #[test]
+    fn test_calibration_param_with_axis_info() {
+        let mut param = CalibrationParam::new("curve_param", 0x2000, 0, CalibrationType::F32Array(10));
+
+        // Add axis info
+        let axis = crate::a2l_reader::AxisInfo {
+            name: "x_axis".to_string(),
+            unit: Some("rpm".to_string()),
+            min: 0.0,
+            max: 1000.0,
+            num_points: 10,
+            point_source: crate::a2l_reader::AxisPointSource::CalculatedDist {
+                offset: 0.0,
+                distance: 100.0,
+                num_points: 10,
+            },
+        };
+
+        param.characteristic_type = CharacteristicType::Curve;
+        param.axis_info.push(axis);
+
+        assert!(param.has_axis());
+        assert!(param.is_curve());
+
+        // Get static axis values
+        let axis_values = param.get_static_axis_values();
+        assert!(axis_values.is_some());
+        let values = axis_values.unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].len(), 10);
+        assert_eq!(values[0][0], 0.0);
+        assert_eq!(values[0][9], 900.0);
+    }
+
+    #[test]
+    fn test_calibration_param_axis_requires_memory_read() {
+        let mut param = CalibrationParam::new("map_param", 0x3000, 0, CalibrationType::F32Matrix(5, 10));
+
+        // Add axis that requires memory read
+        let axis = crate::a2l_reader::AxisInfo {
+            name: "memory_axis".to_string(),
+            unit: None,
+            min: 0.0,
+            max: 100.0,
+            num_points: 5,
+            point_source: crate::a2l_reader::AxisPointSource::Memory {
+                address: 0x4000,
+                address_ext: 0,
+                data_type: crate::a2l_reader::A2lDataType::F32,
+                num_points: 5,
+            },
+        };
+
+        param.characteristic_type = CharacteristicType::Map;
+        param.axis_info.push(axis);
+
+        assert!(param.has_axis());
+        assert!(param.is_map());
+
+        // Should return None because axis requires memory read
+        let axis_values = param.get_static_axis_values();
+        assert!(axis_values.is_none());
+    }
+
+    #[test]
+    fn test_flat_to_matrix_row_dir() {
+        // Test row-major order: [[1,2,3],[4,5,6],[7,8,9]]
+        // Stored as: [1,2,3,4,5,6,7,8,9]
+        let flat = vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9];
+        let matrix = flat_to_matrix(&flat, 3, 3, StorageOrder::RowDir);
+
+        assert_eq!(matrix.len(), 3);
+        assert_eq!(matrix[0], vec![1, 2, 3]);
+        assert_eq!(matrix[1], vec![4, 5, 6]);
+        assert_eq!(matrix[2], vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn test_flat_to_matrix_column_dir() {
+        // Test column-major order: [[1,2,3],[4,5,6],[7,8,9]]
+        // Stored as: [1,4,7,2,5,8,3,6,9]
+        let flat = vec![1u32, 4, 7, 2, 5, 8, 3, 6, 9];
+        let matrix = flat_to_matrix(&flat, 3, 3, StorageOrder::ColumnDir);
+
+        assert_eq!(matrix.len(), 3);
+        assert_eq!(matrix[0], vec![1, 2, 3]);
+        assert_eq!(matrix[1], vec![4, 5, 6]);
+        assert_eq!(matrix[2], vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn test_matrix_to_flat_row_dir() {
+        let matrix = vec![
+            vec![1u32, 2, 3],
+            vec![4, 5, 6],
+            vec![7, 8, 9],
+        ];
+
+        let flat = matrix_to_flat(&matrix, 3, 3, StorageOrder::RowDir);
+        assert_eq!(flat, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn test_matrix_to_flat_column_dir() {
+        let matrix = vec![
+            vec![1u32, 2, 3],
+            vec![4, 5, 6],
+            vec![7, 8, 9],
+        ];
+
+        let flat = matrix_to_flat(&matrix, 3, 3, StorageOrder::ColumnDir);
+        assert_eq!(flat, vec![1, 4, 7, 2, 5, 8, 3, 6, 9]);
+    }
+
+    #[test]
+    fn test_roundtrip_row_dir() {
+        let original = vec![
+            vec![1.0f32, 2.0, 3.0],
+            vec![4.0, 5.0, 6.0],
+        ];
+
+        let flat = matrix_to_flat(&original, 2, 3, StorageOrder::RowDir);
+        let recovered = flat_to_matrix(&flat, 2, 3, StorageOrder::RowDir);
+
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_roundtrip_column_dir() {
+        let original = vec![
+            vec![1.0f32, 2.0, 3.0],
+            vec![4.0, 5.0, 6.0],
+        ];
+
+        let flat = matrix_to_flat(&original, 2, 3, StorageOrder::ColumnDir);
+        let recovered = flat_to_matrix(&flat, 2, 3, StorageOrder::ColumnDir);
+
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_non_square_matrix_column_dir() {
+        // 2x3 matrix: [[1,2,3],[4,5,6]]
+        // Column-major: [1,4,2,5,3,6]
+        let flat = vec![1u16, 4, 2, 5, 3, 6];
+        let matrix = flat_to_matrix(&flat, 2, 3, StorageOrder::ColumnDir);
+
+        assert_eq!(matrix.len(), 2);
+        assert_eq!(matrix[0], vec![1, 2, 3]);
+        assert_eq!(matrix[1], vec![4, 5, 6]);
+
+        // Verify roundtrip
+        let back_to_flat = matrix_to_flat(&matrix, 2, 3, StorageOrder::ColumnDir);
+        assert_eq!(flat, back_to_flat);
     }
 }
