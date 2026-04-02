@@ -822,7 +822,7 @@ impl DaqManager {
     }
 
     pub async fn get_timestamp_mode(&mut self, client: &XcpClient) -> Result<(), String>{
-        tracing::debug!("Getting timestamp mode...");
+        tracing::trace!("Getting timestamp mode...");
         // Get timestamp mode from slave through GET_DAQ_RESOLUTION_INFO
         let daqresolution_info = client.get_daq_resolution_info().await.map_err(|e| format!("GET_DAQ_RESOLUTION_INFO failed: {}", e))?;
         let timestamp_mode = daqresolution_info.timestamp_mode;
@@ -837,7 +837,7 @@ impl DaqManager {
                 self.timestamp_size = None;
             }
             1 | 2 | 4 => {  
-                tracing::debug!("Timestamp size: {}", timestamp_size_bits);
+                tracing::trace!("Timestamp size: {}", timestamp_size_bits);
                 self.timestamp_size = Some(timestamp_size_bits);
             }
             _ => {
@@ -847,31 +847,31 @@ impl DaqManager {
         }
         let timestamp_unit = (timestamp_mode & 0b1111_0000) >> 4;
         self.timestamp_unit = TimestampUnit::from_u8(timestamp_unit);
-        tracing::debug!("Timestamp tick: {:?}", self.timestamp_unit);
+        tracing::trace!("Timestamp tick: {:?}", self.timestamp_unit);
         Ok(())
     }
 
     pub async fn get_daq_processor_info(&self, client: &XcpClient) -> Result<IdentificationFieldType, String> { 
-        tracing::debug!("Getting DAQ processor info...");
+        tracing::trace!("Getting DAQ processor info...");
         let daq_processor_info = client.get_daq_processor_info().await.map_err(|e| format!("GET_DAQ_PROCESSOR_INFO failed: {}", e))?;
         let daq_key_byte = daq_processor_info.daq_key_byte;
         tracing::info!("DAQ key byte: {}", daq_key_byte);
         let bits = (daq_key_byte & 0b11000000) >> 6;
         match bits {
             0 => {
-                tracing::debug!("abosulte odt is used");
+                tracing::trace!("abosulte odt is used");
                 Ok(IdentificationFieldType::AbosulteODT)
             }
             1  => {
-                tracing::debug!("releative odt is used");
+                tracing::trace!("releative odt is used");
                 Ok(IdentificationFieldType::RelatetiveODTBYTE)
             }
             2 => {
-                tracing::debug!("releative odt is used");
+                tracing::trace!("releative odt is used");
                 Ok(IdentificationFieldType::RelatetiveODTWORD)
             }
             3 => {
-                tracing::debug!("releative odt is used");
+                tracing::trace!("releative odt is used");
                 Ok(IdentificationFieldType::RelatetiveODTWORDAlign)
             }
             _ => {
@@ -925,7 +925,7 @@ impl DaqManager {
         }
 
         // 1. FREE_DAQ - Release any existing DAQ configuration
-        tracing::debug!("FREE_DAQ");
+        tracing::trace!("FREE_DAQ");
         client.free_daq().await.map_err(|e| format!("FREE_DAQ failed: {}", e))?;
 
         // Clear old configuration
@@ -942,7 +942,7 @@ impl DaqManager {
         }
 
         // 2. ALLOC_DAQ - Allocate DAQ lists
-        tracing::debug!("ALLOC_DAQ: {} lists", allocation.daq_list_count);
+        tracing::trace!("ALLOC_DAQ: {} lists", allocation.daq_list_count);
         client
             .alloc_daq(allocation.daq_list_count)
             .await
@@ -955,7 +955,7 @@ impl DaqManager {
             let daq_list = daq_list_idx as u16;
 
             // ALLOC_ODT - Allocate ODTs for this DAQ list
-            tracing::debug!("ALLOC_ODT: DAQ list {}, {} ODTs", daq_list, odt_count);
+            tracing::trace!("ALLOC_ODT: DAQ list {}, {} ODTs", daq_list, odt_count);
             client
                 .alloc_odt(daq_list, *odt_count)
                 .await
@@ -970,7 +970,7 @@ impl DaqManager {
                 let entry_count = odt_allocation.entries.len() as u8;
 
                 // ALLOC_ODT_ENTRY - Allocate entries in this ODT
-                tracing::debug!("ALLOC_ODT_ENTRY: DAQ list {}, ODT {}, {} entries",
+                tracing::trace!("ALLOC_ODT_ENTRY: DAQ list {}, ODT {}, {} entries",
                     daq_list, odt, entry_count);
                 client
                     .alloc_odt_entry(daq_list, odt, entry_count)
@@ -984,7 +984,7 @@ impl DaqManager {
                     let meas_idx = entry_allocation.measurement_idx;
                     let meas = &selected_measurements[meas_idx];
 
-                    tracing::debug!(
+                    tracing::trace!(
                         "WRITE_DAQ: DAQ list {}, ODT {}, entry {}, addr 0x{:08X}, size {}",
                         daq_list, odt, entry_idx, meas.address, meas.size
                     );
@@ -1027,7 +1027,7 @@ impl DaqManager {
             // SET_DAQ_LIST_MODE - Configure DAQ list mode
             // Mode: 0x10 = selected + DAQ (send on event)
             // Event channel: determines trigger source
-            tracing::debug!(
+            tracing::trace!(
                 "SET_DAQ_LIST_MODE: mode=0x10, daq_list={}, event_channel={}, prescaler=1",
                 daq_list, self.event_channel
             );
@@ -1089,7 +1089,7 @@ impl DaqManager {
                 }
             }
         } else {
-            tracing::debug!("Timestamp mode not enabled, skipping GET_DAQ_CLOCK");
+            tracing::trace!("Timestamp mode not enabled, skipping GET_DAQ_CLOCK");
             self.base_timestamp = None;
         }
 
@@ -1183,7 +1183,7 @@ impl DaqManager {
                                 continue;
                             }
 
-                            tracing::debug!("Received DTO: daq_list={:?}, odt={}, data_len={}, entries={}",
+                            tracing::trace!("Received DTO: daq_list={:?}, odt={}, data_len={}, entries={}",
                                 data.daq_list, data.odt, data.data.len(), entries.len());
 
                             // Parse measurement data using configuration

@@ -821,7 +821,7 @@ async fn read_calibration_from_slave(
     let mta = Mta::new(param.address, param.address_ext);
     let size = param.data_type.size();
 
-    tracing::debug!("Reading {} bytes from address 0x{:08X} (ext: {})", size, mta.address, mta.extension);
+    tracing::trace!("Reading {} bytes from address 0x{:08X} (ext: {})", size, mta.address, mta.extension);
 
     // Check for zero size (invalid matrix_dim issue)
     if size == 0 {
@@ -835,7 +835,7 @@ async fn read_calibration_from_slave(
     // This ensures we use the correct chunk size for UPLOAD operations
     let data = slave.read_large_data(mta, size, None).await.map_err(|e| e.to_string())?;
 
-    tracing::debug!("Read {} bytes, expected {}", data.len(), size);
+    tracing::trace!("Read {} bytes, expected {}", data.len(), size);
 
     // Verify data length
     if data.len() != size {

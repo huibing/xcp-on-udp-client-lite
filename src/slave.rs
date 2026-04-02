@@ -409,7 +409,7 @@ impl XcpSlave {
         let num_segments = self.cal_manager.get_memory_segment_count();
 
         if num_segments == 0 {
-            tracing::debug!("No memory segments defined, skipping GET_CAL_PAGE");
+            tracing::trace!("No memory segments defined, skipping GET_CAL_PAGE");
             return Ok(&self.segment_pages);
         }
 
@@ -420,7 +420,7 @@ impl XcpSlave {
         for segment in 0..num_segments {
             match self.get_cal_page(segment as u8, 0x02).await {
                 Ok(xcp_page) => {
-                    tracing::debug!(
+                    tracing::trace!(
                         "Segment {} current XCP page: {}",
                         segment, xcp_page
                     );
@@ -515,7 +515,7 @@ impl XcpSlave {
 
         // Check if we're already on that page
         if self.get_current_xcp_page(segment) == Some(new_page) {
-            tracing::debug!("Already on write-allowed page {} for segment {}", new_page, segment);
+            tracing::trace!("Already on write-allowed page {} for segment {}", new_page, segment);
             return Ok(new_page);
         }
 
@@ -593,7 +593,7 @@ impl XcpSlave {
         let num_segments = self.cal_manager.get_memory_segment_count();
 
         if num_segments == 0 {
-            tracing::debug!("No memory segments defined, nothing to switch");
+            tracing::trace!("No memory segments defined, nothing to switch");
             return Ok(switched);
         }
 
@@ -610,7 +610,7 @@ impl XcpSlave {
             let target_page = match self.find_page_for_mode(segment, mode) {
                 Some(page) => page,
                 None => {
-                    tracing::debug!(
+                    tracing::trace!(
                         "Segment {} has no {:?} page, skipping",
                         segment, mode
                     );
@@ -620,7 +620,7 @@ impl XcpSlave {
 
             // Check current page
             if self.get_current_xcp_page(segment) == Some(target_page) {
-                tracing::debug!(
+                tracing::trace!(
                     "Segment {} already on {} page {}",
                     segment, mode.description(), target_page
                 );
@@ -989,7 +989,7 @@ impl XcpSlave {
             return self.read_memory(mta, size as u8).await;
         }
 
-        tracing::debug!(
+        tracing::trace!(
             "Reading {} bytes in chunks (max per read: {})",
             size, max_per_read
         );
@@ -1047,7 +1047,7 @@ impl XcpSlave {
         }
 
         // Data too large for SHORT_DOWNLOAD, use SET_MTA + DOWNLOAD instead
-        tracing::debug!(
+        tracing::trace!(
             "Data size {} exceeds SHORT_DOWNLOAD limit {}, using DOWNLOAD instead",
             data.len(), max_short_download
         );
@@ -1084,7 +1084,7 @@ impl XcpSlave {
         }
 
         // Multi-packet transfer
-        tracing::debug!(
+        tracing::trace!(
             "Writing {} bytes in chunks (max per packet: {})",
             total_size, max_block
         );

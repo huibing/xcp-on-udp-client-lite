@@ -82,7 +82,7 @@ impl Transport for CanTransport {
     }
 
     async fn close(&self) -> Result<(), TransportError> {
-        tracing::debug!("Closing CAN transport on {} (ID: 0x{:03X})", self.channel, self.can_id);
+        tracing::trace!("Closing CAN transport on {} (ID: 0x{:03X})", self.channel, self.can_id);
         Ok(())
     }
 

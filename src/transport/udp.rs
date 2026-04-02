@@ -79,7 +79,7 @@ impl UdpTransport {
         packet.push((counter >> 8) as u8);
         packet.extend_from_slice(command);
 
-        tracing::debug!(
+        tracing::trace!(
             "Sending XCP command: counter={}, cmd=0x{:02X}({}), len={}, packet=[{:02X?}]",
             counter,
             command.first().copied().unwrap_or(0xFF),
@@ -93,7 +93,7 @@ impl UdpTransport {
             .await
             .map_err(|e: std::io::Error| TransportError::SendFailed(e.to_string()))?;
 
-        tracing::debug!("XCP command sent successfully: counter={}", counter);
+        tracing::trace!("XCP command sent successfully: counter={}", counter);
 
         Ok(())
     }
@@ -209,7 +209,7 @@ impl Transport for UdpTransport {
 
     async fn close(&self) -> Result<(), TransportError> {
         // UDP is connectionless, just log the close operation
-        tracing::debug!("Closing UDP transport to {}", self.remote_addr);
+        tracing::trace!("Closing UDP transport to {}", self.remote_addr);
         Ok(())
     }
 

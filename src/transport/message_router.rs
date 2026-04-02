@@ -242,17 +242,17 @@ impl MessageRouter {
                 // Receive packet from transport
                 match transport.recv_packet().await {
                     Ok(packet) => {
-                        tracing::debug!("Received UDP packet: {} bytes", packet.len());
+                        tracing::trace!("Received UDP packet: {} bytes", packet.len());
                         // Parse all XCP packets from the UDP packet
                         let messages = XcpMessage::parse_packets(packet);
-                        tracing::debug!("Parsed {} XCP messages from UDP packet", messages.len());
+                        tracing::trace!("Parsed {} XCP messages from UDP packet", messages.len());
 
                         for msg in messages {
                             // Check counter for each XCP packet (in transport header bytes 2-3)
                             if msg.data.len() >= 4 {
                                 let counter = u16::from_le_bytes([msg.data[2], msg.data[3]]);
                                 let pid = msg.data.get(4).copied().unwrap_or(0xFF);
-                                tracing::debug!(
+                                tracing::trace!(
                                     "Routing XCP message: type={:?}, counter={}, pid=0x{:02X}, len={}",
                                     msg.packet_type, counter, pid, msg.data.len()
                                 );
@@ -286,7 +286,7 @@ impl MessageRouter {
                                     match dto_tx.try_send(msg) {
                                         Ok(_) => {}
                                         Err(mpsc::error::TrySendError::Full(_)) => {
-                                            tracing::debug!("DTO channel full, dropping DAQ data");
+                                            tracing::trace!("DTO channel full, dropping DAQ data");
                                         }
                                         Err(e) => {
                                             tracing::error!("Failed to send DTO message: {}", e);
@@ -298,7 +298,7 @@ impl MessageRouter {
                         }
                     }
                     Err(e) => {
-                        tracing::debug!("Transport receive error: {}", e);
+                        tracing::trace!("Transport receive error: {}", e);
                         // Small delay to avoid busy loop on error
                         tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                     }

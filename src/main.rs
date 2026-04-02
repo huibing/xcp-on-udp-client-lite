@@ -71,7 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("debug".parse()?),
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("debug".parse()?)
+                .add_directive("a2lfile=error".parse()?),  // Suppress a2lfile warnings
         )
         .with_ansi(false)
         .with_writer(move || log_file.try_clone().expect("Failed to clone log file"))
