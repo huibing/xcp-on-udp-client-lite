@@ -46,10 +46,10 @@
                 <thead style="position: sticky; top: 0; background: #2a2a2a; z-index: 1;">
                     <tr>
                         <th style="width: 40px; padding: 0.5rem;"><input type="checkbox" id="selectAll" onclick="toggleSelectAll()"></th>
-                        <th style="text-align: left; padding: 0.5rem; width: 30%;">Name</th>
-                        <th style="text-align: left; padding: 0.5rem; width: 20%;">Device</th>
+                        <th style="text-align: left; padding: 0.5rem; width: 35%;">Name</th>
+                        <th style="text-align: left; padding: 0.5rem; width: 25%;">Device</th>
                         <th style="text-align: left; padding: 0.5rem; width: 15%;">Type</th>
-                        <th style="text-align: left; padding: 0.5rem; width: 15%;">Address</th>
+                        <th style="text-align: left; padding: 0.5rem; width:15%;">Address</th>
                     </tr>
                 </thead>
                 <tbody id="availableVars">
@@ -67,6 +67,23 @@
                 <button class="secondary" onclick="closeModal()" style="margin-right: 0.5rem;">Cancel</button>
                 <button class="btn" onclick="applySelection()">Apply Selection</button>
             </div>
+        </div>
+    </div>
+</div>
+
+<!-- Variable Info Modal -->
+<div id="infoModal" class="modal" style="display: none;">
+    <div class="modal-content" style="width: 600px; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem; border-bottom: 1px solid #444;">
+            <h3 id="infoTitle" style="margin: 0;">Variable Information</h3>
+            <button onclick="closeInfoModal()" style="background: none; border: none; color: #fff; font-size: 1.5rem; cursor: pointer;">&times;</button>
+        </div>
+        <div class="modal-body" id="infoBody" style="flex: 1; overflow: auto; padding: 1rem;">
+            <!-- Info content will be rendered here -->
+        </div>
+        <div class="modal-footer" style="padding: 1rem; border-top: 1px solid #444; display: flex; justify-content: space-between;">
+            <button onclick="copyInfoToClipboard()" title="Copy all information">📋 Copy All</button>
+            <button class="secondary" onclick="closeInfoModal()">Close</button>
         </div>
     </div>
 </div>
@@ -97,6 +114,12 @@
 .modal-table tr:hover {
     background: #2a2a2a;
 }
+.modal-table tr.selected-row {
+    background: #1a4a1a;
+}
+.modal-table tr.selected-row:hover {
+    background: #2a5a2a;
+}
 .tag.running { background: #00ff88; color: #000; }
 .tag.stopped { background: #555; color: #fff; }
 .daq-item {
@@ -120,9 +143,11 @@ let displayedCount = 0;
 const BATCH_SIZE = 50;
 let isLoadingMore = false;
 let filteredVariables = [];
+const STORAGE_PREFIX = 'daq'; // Prefix for localStorage keys
 
 document.addEventListener('DOMContentLoaded', async () => {
     await loadAvailableVars();
+    loadSelectionFromStorage(STORAGE_PREFIX, allVariables, selectedKeys);
     renderSelectedVars();
     checkDaqStatus();
 
@@ -130,6 +155,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.addEventListener('visibilitychange', async () => {
         if (!document.hidden) {
             await loadAvailableVars();
+            loadSelectionFromStorage(STORAGE_PREFIX, allVariables, selectedKeys);
             renderSelectedVars();
         }
     });
@@ -206,10 +232,11 @@ function loadMoreVars() {
 
         const html = nextBatch.map(v => {
             const key = `${v.device_id}:${v.name}`;
-            const checked = tempSelectedKeys.has(key) ? 'checked' : '';
+            const selected = tempSelectedKeys.has(key);
+            const rowClass = selected ? 'selected-row' : '';
             return `
-                <tr>
-                    <td><input type="checkbox" data-key="${key}" ${checked} onclick="toggleVar('${key}')"></td>
+                <tr class="${rowClass}" onclick="toggleVar('${key}')" style="cursor: pointer;">
+                    <td style="width: 40px;">${selected ? '✓' : ''}</td>
                     <td style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(v.name)}">${escapeHtml(v.name)}</td>
                     <td style="color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(v.device_name)}</td>
                     <td>${v.type}</td>
@@ -246,10 +273,11 @@ function renderAvailableVars() {
     const firstBatch = filteredVariables.slice(0, BATCH_SIZE);
     tbody.innerHTML = firstBatch.map(v => {
         const key = `${v.device_id}:${v.name}`;
-        const checked = tempSelectedKeys.has(key) ? 'checked' : '';
+        const selected = tempSelectedKeys.has(key);
+        const rowClass = selected ? 'selected-row' : '';
         return `
-            <tr>
-                <td><input type="checkbox" data-key="${key}" ${checked} onclick="toggleVar('${key}')"></td>
+            <tr class="${rowClass}" onclick="toggleVar('${key}')" style="cursor: pointer;">
+                <td style="width: 40px;">${selected ? '✓' : ''}</td>
                 <td style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(v.name)}">${escapeHtml(v.name)}</td>
                 <td style="color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(v.device_name)}</td>
                 <td>${v.type}</td>
@@ -272,13 +300,30 @@ function filterVars() {
 }
 
 function toggleVar(key) {
-    if (tempSelectedKeys.has(key)) {
+    const wasSelected = tempSelectedKeys.has(key);
+    if (wasSelected) {
         tempSelectedKeys.delete(key);
     } else {
         tempSelectedKeys.add(key);
     }
     updateSelectedCount();
     updateSelectAllCheckbox();
+
+    // Update row style without re-rendering
+    const rows = document.querySelectorAll('#availableVars tr');
+    rows.forEach(row => {
+        const onclick = row.getAttribute('onclick');
+        if (onclick && onclick.includes(`'${key}'`)) {
+            const firstTd = row.querySelector('td:first-child');
+            if (wasSelected) {
+                row.classList.remove('selected-row');
+                if (firstTd) firstTd.textContent = '';
+            } else {
+                row.classList.add('selected-row');
+                if (firstTd) firstTd.textContent = '✓';
+            }
+        }
+    });
 }
 
 function toggleSelectAll() {
@@ -319,7 +364,7 @@ function updateSelectAllCheckbox() {
 
 function applySelection() {
     selectedKeys = new Set(tempSelectedKeys);
-    saveSelectionToStorage();
+    saveSelectionToStorage(STORAGE_PREFIX, allVariables, selectedKeys);
     closeModal();
     renderSelectedVars();
     // Sync selection to backend
@@ -413,7 +458,10 @@ function renderSelectedList(selectedVars) {
                     <span style="color: #888; font-size: 0.85em;">[${escapeHtml(v.device_name)}]</span>
                     ${escapeHtml(v.name)}
                 </span>
-                ${removeBtn}
+                <div class="btn-group">
+                    <button onclick="openInfoModal('${v.device_id}', ${v.idx}, '${escapeHtml(v.name)}')" title="Info" style="padding: 0.2rem 0.5rem;">ℹ️</button>
+                    ${removeBtn}
+                </div>
             </div>
         `;
     }).join('');
@@ -421,7 +469,7 @@ function renderSelectedList(selectedVars) {
 
 function removeVar(key) {
     selectedKeys.delete(key);
-    saveSelectionToStorage();
+    saveSelectionToStorage(STORAGE_PREFIX, allVariables, selectedKeys);
     renderSelectedVars();
     syncSelectionToBackend();
 }
@@ -584,10 +632,73 @@ async function fetchLiveData() {
     }
 }
 
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+// Variable Info Modal functions
+let currentInfoData = null;
+
+async function openInfoModal(deviceId, idx, name) {
+    document.getElementById('infoTitle').textContent = name;
+    document.getElementById('infoModal').style.display = 'flex';
+    document.getElementById('infoBody').innerHTML = '<p style="text-align: center; color: #888;">Loading...</p>';
+
+    try {
+        const response = await fetch(`/api/daq/detail/${deviceId}/${idx}`);
+        const data = await response.json();
+
+        if (data.success) {
+            currentInfoData = data.detail;
+            renderInfoContent(data.detail);
+        } else {
+            document.getElementById('infoBody').innerHTML = `<p style="color: #ff4444;">Error: ${escapeHtml(data.error)}</p>`;
+        }
+    } catch (e) {
+        document.getElementById('infoBody').innerHTML = `<p style="color: #ff4444;">Failed to load: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function closeInfoModal() {
+    document.getElementById('infoModal').style.display = 'none';
+    currentInfoData = null;
+}
+
+function renderInfoContent(detail) {
+    const container = document.getElementById('infoBody');
+
+    let html = '<table style="width: 100%; border-collapse: collapse;">';
+    html += createInfoRow('Name', detail.name);
+    html += createInfoRow('Device', detail.device_name);
+    html += createInfoRow('Type', detail.type);
+    html += createInfoRow('Address', detail.address);
+    html += createInfoRow('Address Extension', detail.address_ext);
+    html += createInfoRow('Unit', detail.unit);
+    html += createInfoRow('Data Size', detail.data_size);
+    html += '</table>';
+
+    container.innerHTML = html;
+}
+
+function copyInfoToClipboard() {
+    if (!currentInfoData) return;
+
+    let text = `Measurement Information\n`;
+    text += `======================\n`;
+    text += `Name: ${currentInfoData.name}\n`;
+    text += `Device: ${currentInfoData.device_name}\n`;
+    text += `Type: ${currentInfoData.type}\n`;
+    text += `Address: ${currentInfoData.address}\n`;
+    text += `Address Extension: ${currentInfoData.address_ext}\n`;
+    text += `Unit: ${currentInfoData.unit}\n`;
+    text += `Data Size: ${currentInfoData.data_size}\n`;
+
+    navigator.clipboard.writeText(text).then(() => {
+        const btn = document.querySelector('#infoModal .modal-footer button');
+        const originalText = btn.textContent;
+        btn.textContent = '✓ Copied!';
+        setTimeout(() => {
+            btn.textContent = originalText;
+        }, 1500);
+    }).catch(e => {
+        alert('Failed to copy: ' + e.message);
+    });
 }
 
 // Close modal on outside click
@@ -597,10 +708,18 @@ document.getElementById('varModal').addEventListener('click', (e) => {
     }
 });
 
+// Close info modal on outside click
+document.getElementById('infoModal').addEventListener('click', (e) => {
+    if (e.target.id === 'infoModal') {
+        closeInfoModal();
+    }
+});
+
 // Close modal on Escape key
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         closeModal();
+        closeInfoModal();
     }
 });
 </script>

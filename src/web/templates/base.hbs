@@ -235,7 +235,7 @@
             <a href="/calibration" {{#if active_calibration}}class="active"{{/if}}>Calibration</a>
             <a href="/daq" {{#if active_daq}}class="active"{{/if}}>DAQ</a>
             <a href="/a2l" {{#if active_a2l}}class="active"{{/if}}>A2L</a>
-            <a href="/logout">Logout</a>
+            <a href="/logout" onclick="clearLocalStorage()">Logout</a>
         </nav>
     </div>
     <div class="container">
@@ -247,5 +247,73 @@
         {{/if}}
         {{{content}}}
     </div>
+    <script>
+    // Shared utilities for calibration and DAQ pages
+
+    // Clear localStorage on logout
+    function clearLocalStorage() {
+        localStorage.removeItem('cal_device_signature');
+        localStorage.removeItem('cal_selectedVars');
+        localStorage.removeItem('daq_device_signature');
+        localStorage.removeItem('daq_selectedVars');
+    }
+
+    // Escape HTML to prevent XSS
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Get device signature from variables (sorted device IDs)
+    function getDeviceSignature(allVariables) {
+        const deviceIds = [...new Set(allVariables.map(v => v.device_id))].sort();
+        return deviceIds.join(',');
+    }
+
+    // Load selection from localStorage
+    function loadSelectionFromStorage(prefix, allVariables, selectedKeys) {
+        const currentSignature = getDeviceSignature(allVariables);
+        const storedSignature = localStorage.getItem(prefix + '_device_signature');
+
+        if (!storedSignature || storedSignature !== currentSignature) {
+            localStorage.removeItem(prefix + '_device_signature');
+            localStorage.removeItem(prefix + '_selectedVars');
+            return;
+        }
+
+        const stored = localStorage.getItem(prefix + '_selectedVars');
+        if (stored) {
+            try {
+                const arr = JSON.parse(stored);
+                const validKeys = new Set(allVariables.map(v => `${v.device_id}:${v.name}`));
+                arr.filter(key => validKeys.has(key)).forEach(key => selectedKeys.add(key));
+            } catch (e) { /* ignore */ }
+        }
+    }
+
+    // Save selection to localStorage
+    function saveSelectionToStorage(prefix, allVariables, selectedKeys) {
+        const currentSignature = getDeviceSignature(allVariables);
+        localStorage.setItem(prefix + '_device_signature', currentSignature);
+        localStorage.setItem(prefix + '_selectedVars', JSON.stringify([...selectedKeys]));
+    }
+
+    // Create info row for variable info dialog
+    function createInfoRow(label, value) {
+        return `<tr>
+            <td style="padding: 0.5rem; border-bottom: 1px solid #333; color: #888; width: 40%;">${escapeHtml(label)}</td>
+            <td style="padding: 0.5rem; border-bottom: 1px solid #333; font-family: monospace; word-break: break-all;">${escapeHtml(String(value || 'N/A'))}</td>
+        </tr>`;
+    }
+
+    // Format axis value for display
+    function formatAxisValue(v) {
+        if (typeof v === 'number') {
+            return Number.isInteger(v) ? v.toString() : v.toFixed(2);
+        }
+        return v.toString();
+    }
+    </script>
 </body>
 </html>
