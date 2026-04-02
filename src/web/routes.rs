@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 #[allow(unused)]
 use serde_json::json;
 
-use crate::calibration::{CalibrationManager, CalibrationParam, CalibrationValue};
+use crate::calibration::{CalibrationManager, CalibrationParam, CalibrationType, CalibrationValue};
 use crate::daq::DaqManager;
 use crate::slave::SlaveId;
 use crate::transport::TransportConfig;
@@ -721,6 +721,38 @@ pub async fn cal_read(
         let param = param.clone();
         drop(cal_manager); // Release lock before async operation
 
+        // Check if we're in working page mode and have cached value
+        let page_mode = if let Some(xcp_slave) = client.get_slave(slave_id) {
+            let xcp_slave_guard = xcp_slave.lock().await;
+            xcp_slave_guard.get_current_page_mode()
+        } else {
+            crate::slave::PageMode::Reference
+        };
+
+        // In working page mode, try to get value from cache first
+        if page_mode == crate::slave::PageMode::Working {
+            let cal_values = slave.cal_values.read().await;
+            if let Some(cached_value) = cal_values.get(&param.name) {
+                let value_str = cached_value.format();
+                tracing::info!(
+                    "Cache hit for '{}' in working page mode: {}",
+                    param.name,
+                    value_str
+                );
+
+                // Build response using parameter's to_json for base metadata
+                let mut base = param.to_json("", &slave.display_name(), 0, true);
+                if let serde_json::Value::Object(ref mut map) = base {
+                    map.remove("device_id");
+                    map.remove("idx");
+                    map.insert("success".to_string(), serde_json::json!(true));
+                    map.insert("value".to_string(), serde_json::json!(value_str));
+                    map.insert("cached".to_string(), serde_json::json!(true));
+                }
+                return Json(base);
+            }
+        }
+
         tracing::info!(
             "Reading calibration param '{}' at address 0x{:08X} (ext: {}), type: {:?}",
             param.name,
@@ -1105,6 +1137,8 @@ pub async fn cal_write_api(
 
                     match result {
                         Ok(_) => {
+                            // Update cache after successful write
+                            slave.cal_values.write().await.insert(param.name.clone(), value.clone());
                             state
                                 .set_status(format!("[{}] Wrote {} = {}", slave.display_name(), param.name, value_str))
                                 .await;
@@ -1906,6 +1940,11 @@ fn convert_characteristic(
         param = param.with_unit(&unit);
     }
 
+    // Set characteristic type, axis info, and storage order
+    param.characteristic_type = ch.characteristic_type;
+    param.axis_info = ch.axis_info;
+    param.storage_order = ch.storage_order;
+
     Some(param)
 }
 
@@ -1921,4 +1960,814 @@ fn convert_measurement(
         m.unit,
         crate::daq::CompuMethod::Identical,
     ))
+}
+
+/// Get full calibration parameter value (GET /api/cal/value/:device_id/:idx)
+/// Returns complete value with axis info and dimensions for matrix editor
+pub async fn cal_value_api(
+    State(state): State<AppState>,
+    Path((device_id_str, idx)): Path<(String, usize)>,
+) -> impl IntoResponse {
+    // Try to parse as UUID (could be slave_id or device_id)
+    let uuid = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(json!({
+                "success": false,
+                "error": "Invalid device ID"
+            }));
+        }
+    };
+
+    let slave_id = SlaveId(uuid);
+    let slave = state.get_slave(slave_id).await;
+
+    let Some(slave) = slave else {
+        return Json(json!({
+            "success": false,
+            "error": "Device not found or not connected"
+        }));
+    };
+
+    if !slave.is_connected() {
+        return Json(json!({
+            "success": false,
+            "error": "Not connected to XCP slave"
+        }));
+    }
+
+    let client = state.client.lock().await;
+    let cal_manager = slave.cal_manager.read().await;
+
+    if let Some(param) = cal_manager.params().get(idx) {
+        let param = param.clone();
+        drop(cal_manager);
+
+        // Get page mode
+        let page_mode = if let Some(xcp_slave) = client.get_slave(slave_id) {
+            let xcp_slave_guard = xcp_slave.lock().await;
+            xcp_slave_guard.get_current_page_mode()
+        } else {
+            crate::slave::PageMode::Reference
+        };
+        let is_working_page = page_mode == crate::slave::PageMode::Working;
+
+        // Read the value
+        if let Some(xcp_slave) = client.get_slave(slave_id) {
+            let xcp_slave_guard = xcp_slave.lock().await;
+            match read_calibration_from_slave(&xcp_slave_guard, &param).await {
+                Ok(value) => {
+                    // Get dimensions
+                    let (rows, cols) = match &param.data_type {
+                        CalibrationType::U8Array(n) | CalibrationType::I8Array(n) |
+                        CalibrationType::U16Array(n) | CalibrationType::I16Array(n) |
+                        CalibrationType::U32Array(n) | CalibrationType::I32Array(n) |
+                        CalibrationType::U64Array(n) | CalibrationType::I64Array(n) |
+                        CalibrationType::F32Array(n) | CalibrationType::F64Array(n) |
+                        CalibrationType::BoolArray(n) => (1, *n),
+                        CalibrationType::U8Matrix(r, c) | CalibrationType::I8Matrix(r, c) |
+                        CalibrationType::U16Matrix(r, c) | CalibrationType::I16Matrix(r, c) |
+                        CalibrationType::U32Matrix(r, c) | CalibrationType::I32Matrix(r, c) |
+                        CalibrationType::U64Matrix(r, c) | CalibrationType::I64Matrix(r, c) |
+                        CalibrationType::F32Matrix(r, c) | CalibrationType::F64Matrix(r, c) |
+                        CalibrationType::BoolMatrix(r, c) => (*r, *c),
+                        _ => (1, 1),
+                    };
+
+                    // Check if it's a 1D or 2D type
+                    let is_1d = matches!(param.data_type,
+                        CalibrationType::U8Array(_) | CalibrationType::I8Array(_) |
+                        CalibrationType::U16Array(_) | CalibrationType::I16Array(_) |
+                        CalibrationType::U32Array(_) | CalibrationType::I32Array(_) |
+                        CalibrationType::U64Array(_) | CalibrationType::I64Array(_) |
+                        CalibrationType::F32Array(_) | CalibrationType::F64Array(_) |
+                        CalibrationType::BoolArray(_)
+                    );
+
+                    // Convert value to JSON array format
+                    let value_json = calibration_value_to_json(&value, is_1d);
+
+                    // Get axis info
+                    let axis_info: Vec<serde_json::Value> = param.axis_info.iter().map(|axis| {
+                        axis.to_json()
+                    }).collect();
+
+                    // Read axis values (from static source or XCP memory)
+                    let axis_values = read_axis_values_from_slave(&xcp_slave_guard, &param).await;
+
+                    tracing::info!(
+                        "cal_value_api: param '{}' type={}, characteristic_type={:?}, axis_info count={}, axis_values count={}",
+                        param.name,
+                        param.data_type.type_name(),
+                        param.characteristic_type,
+                        param.axis_info.len(),
+                        axis_values.len()
+                    );
+
+                    Json(json!({
+                        "success": true,
+                        "name": param.name,
+                        "type": param.data_type.type_name(),
+                        "value": value_json,
+                        "rows": rows,
+                        "cols": cols,
+                        "is_1d": is_1d,
+                        "is_working_page": is_working_page,
+                        "axis_info": axis_info,
+                        "axis_values": axis_values,
+                        "characteristic_type": param.characteristic_type.as_str(),
+                    }))
+                }
+                Err(e) => {
+                    Json(json!({
+                        "success": false,
+                        "error": format!("Failed to read: {}", e)
+                    }))
+                }
+            }
+        } else {
+            Json(json!({
+                "success": false,
+                "error": "Slave not available in client"
+            }))
+        }
+    } else {
+        Json(json!({
+            "success": false,
+            "error": format!("Parameter index {} not found", idx)
+        }))
+    }
+}
+
+/// Read axis values from XCP slave for axes that require memory read
+async fn read_axis_values_from_slave(
+    xcp_slave: &crate::slave::XcpSlave,
+    param: &CalibrationParam,
+) -> Vec<Vec<f64>> {
+    use crate::a2l_reader::AxisPointSource;
+    use crate::protocol::Mta;
+
+    let mut result = Vec::new();
+
+    for axis in &param.axis_info {
+        // First try static values
+        if let Some(values) = axis.get_static_values() {
+            result.push(values);
+            continue;
+        }
+
+        // If requires memory read, read from XCP
+        if let AxisPointSource::Memory { address, address_ext, data_type, num_points } = &axis.point_source {
+            // Calculate element size (size of single axis point)
+            let element_size = match data_type {
+                crate::a2l_reader::A2lDataType::U8 | crate::a2l_reader::A2lDataType::I8 | crate::a2l_reader::A2lDataType::Bool => 1,
+                crate::a2l_reader::A2lDataType::U16 | crate::a2l_reader::A2lDataType::I16 => 2,
+                crate::a2l_reader::A2lDataType::U32 | crate::a2l_reader::A2lDataType::I32 | crate::a2l_reader::A2lDataType::F32 => 4,
+                crate::a2l_reader::A2lDataType::U64 | crate::a2l_reader::A2lDataType::I64 | crate::a2l_reader::A2lDataType::F64 => 8,
+                _ => 4, // Default to 4 bytes
+            };
+            let total_size = element_size * num_points;
+
+            let mta = Mta::new(*address, *address_ext);
+            match xcp_slave.read_large_data(mta, total_size, None).await {
+                Ok(data) => {
+                    let values = parse_axis_values(&data, data_type, *num_points);
+                    result.push(values);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read axis values for '{}': {}", axis.name, e);
+                    // Fall back to index-based values
+                    result.push((0..*num_points).map(|i| i as f64).collect());
+                }
+            }
+        } else {
+            // Should not happen, but fallback to indices
+            result.push((0..axis.num_points).map(|i| i as f64).collect());
+        }
+    }
+
+    result
+}
+
+/// Parse axis values from raw bytes based on data type
+fn parse_axis_values(data: &[u8], data_type: &crate::a2l_reader::A2lDataType, num_points: usize) -> Vec<f64> {
+    use crate::a2l_reader::A2lDataType;
+
+    let mut values = Vec::with_capacity(num_points);
+    // Calculate element size
+    let element_size = match data_type {
+        A2lDataType::U8 | A2lDataType::I8 | A2lDataType::Bool => 1,
+        A2lDataType::U16 | A2lDataType::I16 => 2,
+        A2lDataType::U32 | A2lDataType::I32 | A2lDataType::F32 => 4,
+        A2lDataType::U64 | A2lDataType::I64 | A2lDataType::F64 => 8,
+        _ => 4,
+    };
+
+    for i in 0..num_points {
+        let offset = i * element_size;
+        if offset + element_size > data.len() {
+            values.push(i as f64);
+            continue;
+        }
+
+        let slice = &data[offset..offset + element_size];
+        let val = match data_type {
+            A2lDataType::U8 | A2lDataType::U8Array(_) => slice[0] as f64,
+            A2lDataType::I8 | A2lDataType::I8Array(_) => slice[0] as i8 as f64,
+            A2lDataType::U16 | A2lDataType::U16Array(_) => u16::from_le_bytes([slice[0], slice[1]]) as f64,
+            A2lDataType::I16 | A2lDataType::I16Array(_) => i16::from_le_bytes([slice[0], slice[1]]) as f64,
+            A2lDataType::U32 | A2lDataType::U32Array(_) => u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64,
+            A2lDataType::I32 | A2lDataType::I32Array(_) => i32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64,
+            A2lDataType::F32 | A2lDataType::F32Array(_) => f32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64,
+            A2lDataType::U64 | A2lDataType::U64Array(_) => u64::from_le_bytes([slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7]]) as f64,
+            A2lDataType::I64 | A2lDataType::I64Array(_) => i64::from_le_bytes([slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7]]) as f64,
+            A2lDataType::F64 | A2lDataType::F64Array(_) => f64::from_le_bytes([slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7]]),
+            _ => i as f64,
+        };
+        values.push(val);
+    }
+
+    values
+}
+
+/// Convert CalibrationValue to JSON array format
+fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -> serde_json::Value {
+    match value {
+        // Scalar
+        CalibrationValue::U8(v) => json!([*v]),
+        CalibrationValue::U16(v) => json!([*v]),
+        CalibrationValue::U32(v) => json!([*v]),
+        CalibrationValue::U64(v) => json!([*v]),
+        CalibrationValue::I8(v) => json!([*v]),
+        CalibrationValue::I16(v) => json!([*v]),
+        CalibrationValue::I32(v) => json!([*v]),
+        CalibrationValue::I64(v) => json!([*v]),
+        CalibrationValue::F32(v) => json!([format!("{:.6}", v)]),
+        CalibrationValue::F64(v) => json!([format!("{:.6}", v)]),
+        CalibrationValue::Bool(v) => json!([*v]),
+        // Arrays (1D)
+        CalibrationValue::U8Array(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(*v)).collect::<Vec<_>>()])
+            }
+        }
+        CalibrationValue::U16Array(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(*v)).collect::<Vec<_>>()])
+            }
+        }
+        CalibrationValue::U32Array(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(*v)).collect::<Vec<_>>()])
+            }
+        }
+        CalibrationValue::U64Array(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(*v)).collect::<Vec<_>>()])
+            }
+        }
+        CalibrationValue::I8Array(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(*v)).collect::<Vec<_>>()])
+            }
+        }
+        CalibrationValue::I16Array(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(*v)).collect::<Vec<_>>()])
+            }
+        }
+        CalibrationValue::I32Array(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(*v)).collect::<Vec<_>>()])
+            }
+        }
+        CalibrationValue::I64Array(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(*v)).collect::<Vec<_>>()])
+            }
+        }
+        CalibrationValue::F32Array(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>()])
+            }
+        }
+        CalibrationValue::F64Array(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>()])
+            }
+        }
+        CalibrationValue::BoolArray(arr) => {
+            if is_1d {
+                json!(arr.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            } else {
+                json!([arr.iter().map(|v| json!(*v)).collect::<Vec<_>>()])
+            }
+        }
+        // Matrices (2D)
+        CalibrationValue::U8Matrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+        CalibrationValue::U16Matrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+        CalibrationValue::U32Matrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+        CalibrationValue::U64Matrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+        CalibrationValue::I8Matrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+        CalibrationValue::I16Matrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+        CalibrationValue::I32Matrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+        CalibrationValue::I64Matrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+        CalibrationValue::F32Matrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+        CalibrationValue::F64Matrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+        CalibrationValue::BoolMatrix(mat) => {
+            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+        }
+    }
+}
+
+/// Write single element of calibration parameter (POST /api/cal/write-element/:device_id/:idx)
+/// Body: { "row": 0, "col": 1, "value": 5.0 }
+pub async fn cal_write_element_api(
+    State(state): State<AppState>,
+    Path((device_id_str, idx)): Path<(String, usize)>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // Parse device ID
+    let uuid = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(json!({
+                "success": false,
+                "error": "Invalid device ID"
+            }));
+        }
+    };
+
+    let slave_id = SlaveId(uuid);
+    let slave = match state.get_slave(slave_id).await {
+        Some(s) => s,
+        None => {
+            return Json(json!({
+                "success": false,
+                "error": "Device not found or not connected"
+            }));
+        }
+    };
+
+    if !slave.is_connected() {
+        return Json(json!({
+            "success": false,
+            "error": "Not connected to XCP slave"
+        }));
+    }
+
+    // Get row and col from payload
+    let row = payload.get("row").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let col = payload.get("col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let value_str = payload.get("value").and_then(|v| v.as_str()).unwrap_or("0");
+
+    let client = state.client.lock().await;
+    let cal_manager = slave.cal_manager.read().await;
+
+    if let Some(param) = cal_manager.params().get(idx) {
+        let param = param.clone();
+        drop(cal_manager);
+
+        // Check page mode
+        let page_mode = if let Some(xcp_slave) = client.get_slave(slave_id) {
+            let xcp_slave_guard = xcp_slave.lock().await;
+            xcp_slave_guard.get_current_page_mode()
+        } else {
+            crate::slave::PageMode::Reference
+        };
+
+        if page_mode != crate::slave::PageMode::Working {
+            return Json(json!({
+                "success": false,
+                "error": "Cannot write in Reference page mode. Switch to Working page first."
+            }));
+        }
+
+        // Read current value
+        if let Some(xcp_slave) = client.get_slave(slave_id) {
+            let mut current_value = {
+                let xcp_slave_guard = xcp_slave.lock().await;
+                match read_calibration_from_slave(&xcp_slave_guard, &param).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Json(json!({
+                            "success": false,
+                            "error": format!("Failed to read current value: {}", e)
+                        }));
+                    }
+                }
+            };
+
+            // Modify the element at (row, col)
+            match modify_element(&mut current_value, &param.data_type, row, col, value_str) {
+                Ok(_) => {
+                    // Write back the entire value
+                    let xcp_slave_guard = xcp_slave.lock().await;
+                    match write_calibration_to_slave(&xcp_slave_guard, &param, &current_value).await {
+                        Ok(_) => {
+                            // Update cache
+                            slave.cal_values.write().await.insert(param.name.clone(), current_value.clone());
+                            Json(json!({
+                                "success": true,
+                                "message": format!("Updated element [{}, {}] = {}", row, col, value_str)
+                            }))
+                        }
+                        Err(e) => {
+                            Json(json!({
+                                "success": false,
+                                "error": format!("Failed to write: {}", e)
+                            }))
+                        }
+                    }
+                }
+                Err(e) => {
+                    Json(json!({
+                        "success": false,
+                        "error": e
+                    }))
+                }
+            }
+        } else {
+            Json(json!({
+                "success": false,
+                "error": "Slave not available in client"
+            }))
+        }
+    } else {
+        Json(json!({
+            "success": false,
+            "error": format!("Parameter index {} not found", idx)
+        }))
+    }
+}
+
+/// Modify a single element in a CalibrationValue
+fn modify_element(value: &mut CalibrationValue, data_type: &CalibrationType, row: usize, col: usize, value_str: &str) -> Result<(), String> {
+    match (value, data_type) {
+        // 1D Arrays - treat as row 0
+        (CalibrationValue::U8Array(arr), CalibrationType::U8Array(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid U8 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        (CalibrationValue::U16Array(arr), CalibrationType::U16Array(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid U16 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        (CalibrationValue::U32Array(arr), CalibrationType::U32Array(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid U32 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        (CalibrationValue::U64Array(arr), CalibrationType::U64Array(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid U64 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        (CalibrationValue::I8Array(arr), CalibrationType::I8Array(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid I8 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        (CalibrationValue::I16Array(arr), CalibrationType::I16Array(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid I16 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        (CalibrationValue::I32Array(arr), CalibrationType::I32Array(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid I32 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        (CalibrationValue::I64Array(arr), CalibrationType::I64Array(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid I64 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        (CalibrationValue::F32Array(arr), CalibrationType::F32Array(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid F32 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        (CalibrationValue::F64Array(arr), CalibrationType::F64Array(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid F64 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        (CalibrationValue::BoolArray(arr), CalibrationType::BoolArray(_)) => {
+            if col < arr.len() {
+                arr[col] = value_str.parse().map_err(|_| "Invalid BOOL value (true/false)")?;
+                Ok(())
+            } else {
+                Err(format!("Index {} out of bounds", col))
+            }
+        }
+        // 2D Matrices
+        (CalibrationValue::U8Matrix(mat), CalibrationType::U8Matrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid U8 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        (CalibrationValue::U16Matrix(mat), CalibrationType::U16Matrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid U16 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        (CalibrationValue::U32Matrix(mat), CalibrationType::U32Matrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid U32 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        (CalibrationValue::U64Matrix(mat), CalibrationType::U64Matrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid U64 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        (CalibrationValue::I8Matrix(mat), CalibrationType::I8Matrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid I8 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        (CalibrationValue::I16Matrix(mat), CalibrationType::I16Matrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid I16 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        (CalibrationValue::I32Matrix(mat), CalibrationType::I32Matrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid I32 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        (CalibrationValue::I64Matrix(mat), CalibrationType::I64Matrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid I64 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        (CalibrationValue::F32Matrix(mat), CalibrationType::F32Matrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid F32 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        (CalibrationValue::F64Matrix(mat), CalibrationType::F64Matrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid F64 value")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        (CalibrationValue::BoolMatrix(mat), CalibrationType::BoolMatrix(_, _)) => {
+            if row < mat.len() && col < mat[row].len() {
+                mat[row][col] = value_str.parse().map_err(|_| "Invalid BOOL value (true/false)")?;
+                Ok(())
+            } else {
+                Err(format!("Index [{}, {}] out of bounds", row, col))
+            }
+        }
+        _ => Err("Type mismatch or unsupported type".to_string()),
+    }
+}
+
+/// Get calibration parameter details (GET /api/cal/detail/:device_id/:idx)
+/// Returns full parameter information for info dialog
+pub async fn cal_detail_api(
+    State(state): State<AppState>,
+    Path((device_id_str, idx)): Path<(String, usize)>,
+) -> impl IntoResponse {
+    // Try to parse as UUID
+    let uuid = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(json!({
+                "success": false,
+                "error": "Invalid device ID"
+            }));
+        }
+    };
+
+    let slave_id = SlaveId(uuid);
+
+    // First try to find as SlaveId
+    if let Some(slave) = state.get_slave(slave_id).await {
+        let cal_manager = slave.cal_manager.read().await;
+        if let Some(param) = cal_manager.params().get(idx) {
+            let param = param.clone();
+            drop(cal_manager);
+
+            // Build detail JSON with axis values from XCP if needed
+            let mut detail = param.to_detail_json(
+                &slave.id.to_string(),
+                &slave.display_name(),
+                idx,
+                slave.is_connected()
+            );
+
+            // Read axis values from XCP if connected and has memory-based axes
+            if slave.is_connected() && param.has_axis() {
+                let client = state.client.lock().await;
+                if let Some(xcp_slave) = client.get_slave(slave_id) {
+                    let xcp_slave_guard = xcp_slave.lock().await;
+                    let axis_values = read_axis_values_from_slave(&xcp_slave_guard, &param).await;
+                    if let serde_json::Value::Object(ref mut map) = detail {
+                        map.insert("axis_values".to_string(), serde_json::json!(axis_values));
+                    }
+                }
+            }
+
+            return Json(json!({
+                "success": true,
+                "detail": detail,
+                "var_type": "calibration"
+            }));
+        }
+    }
+
+    // Try to find as device ID
+    if let Some(device) = state.get_device(&device_id_str).await {
+        let cal_mgr = device.cal_manager.read().await;
+        if let Some(param) = cal_mgr.params().get(idx) {
+            return Json(json!({
+                "success": true,
+                "detail": param.to_detail_json(
+                    &device.id,
+                    &device.name,
+                    idx,
+                    device.connected
+                ),
+                "var_type": "calibration"
+            }));
+        }
+    }
+
+    Json(json!({
+        "success": false,
+        "error": "Parameter not found"
+    }))
+}
+
+/// Get DAQ measurement details (GET /api/daq/detail/:device_id/:idx)
+/// Returns full measurement information for info dialog
+pub async fn daq_detail_api(
+    State(state): State<AppState>,
+    Path((device_id_str, idx)): Path<(String, usize)>,
+) -> impl IntoResponse {
+    // Try to parse as UUID
+    let uuid = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(json!({
+                "success": false,
+                "error": "Invalid device ID"
+            }));
+        }
+    };
+
+    let slave_id = SlaveId(uuid);
+
+    // First try to find as SlaveId
+    if let Some(slave) = state.get_slave(slave_id).await {
+        let daq_manager = slave.daq_manager.read().await;
+        if let Some(meas) = daq_manager.all_measurements().get(idx) {
+            return Json(json!({
+                "success": true,
+                "detail": {
+                    "device_id": slave.id.to_string(),
+                    "device_name": slave.display_name(),
+                    "idx": idx,
+                    "name": meas.name,
+                    "type": meas.data_type.type_name(),
+                    "address": format!("0x{:08X}", meas.address),
+                    "address_ext": meas.address_ext,
+                    "unit": meas.unit.as_deref().unwrap_or("N/A"),
+                    "data_size": format!("{} bytes", meas.size),
+                },
+                "var_type": "measurement"
+            }));
+        }
+    }
+
+    // Try to find as device ID
+    if let Some(device) = state.get_device(&device_id_str).await {
+        let daq_mgr = device.daq_manager.read().await;
+        if let Some(meas) = daq_mgr.all_measurements().get(idx) {
+            return Json(json!({
+                "success": true,
+                "detail": {
+                    "device_id": device.id,
+                    "device_name": device.name,
+                    "idx": idx,
+                    "name": meas.name,
+                    "type": meas.data_type.type_name(),
+                    "address": format!("0x{:08X}", meas.address),
+                    "address_ext": meas.address_ext,
+                    "unit": meas.unit.as_deref().unwrap_or("N/A"),
+                    "data_size": format!("{} bytes", meas.size),
+                },
+                "var_type": "measurement"
+            }));
+        }
+    }
+
+    Json(json!({
+        "success": false,
+        "error": "Measurement not found"
+    }))
 }
