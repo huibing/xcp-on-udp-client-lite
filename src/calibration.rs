@@ -354,12 +354,49 @@ impl CalibrationParam {
             "device_name": device_name,
             "idx": idx,
             "name": self.name,
+            "description": self.description,
             "type": self.data_type.type_name(),
-            "address_hex": format!("{:08X}", self.address),
+            "address": self.address,
+            "address_hex": format!("0x{:08X}", self.address),
+            "address_ext": self.address_ext,
             "connected": connected,
+            "unit": self.unit,
+            "min": self.min,
+            "max": self.max,
             "characteristic_type": self.characteristic_type.as_str(),
             "axis_info": axis_info,
             "storage_order": self.storage_order.as_str(),
+            "data_size": self.data_type.size(),
+        })
+    }
+
+    /// Serialize full parameter details for info dialog.
+    /// Includes all metadata with better formatting for display.
+    pub fn to_detail_json(&self, device_id: &str, device_name: &str, idx: usize, connected: bool) -> serde_json::Value {
+        let axis_info: Vec<serde_json::Value> = self.axis_info.iter().map(|axis| axis.to_json()).collect();
+        let axis_values = self.get_static_axis_values();
+
+        serde_json::json!({
+            "device_id": device_id,
+            "device_name": device_name,
+            "idx": idx,
+            "name": self.name,
+            "description": if self.description.is_empty() { "N/A" } else { &self.description },
+            "type": self.data_type.type_name(),
+            "address": format!("0x{:08X}", self.address),
+            "address_ext": self.address_ext,
+            "connected": connected,
+            "unit": self.unit.as_deref().unwrap_or("N/A"),
+            "range": if self.min.is_some() && self.max.is_some() {
+                format!("{} ~ {}", self.min.unwrap(), self.max.unwrap())
+            } else {
+                "N/A".to_string()
+            },
+            "characteristic_type": self.characteristic_type.as_str(),
+            "axis_info": axis_info,
+            "axis_values": axis_values,
+            "storage_order": self.storage_order.as_str(),
+            "data_size": format!("{} bytes", self.data_type.size()),
         })
     }
 
