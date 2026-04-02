@@ -520,7 +520,7 @@ impl XcpSlave {
         }
 
         // Switch to the write-allowed page
-        self.set_cal_page(segment, new_page, 0x02).await?;
+        self.set_cal_page(segment, new_page, 0x03).await?;
 
         tracing::info!(
             "Switched segment {} to write-allowed page {}",
@@ -628,7 +628,7 @@ impl XcpSlave {
             }
 
             // Switch to the target page
-            match self.set_cal_page(segment, target_page, 0x02).await {
+            match self.set_cal_page(segment, target_page, 0x03).await {
                 Ok(()) => {
                     tracing::info!(
                         "Segment {} switched to {} page {}",
