@@ -20,9 +20,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const PASSWORD_HASH: &str = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918";
 const USERNAME: &str = "admin";
 
-/// Session timeout in seconds (30 minutes)
-const SESSION_TIMEOUT_SECS: u64 = 1800;
-
 /// Global session store for single-user access
 static SESSION: Lazy<RwLock<Session>> = Lazy::new(|| {
     RwLock::new(Session {
@@ -39,6 +36,7 @@ static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone)]
 struct Session {
     token: Option<String>,
+    #[allow(dead_code)]
     created_at: u64,
     client_ip: Option<String>,
 }
@@ -46,27 +44,17 @@ struct Session {
 /// Check if there is already an active session (another user logged in)
 pub fn has_active_session() -> bool {
     let session = SESSION.read().unwrap();
-    if let Some(ref _token) = session.token {
-        // Check if session is still valid (not expired)
-        let now = current_timestamp();
-        if now - session.created_at < SESSION_TIMEOUT_SECS {
-            return true;
-        }
-    }
-    false
+    session.token.is_some()
 }
 
 /// Get info about the current active session
 pub fn get_active_session_info() -> Option<(String, u64)> {
     let session = SESSION.read().unwrap();
-    if let Some(ref _token) = session.token {
-        let now = current_timestamp();
-        if now - session.created_at < SESSION_TIMEOUT_SECS {
-            return Some((
-                session.client_ip.clone().unwrap_or_else(|| "unknown".to_string()),
-                session.created_at,
-            ));
-        }
+    if session.token.is_some() {
+        return Some((
+            session.client_ip.clone().unwrap_or_else(|| "unknown".to_string()),
+            session.created_at,
+        ));
     }
     None
 }
@@ -76,13 +64,7 @@ pub fn is_valid_session(token: &str) -> bool {
     let session = SESSION.read().unwrap();
 
     if let Some(ref valid_token) = session.token {
-        if valid_token == token {
-            // Check expiration
-            let now = current_timestamp();
-            if now - session.created_at < SESSION_TIMEOUT_SECS {
-                return true;
-            }
-        }
+        return valid_token == token;
     }
     false
 }
@@ -234,9 +216,9 @@ mod tests {
 
     #[test]
     fn test_single_user_restriction_after_logout_new_user_can_login() {
-        // Given: First user is logged in
+        // Given: First user is logged in (use unique IPs to avoid parallel test conflicts)
         clear_session();
-        let first_token = try_create_session("192.168.1.10").unwrap();
+        let first_token = try_create_session("10.1.1.10").unwrap();
         assert!(is_valid_session(&first_token));
 
         // When: First user logs out
@@ -247,7 +229,7 @@ mod tests {
         assert!(!has_active_session());
 
         // And: New user can now login
-        let result = try_create_session("192.168.1.20");
+        let result = try_create_session("10.1.1.20");
         assert!(result.is_ok());
         let new_token = result.unwrap();
         assert!(is_valid_session(&new_token));
@@ -273,35 +255,6 @@ mod tests {
         assert!(info.is_some(), "Should have active session info");
         let (ip, _timestamp) = info.unwrap();
         assert_eq!(ip, unique_ip);
-
-        // Cleanup
-        clear_session();
-    }
-
-    #[test]
-    fn test_session_expiration_allows_new_login() {
-        // Note: This test manipulates internal state to simulate expiration
-        // In real scenario, session would expire after 30 minutes
-
-        // Given: User has a valid session (use unique IPs)
-        clear_session();
-        let first_ip = "192.168.3.10";
-        let second_ip = "192.168.3.20";
-        let _token = try_create_session(first_ip).unwrap();
-        assert!(has_active_session(), "Should have active session after creation");
-
-        // When: Simulate session expiration by manipulating timestamp
-        {
-            let mut session = SESSION.write().unwrap();
-            session.created_at = 0; // Very old timestamp
-        }
-
-        // Then: Session should be considered expired
-        assert!(!has_active_session(), "Session should be expired with old timestamp");
-
-        // And: New user should be able to login
-        let result = try_create_session(second_ip);
-        assert!(result.is_ok(), "New user should be able to login after expiration");
 
         // Cleanup
         clear_session();
