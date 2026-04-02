@@ -960,11 +960,11 @@ function renderInfoContent(detail, varType) {
                 html += `Points: ${axis.num_points}, Range: ${axis.min} ~ ${axis.max}`;
 
                 // Use axis_values from top-level (includes XCP-read values) or axis.values (static)
-                const axisValues = (detail.axis_values && detail.axis_values[i]) ? detail.axis_values[i] : axis.values;
+                {{!-- const axisValues = (detail.axis_values && detail.axis_values[i]) ? detail.axis_values[i] : axis.values;
                 if (axisValues && axisValues.length > 0) {
                     const displayCount = Math.min(axisValues.length, 8);
                     html += `<br><span style="color: #888; font-size: 0.85em;">Values: ${axisValues.slice(0, displayCount).map(v => formatAxisValue(v)).join(', ')}${axisValues.length > displayCount ? '...' : ''}</span>`;
-                }
+                } --}}
                 html += '</td></tr>';
             });
         }
