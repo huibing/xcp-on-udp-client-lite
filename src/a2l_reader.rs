@@ -625,10 +625,39 @@ impl A2lReader {
         ch: &a2lfile::Characteristic,
         module: &a2lfile::Module,
     ) -> Vec<AxisInfo> {
-        ch.axis_descr
+        let axis_count = ch.axis_descr.len();
+        tracing::debug!(
+            "Parsing axis info for '{}': {} AXIS_DESCR blocks, characteristic_type={:?}",
+            ch.get_name(),
+            axis_count,
+            ch.characteristic_type
+        );
+
+        let result: Vec<AxisInfo> = ch.axis_descr
             .iter()
-            .filter_map(|axis_descr| self.parse_single_axis_info(axis_descr, module))
-            .collect()
+            .enumerate()
+            .filter_map(|(i, axis_descr)| {
+                let info = self.parse_single_axis_info(axis_descr, module);
+                if info.is_none() {
+                    tracing::warn!(
+                        "Failed to parse AXIS_DESCR[{}] for '{}': attribute={:?}",
+                        i,
+                        ch.get_name(),
+                        axis_descr.attribute
+                    );
+                }
+                info
+            })
+            .collect();
+
+        tracing::debug!(
+            "Parsed {} axis info entries for '{}', characteristic_type={:?}",
+            result.len(),
+            ch.get_name(),
+            ch.characteristic_type
+        );
+
+        result
     }
 
     /// Parse a single AXIS_DESCR block into AxisInfo
@@ -642,6 +671,13 @@ impl A2lReader {
         let min = axis_descr.lower_limit;
         let max = axis_descr.upper_limit;
 
+        tracing::debug!(
+            "parse_single_axis_info: name='{}', num_points={}, attribute={:?}",
+            name,
+            num_points,
+            axis_descr.attribute
+        );
+
         // Get unit from phys_unit or conversion method
         let unit = axis_descr
             .phys_unit
@@ -652,11 +688,13 @@ impl A2lReader {
         // Determine the axis point source
         let point_source = if let Some(fix_axis_par_list) = &axis_descr.fix_axis_par_list {
             // FIX_AXIS_PAR_LIST: explicit list of axis values
+            tracing::debug!("  -> Using FIX_AXIS_PAR_LIST with {} values", fix_axis_par_list.axis_pts_value_list.len());
             AxisPointSource::Explicit {
                 values: fix_axis_par_list.axis_pts_value_list.clone(),
             }
         } else if let Some(fix_axis_par_dist) = &axis_descr.fix_axis_par_dist {
             // FIX_AXIS_PAR_DIST: offset + i * distance
+            tracing::debug!("  -> Using FIX_AXIS_PAR_DIST: offset={}, distance={}", fix_axis_par_dist.offset, fix_axis_par_dist.distance);
             AxisPointSource::CalculatedDist {
                 offset: fix_axis_par_dist.offset as f64,
                 distance: fix_axis_par_dist.distance as f64,
@@ -664,6 +702,7 @@ impl A2lReader {
             }
         } else if let Some(fix_axis_par) = &axis_descr.fix_axis_par {
             // FIX_AXIS_PAR: offset + i * 2^shift
+            tracing::debug!("  -> Using FIX_AXIS_PAR: offset={}, shift={}", fix_axis_par.offset, fix_axis_par.shift);
             AxisPointSource::Calculated {
                 offset: fix_axis_par.offset as f64,
                 shift: fix_axis_par.shift as i32,
@@ -671,16 +710,20 @@ impl A2lReader {
             }
         } else if let Some(axis_pts_ref) = &axis_descr.axis_pts_ref {
             // AXIS_PTS_REF: reference to AXIS_PTS block
+            tracing::debug!("  -> Using AXIS_PTS_REF: {}", axis_pts_ref.axis_points);
             self.resolve_axis_pts_reference(&axis_pts_ref.axis_points, module, num_points)
                 .unwrap_or_else(|| {
                     // Fallback: create from limits
+                    tracing::debug!("  -> Fallback to limits for AXIS_PTS_REF");
                     Self::create_fallback_axis_source(min, max, num_points)
                 })
         } else {
             // No explicit axis source - create from limits
+            tracing::debug!("  -> Using fallback from limits: min={}, max={}", min, max);
             Self::create_fallback_axis_source(min, max, num_points)
         };
 
+        tracing::debug!("  -> Created AxisInfo for '{}'", name);
         Some(AxisInfo {
             name,
             unit,
