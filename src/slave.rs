@@ -1219,6 +1219,83 @@ impl XcpSlave {
         Ok(())
     }
 
+    /// Download (write) data to current MTA using sequential DOWNLOAD commands
+    ///
+    /// Unlike the `download` method which uses DOWNLOAD + DOWNLOAD_NEXT for block transfer,
+    /// this method uses multiple DOWNLOAD commands sequentially. This is useful for slaves
+    /// that don't support the DOWNLOAD_NEXT command.
+    ///
+    /// How it works:
+    /// - SET_MTA must be called before this method (not done internally)
+    /// - Each DOWNLOAD command writes up to (MAX_CTO - 2) bytes
+    /// - MTA is automatically incremented by the slave after each write
+    /// - Each DOWNLOAD expects a positive response before sending the next
+    ///
+    /// # Arguments
+    /// * `data` - Data bytes to write
+    ///
+    /// # Example
+    /// For 200 bytes with max_cto=64:
+    /// - Max per packet: 64 - 2 = 62 bytes
+    /// - Packet 1: DOWNLOAD(62 bytes) -> response
+    /// - Packet 2: DOWNLOAD(62 bytes) -> response
+    /// - Packet 3: DOWNLOAD(62 bytes) -> response
+    /// - Packet 4: DOWNLOAD(14 bytes) -> response
+    pub async fn download_sequential(&self, data: &[u8]) -> Result<(), SlaveError> {
+        let max_block = self.max_download_block_size();
+        let total_size = data.len();
+        let num_packets = (total_size + max_block - 1) / max_block;
+
+        tracing::info!(
+            "download_sequential: {} bytes in {} packets (max_block={})",
+            total_size, num_packets, max_block
+        );
+
+        for (i, chunk) in data.chunks(max_block).enumerate() {
+            let chunk_size = chunk.len();
+            tracing::trace!(
+                "download_sequential: packet {} - {} bytes",
+                i + 1, chunk_size
+            );
+
+            let response = self
+                .send_command_and_wait(&commands::download(chunk_size as u8, chunk))
+                .await?;
+
+            let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+            match parsed {
+                Response::Res(_) => {}
+                Response::Err(err) => {
+                    tracing::error!("download_sequential: packet {} failed with error {:?}", i + 1, err);
+                    return Err(SlaveError::Protocol(err));
+                }
+                _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            }
+        }
+
+        tracing::info!("download_sequential: completed successfully");
+        Ok(())
+    }
+
+    /// Write memory using sequential DOWNLOAD commands (no DOWNLOAD_NEXT)
+    ///
+    /// This is an alternative to `write_memory` for slaves that don't support
+    /// the DOWNLOAD_NEXT block transfer mode.
+    ///
+    /// Uses SET_MTA once, then multiple DOWNLOAD commands.
+    pub async fn write_memory_sequential(&self, mta: Mta, data: &[u8]) -> Result<(), SlaveError> {
+        tracing::info!(
+            "write_memory_sequential: {} bytes to address 0x{:08X} (ext={})",
+            data.len(), mta.address, mta.extension
+        );
+
+        // Set MTA once at the beginning
+        self.set_mta(mta).await?;
+
+        // Use sequential DOWNLOAD commands
+        self.download_sequential(data).await
+    }
+
     /// Read a U32 value from memory
     pub async fn read_u32(&self, mta: Mta) -> Result<u32, SlaveError> {
         let data = self.read_memory(mta, 4).await?;
@@ -1271,6 +1348,21 @@ impl XcpSlave {
         }
 
         Ok(())
+    }
+
+    /// Write a U8 array to memory using sequential DOWNLOAD commands
+    ///
+    /// This is an alternative to `write_u8_array` for slaves that don't support
+    /// the DOWNLOAD_NEXT block transfer mode.
+    ///
+    /// Uses SET_MTA once, then multiple DOWNLOAD commands with proper chunk sizing.
+    pub async fn write_u8_array_sequential(&self, mta: Mta, data: &[u8]) -> Result<(), SlaveError> {
+        tracing::info!(
+            "write_u8_array_sequential: {} bytes to address 0x{:08X} (ext={})",
+            data.len(), mta.address, mta.extension
+        );
+        self.set_mta(mta).await?;
+        self.download_sequential(data).await
     }
 
     /// Load A2L file for this slave
