@@ -25,6 +25,7 @@ impl TemplateEngine {
         let mut hbs = Handlebars::new();
 
         // Register all embedded templates
+        let mut template_count = 0;
         for file in Templates::iter() {
             let filename = file.as_ref();
             // Extract template name from filename (e.g., "base.hbs" -> "base")
@@ -34,9 +35,24 @@ impl TemplateEngine {
                         .expect("Template is not valid UTF-8");
                     hbs.register_template_string(name, content_str)
                         .unwrap_or_else(|e| panic!("Failed to register {} template: {}", name, e));
+                    template_count += 1;
                 }
             }
         }
+
+        // Verify critical templates exist
+        if template_count == 0 {
+            panic!("No templates found! The binary may be corrupted or templates were not embedded correctly.");
+        }
+
+        // Verify essential templates
+        for essential in &["base", "login", "dashboard"] {
+            if hbs.get_template(essential).is_none() {
+                panic!("Essential template '{}' not found! Template embedding may have failed.", essential);
+            }
+        }
+
+        tracing::info!("Loaded {} embedded templates", template_count);
 
         Self { hbs }
     }
