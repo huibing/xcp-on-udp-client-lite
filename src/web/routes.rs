@@ -226,6 +226,8 @@ pub async fn disconnect_api(State(state): State<AppState>) -> impl IntoResponse 
             state.set_error(format!("Disconnect error: {}", e)).await;
         } else {
             state.remove_slave_state(id).await;
+            // Update device connection status
+            state.update_device_connection_by_slave_id(id, false).await;
 
             // Select another slave if available
             let remaining = state.all_slaves().await;
@@ -257,6 +259,8 @@ pub async fn disconnect_slave_api(
             state.set_error(format!("Disconnect error: {}", e)).await;
         } else {
             state.remove_slave_state(slave_id).await;
+            // Update device connection status
+            state.update_device_connection_by_slave_id(slave_id, false).await;
             state.set_status("Slave disconnected".to_string()).await;
         }
     } else {

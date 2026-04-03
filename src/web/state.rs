@@ -286,6 +286,17 @@ impl AppState {
         }
     }
 
+    /// Update device connection status by slave ID
+    pub async fn update_device_connection_by_slave_id(&self, slave_id: SlaveId, connected: bool) {
+        let mut devices = self.devices.write().await;
+        if let Some(device) = devices.iter_mut().find(|d| d.slave_id == Some(slave_id)) {
+            device.connected = connected;
+            if !connected {
+                device.slave_id = None;
+            }
+        }
+    }
+
     /// Remove a device
     pub async fn remove_device(&self, id: &str) {
         self.devices.write().await.retain(|d| d.id != id);
