@@ -508,6 +508,10 @@ function renderSelectedVars() {
     tbody.innerHTML = selectedVars.map((v, idx) => {
         const key = `${v.device_id}:${v.name}`;
         const isComplex = isComplexType(v.type);
+        // Check if device is in working page mode
+        const devicePageMode = pageModeData.find(d => d.device_id === v.device_id);
+        const isWorking = devicePageMode && devicePageMode.page_mode === 'working';
+        const editableAttr = (!isComplex && isWorking) ? `data-editable="true" data-device-id="${v.device_id}" data-idx="${v.idx}" style="cursor: pointer;" title="Click to edit"` : '';
         return `
             <tr>
                 <td>
@@ -516,11 +520,11 @@ function renderSelectedVars() {
                 </td>
                 <td>${v.type}</td>
                 <td style="font-family: monospace;">0x${v.address_hex}</td>
-                <td id="value-${key.replace(/:/g, '-')}">-</td>
+                <td id="value-${key.replace(/:/g, '-')}" ${editableAttr}>-</td>
                 <td>
                     <div class="btn-group">
                         <button onclick="readVar('${v.device_id}', ${v.idx})" title="Read">R</button>
-                        ${isComplex ? `<button onclick="openMatrixEditor('${v.device_id}', ${v.idx}, '${escapeHtml(v.name)}')" title="Table View">📊</button>` : `<button onclick="writeVar('${v.device_id}', ${v.idx}, '${escapeHtml(v.name)}')" title="Write">W</button>`}
+                        ${isComplex ? `<button onclick="openMatrixEditor('${v.device_id}', ${v.idx}, '${escapeHtml(v.name)}')" title="Table View">📊</button>` : ''}
                         <button onclick="openInfoModal('cal', '${v.device_id}', ${v.idx}, '${escapeHtml(v.name)}')" title="Info">ℹ️</button>
                         <button class="secondary" onclick="removeVar('${key}')" title="Remove">&times;</button>
                     </div>
@@ -528,6 +532,33 @@ function renderSelectedVars() {
             </tr>
         `;
     }).join('');
+
+    // Setup click handlers for editable cells using event delegation
+    setupEditableCellHandlers();
+}
+
+// Setup click handlers for editable value cells
+let editableClickHandler = null;
+
+function setupEditableCellHandlers() {
+    const tbody = document.getElementById('selectedVars');
+
+    // Remove existing handler if any
+    if (editableClickHandler) {
+        tbody.removeEventListener('click', editableClickHandler);
+    }
+
+    // Create new handler
+    editableClickHandler = (e) => {
+        const cell = e.target.closest('td[data-editable="true"]');
+        if (cell) {
+            const deviceId = cell.dataset.deviceId;
+            const idx = parseInt(cell.dataset.idx, 10);
+            makeEditable(deviceId, idx, cell);
+        }
+    };
+
+    tbody.addEventListener('click', editableClickHandler);
 }
 
 // Check if type is complex (array/matrix/curve/map)
@@ -834,8 +865,99 @@ async function readVar(deviceId, idx) {
     }
 }
 
-function writeVar(deviceId, idx, name) {
-    window.location.href = `/cal/write/${deviceId}/${idx}`;
+// Inline editing for scalar values in working page mode
+async function makeEditable(deviceId, idx, cell) {
+    // Don't create another input if already editing
+    if (cell.querySelector('input')) return;
+
+    const currentValue = cell.textContent.trim();
+
+    // If value is "-" (not read yet), read it first
+    if (currentValue === '-') {
+        cell.innerHTML = '<span style="color: #ffaa00;">Reading...</span>';
+        try {
+            const response = await fetch(`/api/cal/read/${deviceId}/${idx}`);
+            const data = await response.json();
+            if (data.success) {
+                cell.textContent = data.value;
+                cell.style.color = '#00ff88';
+                // Now proceed to edit with the read value
+                createEditInput(deviceId, idx, cell, data.value.toString());
+            } else {
+                cell.textContent = '-';
+                alert('Failed to read value: ' + data.error);
+            }
+        } catch (e) {
+            cell.textContent = '-';
+            alert('Failed to read: ' + e.message);
+        }
+        return;
+    }
+
+    createEditInput(deviceId, idx, cell, currentValue);
+}
+
+function createEditInput(deviceId, idx, cell, currentValue) {
+    const originalValue = currentValue;
+
+    // Create input element
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = currentValue;
+    input.style.cssText = 'width: 80px; background: #1e1e1e; border: 1px solid #4CAF50; color: #00ff88; padding: 0.25rem; text-align: center;';
+
+    // Clear cell and add input
+    cell.textContent = '';
+    cell.appendChild(input);
+    input.focus();
+    input.select();
+
+    // Save on blur
+    input.addEventListener('blur', () => {
+        saveInlineEdit(deviceId, idx, cell, input.value, originalValue);
+    });
+
+    // Save on Enter, cancel on Escape
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            input.blur();
+        } else if (e.key === 'Escape') {
+            cell.textContent = originalValue;
+        }
+    });
+}
+
+async function saveInlineEdit(deviceId, idx, cell, newValue, originalValue) {
+    if (newValue === originalValue) {
+        cell.textContent = originalValue;
+        return;
+    }
+
+    cell.innerHTML = '<span style="color: #ffaa00;">Saving...</span>';
+
+    try {
+        // Use write-element API with row=0, col=0 for scalar values
+        const response = await fetch(`/api/cal/write-element/${deviceId}/${idx}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ row: 0, col: 0, value: newValue })
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            cell.textContent = newValue;
+            cell.style.color = '#4CAF50';
+            setTimeout(() => {
+                cell.style.color = '#00ff88';
+            }, 1000);
+        } else {
+            cell.textContent = originalValue;
+            alert('Error: ' + data.error);
+        }
+    } catch (e) {
+        cell.textContent = originalValue;
+        alert('Failed to write: ' + e.message);
+    }
 }
 
 function removeVar(key) {
