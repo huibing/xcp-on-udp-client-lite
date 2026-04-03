@@ -1173,10 +1173,16 @@ async fn write_calibration_to_slave(
     use crate::calibration::CalibrationType;
     use crate::protocol::Mta;
 
+    tracing::info!(
+        "write_calibration_to_slave: param='{}' type={:?} address=0x{:08X}",
+        param.name, param.data_type, param.address
+    );
+
     let mta = Mta::new(param.address, param.address_ext);
 
     // Convert value to bytes
     let data: Vec<u8> = match (value, &param.data_type) {
+        // Scalar types
         (CalibrationValue::U8(v), CalibrationType::U8) => vec![*v],
         (CalibrationValue::U16(v), CalibrationType::U16) => v.to_le_bytes().to_vec(),
         (CalibrationValue::U32(v), CalibrationType::U32) => v.to_le_bytes().to_vec(),
@@ -1188,15 +1194,91 @@ async fn write_calibration_to_slave(
         (CalibrationValue::F32(v), CalibrationType::F32) => v.to_le_bytes().to_vec(),
         (CalibrationValue::F64(v), CalibrationType::F64) => v.to_le_bytes().to_vec(),
         (CalibrationValue::Bool(v), CalibrationType::Bool) => vec![if *v { 1 } else { 0 }],
+        // 1D Array types
+        (CalibrationValue::U8Array(arr), CalibrationType::U8Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::U16Array(arr), CalibrationType::U16Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::U32Array(arr), CalibrationType::U32Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::U64Array(arr), CalibrationType::U64Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I8Array(arr), CalibrationType::I8Array(_)) => {
+            arr.iter().map(|v| *v as u8).collect()
+        }
+        (CalibrationValue::I16Array(arr), CalibrationType::I16Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I32Array(arr), CalibrationType::I32Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I64Array(arr), CalibrationType::I64Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::F32Array(arr), CalibrationType::F32Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::F64Array(arr), CalibrationType::F64Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::BoolArray(arr), CalibrationType::BoolArray(_)) => {
+            arr.iter().map(|v| if *v { 1u8 } else { 0u8 }).collect()
+        }
+        // 2D Matrix types - flatten row by row
+        (CalibrationValue::U8Matrix(mat), CalibrationType::U8Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().copied()).collect()
+        }
+        (CalibrationValue::U16Matrix(mat), CalibrationType::U16Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
+        }
+        (CalibrationValue::U32Matrix(mat), CalibrationType::U32Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
+        }
+        (CalibrationValue::U64Matrix(mat), CalibrationType::U64Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
+        }
+        (CalibrationValue::I8Matrix(mat), CalibrationType::I8Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().map(|v| *v as u8)).collect()
+        }
+        (CalibrationValue::I16Matrix(mat), CalibrationType::I16Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
+        }
+        (CalibrationValue::I32Matrix(mat), CalibrationType::I32Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
+        }
+        (CalibrationValue::I64Matrix(mat), CalibrationType::I64Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
+        }
+        (CalibrationValue::F32Matrix(mat), CalibrationType::F32Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
+        }
+        (CalibrationValue::F64Matrix(mat), CalibrationType::F64Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
+        }
+        (CalibrationValue::BoolMatrix(mat), CalibrationType::BoolMatrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().map(|v| if *v { 1u8 } else { 0u8 })).collect()
+        }
         _ => return Err(format!("Value type mismatch for {:?}", param.data_type)),
     };
 
-    // Write data using SHORT_DOWNLOAD for small writes
+    tracing::info!(
+        "write_calibration_to_slave: writing {} bytes to 0x{:08X} (ext={})",
+        data.len(), mta.address, mta.extension
+    );
+
+    // Write data using sequential DOWNLOAD commands (no DOWNLOAD_NEXT)
+    // This is more compatible with slaves that don't support block transfer
     if data.len() <= 255 {
-        slave.write_memory(mta, &data).await.map_err(|e| e.to_string())
+        tracing::info!("write_calibration_to_slave: using write_memory_sequential (small data)");
+        slave.write_memory_sequential(mta, &data).await.map_err(|e| e.to_string())
     } else {
-        // Use set_mta + download for larger writes
-        slave.write_u8_array(mta, &data).await.map_err(|e| e.to_string())
+        tracing::info!("write_calibration_to_slave: using write_u8_array_sequential (large data)");
+        // Use sequential download for larger writes
+        slave.write_u8_array_sequential(mta, &data).await.map_err(|e| e.to_string())
     }
 }
 
@@ -2621,6 +2703,51 @@ fn modify_element(value: &mut CalibrationValue, data_type: &CalibrationType, row
             } else {
                 Err(format!("Index [{}, {}] out of bounds", row, col))
             }
+        }
+        // Scalar types - row and col are ignored, just replace the value
+        (CalibrationValue::U8(v), CalibrationType::U8) => {
+            *v = value_str.parse().map_err(|_| "Invalid U8 value")?;
+            Ok(())
+        }
+        (CalibrationValue::U16(v), CalibrationType::U16) => {
+            *v = value_str.parse().map_err(|_| "Invalid U16 value")?;
+            Ok(())
+        }
+        (CalibrationValue::U32(v), CalibrationType::U32) => {
+            *v = value_str.parse().map_err(|_| "Invalid U32 value")?;
+            Ok(())
+        }
+        (CalibrationValue::U64(v), CalibrationType::U64) => {
+            *v = value_str.parse().map_err(|_| "Invalid U64 value")?;
+            Ok(())
+        }
+        (CalibrationValue::I8(v), CalibrationType::I8) => {
+            *v = value_str.parse().map_err(|_| "Invalid I8 value")?;
+            Ok(())
+        }
+        (CalibrationValue::I16(v), CalibrationType::I16) => {
+            *v = value_str.parse().map_err(|_| "Invalid I16 value")?;
+            Ok(())
+        }
+        (CalibrationValue::I32(v), CalibrationType::I32) => {
+            *v = value_str.parse().map_err(|_| "Invalid I32 value")?;
+            Ok(())
+        }
+        (CalibrationValue::I64(v), CalibrationType::I64) => {
+            *v = value_str.parse().map_err(|_| "Invalid I64 value")?;
+            Ok(())
+        }
+        (CalibrationValue::F32(v), CalibrationType::F32) => {
+            *v = value_str.parse().map_err(|_| "Invalid F32 value")?;
+            Ok(())
+        }
+        (CalibrationValue::F64(v), CalibrationType::F64) => {
+            *v = value_str.parse().map_err(|_| "Invalid F64 value")?;
+            Ok(())
+        }
+        (CalibrationValue::Bool(v), CalibrationType::Bool) => {
+            *v = value_str.parse().map_err(|_| "Invalid BOOL value (true/false)")?;
+            Ok(())
         }
         _ => Err("Type mismatch or unsupported type".to_string()),
     }
