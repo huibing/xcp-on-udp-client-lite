@@ -6,7 +6,7 @@
 //! - Event system for monitoring slave state changes
 
 use crate::protocol::{
-    commands, parse_response, ConnectInfo, ErrorCode, Mta, Response,
+    ConnectInfo, ErrorCode, Mta,
 };
 use crate::slave::{SlaveError, SlaveEvent, SlaveId, SlaveInfo, XcpSlave};
 use crate::transport::{TransportConfig, TransportError};
@@ -449,28 +449,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::get_daq_resolution_info()).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(data) if data.len() == 7 => Ok(DAQResolutionInfo {
-                odt_entry_granularity_daq: data[0],
-                max_odt_entry_size_daq: data[1],
-                odt_entry_granularity_stim: data[2],
-                max_odt_entry_size_stim: data[3],
-                timestamp_mode: data[4],
-                timestamp_ticks: u16::from_le_bytes([data[5], data[6]]),
-            }),
-            Response::Res(data) => Err(XcpError::InvalidResponse(format!(
-                "Invalid response length: {}",
-                data.len()
-            ))),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.get_daq_resolution_info().await.map_err(|e| e.into())
     }
 
     /// Get DAQ processor info from current slave
@@ -478,22 +457,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::get_daq_processor_info()).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(data) if data.len() == 7 => Ok(DAQProcessorInfo {
-                daq_properties: data[0],
-                max_daq: u16::from_le_bytes([data[1], data[2]]),
-                max_event_channel: u16::from_le_bytes([data[3], data[4]]),
-                min_daq: data[5],
-                daq_key_byte: data[6],
-            }),
-            _ => Err(XcpError::InvalidResponse("Invalid response length".to_string())),
-        }
+        slave.get_daq_processor_info().await.map_err(|e| e.into())
     }
 
     /// Get DAQ clock from current slave
@@ -501,24 +465,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::get_daq_clock()).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(data) if data.len() >= 7 => {
-                let ts = u32::from_le_bytes([data[3], data[4], data[5], data[6]]);
-                Ok(ts)
-            }
-            Response::Res(data) => Err(XcpError::InvalidResponse(format!(
-                "Invalid DAQ clock response length: {}",
-                data.len()
-            ))),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.get_daq_clock().await.map_err(|e| e.into())
     }
 
     /// Free DAQ resources on current slave
@@ -526,17 +473,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::free_daq()).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.free_daq().await.map_err(|e| e.into())
     }
 
     /// Allocate DAQ lists on current slave
@@ -544,17 +481,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::alloc_daq(daq_count)).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.alloc_daq(daq_count).await.map_err(|e| e.into())
     }
 
     /// Allocate ODTs on current slave
@@ -562,17 +489,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::alloc_odt(daq_list, odt_count)).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.alloc_odt(daq_list, odt_count).await.map_err(|e| e.into())
     }
 
     /// Allocate ODT entries on current slave
@@ -585,17 +502,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::alloc_odt_entry(daq_list, odt, entry_count)).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.alloc_odt_entry(daq_list, odt, entry_count).await.map_err(|e| e.into())
     }
 
     /// Set DAQ pointer on current slave
@@ -603,17 +510,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::set_daq_ptr(daq_list, odt, entry)).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.set_daq_ptr(daq_list, odt, entry).await.map_err(|e| e.into())
     }
 
     /// Write DAQ entry on current slave
@@ -621,17 +518,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::write_daq(bit_offset, mta, data_size)).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.write_daq(bit_offset, mta, data_size).await.map_err(|e| e.into())
     }
 
     /// Set DAQ list mode on current slave
@@ -646,18 +533,8 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::set_daq_list_mode(
-            mode, daq_list, event_channel, prescaler, priority,
-        )).await.map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.set_daq_list_mode(mode, daq_list, event_channel, prescaler, priority)
+            .await.map_err(|e| e.into())
     }
 
     /// Start/stop DAQ list on current slave
@@ -665,17 +542,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::start_stop_daq_list(mode, daq_list)).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.start_stop_daq_list(mode, daq_list).await.map_err(|e| e.into())
     }
 
     /// Start/stop synch on current slave
@@ -683,17 +550,7 @@ impl XcpClient {
         let slave = self.current_slave()
             .ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-
-        let response = slave.send_command_and_wait(&commands::start_stop_synch(mode)).await
-            .map_err(|e| XcpError::from(e))?;
-
-        let parsed = parse_response(&response).map_err(|e| XcpError::ParseError(e))?;
-
-        match parsed {
-            Response::Res(_) => Ok(()),
-            Response::Err(err) => Err(XcpError::Protocol(err)),
-            _ => Err(XcpError::InvalidResponse("Unexpected response type".to_string())),
-        }
+        slave.start_stop_synch(mode).await.map_err(|e| e.into())
     }
 }
 

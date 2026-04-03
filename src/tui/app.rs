@@ -1356,7 +1356,18 @@ impl App {
         }
 
         let client_guard = client.lock().await;
-        let result = daq_manager.lock().await.start(&client_guard, 1000).await;
+        // Get the current slave from client
+        let xcp_slave = match client_guard.current_slave() {
+            Some(s) => s,
+            None => {
+                self.loading = false;
+                self.error = Some("No slave connected".to_string());
+                return Ok(());
+            }
+        };
+        let xcp_slave_guard = xcp_slave.lock().await;
+        let result = daq_manager.lock().await.start(&*xcp_slave_guard, 1000).await;
+        drop(xcp_slave_guard);
         drop(client_guard);
 
         self.loading = false;
@@ -1381,7 +1392,17 @@ impl App {
 
         let result = {
             let client_guard = self.client.lock().await;
-            daq_manager.lock().await.stop(&client_guard).await
+            // Get the current slave from client
+            let xcp_slave = match client_guard.current_slave() {
+                Some(s) => s,
+                None => {
+                    self.loading = false;
+                    self.error = Some("No slave connected".to_string());
+                    return Ok(());
+                }
+            };
+            let xcp_slave_guard = xcp_slave.lock().await;
+            daq_manager.lock().await.stop(&*xcp_slave_guard).await
         };
 
         self.loading = false;

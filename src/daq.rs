@@ -6,8 +6,9 @@
 //! 3. Receive and parse DTO packets from slave
 
 use crate::a2l_reader::{A2lDataType, A2lMeasurement, A2lReader};
-use crate::client::{DAQResolutionInfo, XcpClient};
+use crate::client::DAQResolutionInfo;
 use crate::protocol::Mta;
+use crate::slave::XcpSlave;
 // Note: chrono not used - timestamps are raw slave clock values, not UTC time
 use serde::Serialize;
 use std::collections::HashMap;
@@ -821,10 +822,10 @@ impl DaqManager {
         self.latest_sample.read().await.clone()
     }
 
-    pub async fn get_timestamp_mode(&mut self, client: &XcpClient) -> Result<(), String>{
+    pub async fn get_timestamp_mode(&mut self, slave: &XcpSlave) -> Result<(), String>{
         tracing::trace!("Getting timestamp mode...");
         // Get timestamp mode from slave through GET_DAQ_RESOLUTION_INFO
-        let daqresolution_info = client.get_daq_resolution_info().await.map_err(|e| format!("GET_DAQ_RESOLUTION_INFO failed: {}", e))?;
+        let daqresolution_info = slave.get_daq_resolution_info().await.map_err(|e| format!("GET_DAQ_RESOLUTION_INFO failed: {}", e))?;
         let timestamp_mode = daqresolution_info.timestamp_mode;
         self.timestamp_fixed = timestamp_mode & 0b1000 == 0b1000;
         let timestamp_size_bits = timestamp_mode & 0b0111;
@@ -851,9 +852,9 @@ impl DaqManager {
         Ok(())
     }
 
-    pub async fn get_daq_processor_info(&self, client: &XcpClient) -> Result<IdentificationFieldType, String> { 
+    pub async fn get_daq_processor_info(&self, slave: &XcpSlave) -> Result<IdentificationFieldType, String> {
         tracing::trace!("Getting DAQ processor info...");
-        let daq_processor_info = client.get_daq_processor_info().await.map_err(|e| format!("GET_DAQ_PROCESSOR_INFO failed: {}", e))?;
+        let daq_processor_info = slave.get_daq_processor_info().await.map_err(|e| format!("GET_DAQ_PROCESSOR_INFO failed: {}", e))?;
         let daq_key_byte = daq_processor_info.daq_key_byte;
         tracing::info!("DAQ key byte: {}", daq_key_byte);
         let bits = (daq_key_byte & 0b11000000) >> 6;
@@ -893,13 +894,13 @@ impl DaqManager {
     /// 7. SET_DAQ_PTR + WRITE_DAQ - Configure each entry
     /// 8. SET_DAQ_LIST_MODE - Set mode and event channel
     /// 9. Build DaqConfiguration for decoding
-    pub async fn configure(&mut self, client: &XcpClient) -> Result<(), String> {
-        let identification_field_type = self.get_daq_processor_info(client).await?;
+    pub async fn configure(&mut self, slave: &XcpSlave) -> Result<(), String> {
+        let identification_field_type = self.get_daq_processor_info(slave).await?;
         self.indentification_field_type = identification_field_type.clone();
-        self.get_timestamp_mode(client).await?;
+        self.get_timestamp_mode(slave).await?;
 
         // Get DAQ resolution info for ODT entry limits
-        let daq_resolution = client.get_daq_resolution_info().await
+        let daq_resolution = slave.get_daq_resolution_info().await
             .map_err(|e| format!("GET_DAQ_RESOLUTION_INFO failed: {}", e))?;
         self.daq_resolution = Some(daq_resolution);
 
@@ -926,7 +927,7 @@ impl DaqManager {
 
         // 1. FREE_DAQ - Release any existing DAQ configuration
         tracing::trace!("FREE_DAQ");
-        client.free_daq().await.map_err(|e| format!("FREE_DAQ failed: {}", e))?;
+        slave.free_daq().await.map_err(|e| format!("FREE_DAQ failed: {}", e))?;
 
         // Clear old configuration
         {
@@ -943,7 +944,7 @@ impl DaqManager {
 
         // 2. ALLOC_DAQ - Allocate DAQ lists
         tracing::trace!("ALLOC_DAQ: {} lists", allocation.daq_list_count);
-        client
+        slave
             .alloc_daq(allocation.daq_list_count)
             .await
             .map_err(|e| format!("ALLOC_DAQ failed: {}", e))?;
@@ -956,7 +957,7 @@ impl DaqManager {
 
             // ALLOC_ODT - Allocate ODTs for this DAQ list
             tracing::trace!("ALLOC_ODT: DAQ list {}, {} ODTs", daq_list, odt_count);
-            client
+            slave
                 .alloc_odt(daq_list, *odt_count)
                 .await
                 .map_err(|e| format!("ALLOC_ODT failed for list {}: {}", daq_list, e))?;
@@ -972,7 +973,7 @@ impl DaqManager {
                 // ALLOC_ODT_ENTRY - Allocate entries in this ODT
                 tracing::trace!("ALLOC_ODT_ENTRY: DAQ list {}, ODT {}, {} entries",
                     daq_list, odt, entry_count);
-                client
+                slave
                     .alloc_odt_entry(daq_list, odt, entry_count)
                     .await
                     .map_err(|e| format!("ALLOC_ODT_ENTRY failed: {}", e))?;
@@ -990,7 +991,7 @@ impl DaqManager {
                     );
 
                     // Set DAQ pointer to this entry
-                    client
+                    slave
                         .set_daq_ptr(daq_list, odt, entry_idx as u8)
                         .await
                         .map_err(|e| format!("SET_DAQ_PTR failed: {}", e))?;
@@ -998,7 +999,7 @@ impl DaqManager {
                     // Write DAQ entry configuration
                     // Ensure size is aligned to granularity
                     let aligned_size = meas.size.div_ceil(odt_granularity as usize) * odt_granularity as usize;
-                    client
+                    slave
                         .write_daq(0, meas.mta(), aligned_size as u8)
                         .await
                         .map_err(|e| format!("WRITE_DAQ failed: {}", e))?;
@@ -1031,7 +1032,7 @@ impl DaqManager {
                 "SET_DAQ_LIST_MODE: mode=0x10, daq_list={}, event_channel={}, prescaler=1",
                 daq_list, self.event_channel
             );
-            client
+            slave
                 .set_daq_list_mode(0x10, daq_list, self.event_channel, 1, 0)
                 .await
                 .map_err(|e| format!("SET_DAQ_LIST_MODE failed: {}", e))?;
@@ -1055,20 +1056,20 @@ impl DaqManager {
     /// Start DAQ acquisition
     ///
     /// This starts the DAQ list and begins receiving DTO packets from slave
-    pub async fn start(&mut self, client: &XcpClient, _interval_ms: u64) -> Result<(), String> {
+    pub async fn start(&mut self, slave: &XcpSlave, _interval_ms: u64) -> Result<(), String> {
         if self.running.load(Ordering::SeqCst) {
             return Err("DAQ already running".to_string());
         }
 
         // Configure DAQ first
-        self.configure(client).await?;
+        self.configure(slave).await?;
 
         // Get DTO receiver for DAQ reception (must be done before starting DAQ)
-        let dto_rx = client.get_dto_receiver().await.ok_or("No DTO receiver available")?;
+        let dto_rx = slave.get_dto_receiver();
 
         // Start DAQ list 0
         tracing::info!("Selecte DAQ list 0");
-        client
+        slave
             .start_stop_daq_list(2, 0)  // mode=2 (select DAQ list)
             .await
             .map_err(|e| format!("START_STOP_DAQ_LIST failed: {}", e))?;
@@ -1078,7 +1079,7 @@ impl DaqManager {
         // Get base timestamp from slave if timestamp mode is enabled
         // This is used for relative timestamp calculation in DTO packets
         if self.timestamp_unit.is_some() && self.timestamp_size.is_some() {
-            match client.get_daq_clock().await {
+            match slave.get_daq_clock().await {
                 Ok(base_ts) => {
                     tracing::info!("Got base timestamp from slave: {} ticks", base_ts);
                     self.base_timestamp = Some(base_ts);
@@ -1093,8 +1094,8 @@ impl DaqManager {
             self.base_timestamp = None;
         }
 
-        // client.start_stop_synch(0x03).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
-        client.start_stop_synch(0x01).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
+        // slave.start_stop_synch(0x03).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
+        slave.start_stop_synch(0x01).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
 
         self.running.store(true, Ordering::SeqCst);
 
@@ -1273,14 +1274,14 @@ impl DaqManager {
     }
 
     /// Stop DAQ acquisition
-    pub async fn stop(&self, client: &XcpClient) -> Result<(), String> {
+    pub async fn stop(&self, slave: &XcpSlave) -> Result<(), String> {
         if !self.running.load(Ordering::SeqCst) {
             return Err("DAQ not running".to_string());
         }
 
         // First, stop DAQ on slave side to prevent further DTO packets
         tracing::info!("Stopping DAQ list on slave...");
-        if let Err(e) = client.start_stop_synch(0x00).await {
+        if let Err(e) = slave.start_stop_synch(0x00).await {
             tracing::warn!("Failed to send STOP_SYNCH: {}", e);
         }
 
@@ -1309,12 +1310,12 @@ impl DaqManager {
 
     /// Restart DAQ if selection changed
     /// This should be called periodically to check if DAQ needs restart
-    pub async fn restart_if_needed(&mut self, client: &XcpClient) -> Result<bool, String> {
+    pub async fn restart_if_needed(&mut self, slave: &XcpSlave) -> Result<bool, String> {
         if self.selection_changed.load(Ordering::SeqCst) && self.running.load(Ordering::SeqCst) {
             tracing::info!("Restarting DAQ due to selection change...");
 
             // Stop DAQ
-            self.stop(client).await.ok();
+            self.stop(slave).await.ok();
 
             // Clear the flag
             self.selection_changed.store(false, Ordering::SeqCst);
@@ -1323,7 +1324,7 @@ impl DaqManager {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
             // Restart DAQ
-            self.start(client, 0).await?;
+            self.start(slave, 0).await?;
 
             tracing::info!("DAQ restarted successfully");
             Ok(true)

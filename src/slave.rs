@@ -9,6 +9,7 @@ use crate::protocol::{
     commands, parse_connect_response, parse_get_id_response, parse_response, ConnectInfo, ErrorCode,
     Mta, Response,
 };
+use crate::client::{DAQResolutionInfo, DAQProcessorInfo};
 use crate::transport::{
     MessageRouter, Transport, TransportConfig, TransportError, TransportFactory, XcpMessage,
 };
@@ -1424,6 +1425,201 @@ impl XcpSlave {
     /// Get transport type
     pub fn transport_type(&self) -> crate::transport::TransportType {
         self.transport.transport_type()
+    }
+
+    // ==================== DAQ Methods ====================
+
+    /// Get DAQ resolution info from slave
+    pub async fn get_daq_resolution_info(&self) -> Result<DAQResolutionInfo, SlaveError> {
+        let response = self.send_command_and_wait(&commands::get_daq_resolution_info()).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(data) if data.len() == 7 => Ok(DAQResolutionInfo {
+                odt_entry_granularity_daq: data[0],
+                max_odt_entry_size_daq: data[1],
+                odt_entry_granularity_stim: data[2],
+                max_odt_entry_size_stim: data[3],
+                timestamp_mode: data[4],
+                timestamp_ticks: u16::from_le_bytes([data[5], data[6]]),
+            }),
+            Response::Res(data) => Err(SlaveError::InvalidResponse(format!(
+                "Invalid response length: {}",
+                data.len()
+            ))),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Get DAQ processor info from slave
+    pub async fn get_daq_processor_info(&self) -> Result<DAQProcessorInfo, SlaveError> {
+        let response = self.send_command_and_wait(&commands::get_daq_processor_info()).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(data) if data.len() == 7 => Ok(DAQProcessorInfo {
+                daq_properties: data[0],
+                max_daq: u16::from_le_bytes([data[1], data[2]]),
+                max_event_channel: u16::from_le_bytes([data[3], data[4]]),
+                min_daq: data[5],
+                daq_key_byte: data[6],
+            }),
+            _ => Err(SlaveError::InvalidResponse("Invalid response length".to_string())),
+        }
+    }
+
+    /// Get DAQ clock from slave
+    pub async fn get_daq_clock(&self) -> Result<u32, SlaveError> {
+        let response = self.send_command_and_wait(&commands::get_daq_clock()).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(data) if data.len() >= 7 => {
+                let ts = u32::from_le_bytes([data[3], data[4], data[5], data[6]]);
+                Ok(ts)
+            }
+            Response::Res(data) => Err(SlaveError::InvalidResponse(format!(
+                "Invalid DAQ clock response length: {}",
+                data.len()
+            ))),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Free DAQ resources on slave
+    pub async fn free_daq(&self) -> Result<(), SlaveError> {
+        let response = self.send_command_and_wait(&commands::free_daq()).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Allocate DAQ lists on slave
+    pub async fn alloc_daq(&self, daq_count: u16) -> Result<(), SlaveError> {
+        let response = self.send_command_and_wait(&commands::alloc_daq(daq_count)).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Allocate ODTs on slave
+    pub async fn alloc_odt(&self, daq_list: u16, odt_count: u8) -> Result<(), SlaveError> {
+        let response = self.send_command_and_wait(&commands::alloc_odt(daq_list, odt_count)).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Allocate ODT entries on slave
+    pub async fn alloc_odt_entry(
+        &self,
+        daq_list: u16,
+        odt: u8,
+        entry_count: u8,
+    ) -> Result<(), SlaveError> {
+        let response = self.send_command_and_wait(&commands::alloc_odt_entry(daq_list, odt, entry_count)).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Set DAQ pointer on slave
+    pub async fn set_daq_ptr(&self, daq_list: u16, odt: u8, entry: u8) -> Result<(), SlaveError> {
+        let response = self.send_command_and_wait(&commands::set_daq_ptr(daq_list, odt, entry)).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Write DAQ entry on slave
+    pub async fn write_daq(&self, bit_offset: u8, mta: Mta, data_size: u8) -> Result<(), SlaveError> {
+        let response = self.send_command_and_wait(&commands::write_daq(bit_offset, mta, data_size)).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Set DAQ list mode on slave
+    pub async fn set_daq_list_mode(
+        &self,
+        mode: u8,
+        daq_list: u16,
+        event_channel: u16,
+        prescaler: u8,
+        priority: u8,
+    ) -> Result<(), SlaveError> {
+        let response = self.send_command_and_wait(&commands::set_daq_list_mode(
+            mode, daq_list, event_channel, prescaler, priority,
+        )).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Start/stop DAQ list on slave
+    pub async fn start_stop_daq_list(&self, mode: u8, daq_list: u16) -> Result<(), SlaveError> {
+        let response = self.send_command_and_wait(&commands::start_stop_daq_list(mode, daq_list)).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
+    }
+
+    /// Start/stop synch on slave
+    pub async fn start_stop_synch(&self, mode: u8) -> Result<(), SlaveError> {
+        let response = self.send_command_and_wait(&commands::start_stop_synch(mode)).await?;
+
+        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+
+        match parsed {
+            Response::Res(_) => Ok(()),
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+        }
     }
 }
 

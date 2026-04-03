@@ -1487,12 +1487,25 @@ pub async fn daq_start(State(state): State<AppState>) -> impl IntoResponse {
 
     // Clone what we need before the async block
     let slave_name = slave.display_name();
+    let slave_id = slave.id;
 
     let client = state.client.lock().await;
     let mut daq_manager = slave.daq_manager.write().await;
 
-    // Use the client to start DAQ (DAQ manager needs XcpClient)
-    match daq_manager.start(&*client, 1000).await {
+    // Get the actual XcpSlave from client
+    let xcp_slave = match client.get_slave(slave_id) {
+        Some(s) => s,
+        None => {
+            return Json(json!({
+                "success": false,
+                "error": "Slave not found in client"
+            }));
+        }
+    };
+    let xcp_slave_guard = xcp_slave.lock().await;
+
+    // Use the XcpSlave to start DAQ (DAQ manager needs XcpSlave)
+    match daq_manager.start(&*xcp_slave_guard, 1000).await {
         Ok(_) => {
             *slave.daq_running.write().await = true;
             state.set_status(format!("DAQ started on {}", slave_name)).await;
@@ -1520,11 +1533,24 @@ pub async fn daq_stop(State(state): State<AppState>) -> impl IntoResponse {
 
     // Clone what we need before the async block
     let slave_name = slave.display_name();
+    let slave_id = slave.id;
 
     let client = state.client.lock().await;
     let daq_manager = slave.daq_manager.write().await;
 
-    match daq_manager.stop(&*client).await {
+    // Get the actual XcpSlave from client
+    let xcp_slave = match client.get_slave(slave_id) {
+        Some(s) => s,
+        None => {
+            return Json(json!({
+                "success": false,
+                "error": "Slave not found in client"
+            }));
+        }
+    };
+    let xcp_slave_guard = xcp_slave.lock().await;
+
+    match daq_manager.stop(&*xcp_slave_guard).await {
         Ok(_) => {
             *slave.daq_running.write().await = false;
             state.set_status(format!("DAQ stopped on {}", slave_name)).await;
