@@ -21,6 +21,7 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 | Signed Integers | I8, I16, I32, I64 |
 | Floating Point | F32, F64 |
 | Other | Bool, Arrays, Matrices |
+| Characteristic Types | VALUE, CURVE, MAP, VAL_BLK |
 
 ## Architecture
 
@@ -93,7 +94,7 @@ The Web UI provides browser-based access with the following features:
 - **Username**: `admin`
 - **Password**: `admin`
 
-Note: The Web UI supports only a single concurrent user. If a user is already logged in, subsequent login attempts will be rejected until the current user logs out or the session expires (30 minutes).
+Note: The Web UI supports only a single concurrent user. If a user is already logged in, subsequent login attempts will be rejected until the current user logs out.
 
 #### Multi-Slave Workflow
 
@@ -206,13 +207,15 @@ For detailed XCP protocol specifications, please refer to the official ASAM docu
 
 Example parameters from `hello_xcp.a2l`:
 
-| Parameter | Address | Extension | Type |
-|-----------|---------|-----------|------|
-| my_params.counter_max | 0x80010000 | 2 | U32 |
-| my_params.counter_on | 0x8001002C | 2 | Bool |
-| my_params.delay | 0x80010004 | 2 | U32 |
-| my_params.array | 0x80010008 | 2 | U8[4] |
-| my_params.matrix | 0x8001000C | 2 | U8[8][4] |
+| Parameter | Address | Extension | Type | Characteristic Type |
+|-----------|---------|-----------|------|---------------------|
+| my_params.counter_max | 0x80010000 | 2 | U32 | VALUE |
+| my_params.counter_on | 0x8001002C | 2 | Bool | VALUE |
+| my_params.delay | 0x80010004 | 2 | U32 | VALUE |
+| my_params.array | 0x80010008 | 2 | U8[4] | VAL_BLK |
+| my_params.matrix | 0x8001000C | 2 | U8[8][4] | VAL_BLK |
+| my_params.curve | 0x80010050 | 2 | U16[10] | CURVE |
+| my_params.map | 0x80010060 | 2 | F32[3][9] | MAP |
 
 ## Measurements
 
@@ -333,7 +336,27 @@ Contributions are welcome! Please feel free to submit pull requests.
 
 ## Recent Changes
 
-### Multi-Slave Support (v0.2.0)
+### v0.3.0 - Matrix Editor & UI Improvements
+
+- ✅ **Matrix/Table Editor**: Visual editor for arrays, matrices, CURVE, and MAP types
+  - Table view with axis values display for CURVE/MAP
+  - Cell-by-cell editing with immediate save to device
+  - Support for X/Y axis labels from A2L AXIS_PTS
+  - Transposed display for correct MAP orientation (X=columns, Y=rows)
+- ✅ **Variable Info Modal**: Detailed parameter information popup
+  - Shows address, type, unit, range, axis info
+  - Copy to clipboard functionality
+- ✅ **Improved Variable Selection**: Click row to toggle selection
+  - Removed per-row checkboxes for cleaner UI
+  - Selected rows highlighted with green background
+- ✅ **Page Mode Support**: Working/Reference page mode indicator
+  - Working page: editable values
+  - Reference page: read-only display
+- ✅ **Logging Improvements**: Cleaner log output
+  - Suppressed a2lfile library warnings
+  - Debug logs downgraded to trace level
+
+### v0.2.0 - Multi-Slave Support
 
 - ✅ Connect to multiple XCP slaves simultaneously
 - ✅ Each slave has independent A2L data
