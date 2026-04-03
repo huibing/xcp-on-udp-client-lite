@@ -2070,7 +2070,7 @@ fn convert_measurement(
         m.address_ext,
         m.data_type,
         m.unit,
-        crate::daq::CompuMethod::Identical,
+        crate::CompuMethod::Identical,
     ))
 }
 

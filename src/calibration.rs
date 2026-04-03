@@ -1,8 +1,7 @@
 //! Calibration Parameter Management
 
-use crate::a2l_reader::{A2lCharacteristic, A2lDataType, A2lMemorySegment, A2lReader, AxisInfo, CharacteristicType, StorageOrder};
+use crate::a2l::{A2lCharacteristic, A2lDataType, A2lMemorySegment, A2lReader, AxisInfo, CharacteristicType, StorageOrder, CompuMethod};
 use crate::client::XcpClient;
-use crate::daq::CompuMethod;
 use crate::protocol::Mta;
 use std::path::Path;
 

@@ -5,7 +5,7 @@
 //! 2. Start DAQ list - slave sends DTO packets automatically
 //! 3. Receive and parse DTO packets from slave
 
-use crate::a2l_reader::{A2lDataType, A2lMeasurement, A2lReader};
+use crate::a2l::{A2lDataType, A2lMeasurement, A2lReader, CompuMethod};
 use crate::client::DAQResolutionInfo;
 use crate::protocol::Mta;
 use crate::slave::XcpSlave;
@@ -53,148 +53,6 @@ pub struct DaqAllocation {
     pub daq_lists: Vec<DaqListAllocation>,
 }
 
-/// COMPU_METHOD for converting raw values to physical values
-#[derive(Debug, Clone)]
-pub enum CompuMethod {
-    /// No conversion (raw = physical)
-    Identical,
-    /// Linear conversion: physical = factor * raw + offset
-    Linear { factor: f64, offset: f64 },
-    /// Rational conversion: physical = (a * raw + b) / (c * raw + d)
-    Rational { a: f64, b: f64, c: f64, d: f64 },
-    /// Table lookup (simplified - could be extended)
-    TabVerb { pairs: Vec<(f64, f64)> },
-}
-
-impl CompuMethod {
-    /// Apply conversion to raw value
-    pub fn convert(&self, raw: f64) -> f64 {
-        match self {
-            CompuMethod::Identical => raw,
-            CompuMethod::Linear { factor, offset } => factor * raw + offset,
-            CompuMethod::Rational { a, b, c, d } => {
-                let denom = c * raw + d;
-                if denom.abs() < f64::EPSILON {
-                    raw
-                } else {
-                    (a * raw + b) / denom
-                }
-            }
-            CompuMethod::TabVerb { pairs } => {
-                // Find closest match or interpolate
-                for i in 0..pairs.len().saturating_sub(1) {
-                    if raw >= pairs[i].0 && raw <= pairs[i + 1].0 {
-                        // Linear interpolation
-                        let t = (raw - pairs[i].0) / (pairs[i + 1].0 - pairs[i].0);
-                        return pairs[i].1 + t * (pairs[i + 1].1 - pairs[i].1);
-                    }
-                }
-                // Return closest boundary value
-                pairs.first().map(|p| p.1).unwrap_or(raw)
-            }
-        }
-    }
-
-    /// Convert raw bytes based on data type
-    /// For integer types: parse as raw value, then apply COMPU_METHOD
-    /// For float types: parse directly as physical value (no COMPU_METHOD conversion)
-    pub fn convert_bytes(&self, data_type: &A2lDataType, bytes: &[u8]) -> f64 {
-        // For floating point types, the raw bytes directly represent the physical value
-        // COMPU_METHOD should NOT be applied to float values
-        match data_type {
-            A2lDataType::F32 => {
-                if bytes.len() >= 4 {
-                    f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
-                } else {
-                    0.0
-                }
-            }
-            A2lDataType::F64 => {
-                if bytes.len() >= 8 {
-                    f64::from_le_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3],
-                        bytes[4], bytes[5], bytes[6], bytes[7],
-                    ])
-                } else {
-                    0.0
-                }
-            }
-            // For integer types, parse raw value then apply COMPU_METHOD
-            _ => {
-                let raw = match data_type {
-                    A2lDataType::U8 => bytes.first().copied().unwrap_or(0) as f64,
-                    A2lDataType::U16 => {
-                        if bytes.len() >= 2 {
-                            u16::from_le_bytes([bytes[0], bytes[1]]) as f64
-                        } else {
-                            0.0
-                        }
-                    }
-                    A2lDataType::U32 => {
-                        if bytes.len() >= 4 {
-                            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
-                        } else {
-                            0.0
-                        }
-                    }
-                    A2lDataType::U64 => {
-                        if bytes.len() >= 8 {
-                            u64::from_le_bytes([
-                                bytes[0], bytes[1], bytes[2], bytes[3],
-                                bytes[4], bytes[5], bytes[6], bytes[7],
-                            ]) as f64
-                        } else {
-                            0.0
-                        }
-                    }
-                    A2lDataType::I8 => bytes.first().copied().unwrap_or(0) as i8 as f64,
-                    A2lDataType::I16 => {
-                        if bytes.len() >= 2 {
-                            i16::from_le_bytes([bytes[0], bytes[1]]) as f64
-                        } else {
-                            0.0
-                        }
-                    }
-                    A2lDataType::I32 => {
-                        if bytes.len() >= 4 {
-                            i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
-                        } else {
-                            0.0
-                        }
-                    }
-                    A2lDataType::I64 => {
-                        if bytes.len() >= 8 {
-                            i64::from_le_bytes([
-                                bytes[0], bytes[1], bytes[2], bytes[3],
-                                bytes[4], bytes[5], bytes[6], bytes[7],
-                            ]) as f64
-                        } else {
-                            0.0
-                        }
-                    }
-                    A2lDataType::Bool => (bytes.first().copied().unwrap_or(0) != 0) as u8 as f64,
-                    A2lDataType::U8Array(_) | A2lDataType::U8Matrix(_, _) |
-                    A2lDataType::U16Array(_) | A2lDataType::U16Matrix(_, _) |
-                    A2lDataType::U32Array(_) | A2lDataType::U32Matrix(_, _) |
-                    A2lDataType::U64Array(_) | A2lDataType::U64Matrix(_, _) |
-                    A2lDataType::I8Array(_) | A2lDataType::I8Matrix(_, _) |
-                    A2lDataType::I16Array(_) | A2lDataType::I16Matrix(_, _) |
-                    A2lDataType::I32Array(_) | A2lDataType::I32Matrix(_, _) |
-                    A2lDataType::I64Array(_) | A2lDataType::I64Matrix(_, _) |
-                    A2lDataType::F32Array(_) | A2lDataType::F32Matrix(_, _) |
-                    A2lDataType::F64Array(_) | A2lDataType::F64Matrix(_, _) |
-                    A2lDataType::BoolArray(_) | A2lDataType::BoolMatrix(_, _) => {
-                        // For arrays/matrices, just use first element
-                        bytes.first().copied().unwrap_or(0) as f64
-                    }
-                    // F32/F64 already handled above, never reach here
-                    A2lDataType::F32 | A2lDataType::F64 => unreachable!(),
-                };
-                self.convert(raw)
-            }
-        }
-    }
-}
 
 /// Measurement definition with full type information
 #[derive(Debug, Clone)]
@@ -1196,9 +1054,10 @@ impl DaqManager {
                                     let raw_bytes = &data.data[offset..offset + entry.size];
 
                                     // Convert raw bytes to physical value using COMPU_METHOD
-                                    let physical_value = entry.compu_method.convert_bytes(
-                                        &entry.data_type,
-                                        raw_bytes
+                                    let is_float = entry.data_type.is_float();
+                                    let physical_value = entry.compu_method.bytes_to_display(
+                                        raw_bytes,
+                                        is_float
                                     );
 
                                     record.add_value(&entry.name, physical_value);
