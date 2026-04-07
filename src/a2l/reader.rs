@@ -4,10 +4,11 @@
 //! characteristic information for XCP calibration and DAQ.
 
 use a2lfile::A2lObjectName;
+use std::collections::HashMap;
 use std::path::Path;
 
-// Import CompuMethod from compute_method module
-use crate::a2l::compute_method::CompuMethod;
+// Import types from types module
+use super::types::{A2lDataType, CharacteristicType, StorageOrder};
 
 /// Dimension type inferred from record layout name
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,161 +19,6 @@ enum DimensionKind {
     Array,
     /// 2D matrix (actual size from matrix_dim)
     Matrix,
-}
-
-/// Data type information extracted from A2L
-#[derive(Debug, Clone)]
-pub enum A2lDataType {
-    // Scalar types
-    U8,
-    U16,
-    U32,
-    U64,
-    I8,
-    I16,
-    I32,
-    I64,
-    F32,
-    F64,
-    Bool,
-    // Array types
-    U8Array(usize),
-    U16Array(usize),
-    U32Array(usize),
-    U64Array(usize),
-    I8Array(usize),
-    I16Array(usize),
-    I32Array(usize),
-    I64Array(usize),
-    F32Array(usize),
-    F64Array(usize),
-    BoolArray(usize),
-    // Matrix types (row-major order)
-    U8Matrix(usize, usize),  // rows, cols
-    U16Matrix(usize, usize),
-    U32Matrix(usize, usize),
-    U64Matrix(usize, usize),
-    I8Matrix(usize, usize),
-    I16Matrix(usize, usize),
-    I32Matrix(usize, usize),
-    I64Matrix(usize, usize),
-    F32Matrix(usize, usize),
-    F64Matrix(usize, usize),
-    BoolMatrix(usize, usize),
-}
-
-impl A2lDataType {
-    /// Get the size in bytes
-    pub fn size(&self) -> usize {
-        match self {
-            // Scalar types
-            A2lDataType::U8 | A2lDataType::I8 | A2lDataType::Bool => 1,
-            A2lDataType::U16 | A2lDataType::I16 => 2,
-            A2lDataType::U32 | A2lDataType::I32 | A2lDataType::F32 => 4,
-            A2lDataType::U64 | A2lDataType::I64 | A2lDataType::F64 => 8,
-            // Array types
-            A2lDataType::U8Array(n) | A2lDataType::I8Array(n) | A2lDataType::BoolArray(n) => *n,
-            A2lDataType::U16Array(n) | A2lDataType::I16Array(n) => *n * 2,
-            A2lDataType::U32Array(n) | A2lDataType::I32Array(n) | A2lDataType::F32Array(n) => *n * 4,
-            A2lDataType::U64Array(n) | A2lDataType::I64Array(n) | A2lDataType::F64Array(n) => *n * 8,
-            // Matrix types
-            A2lDataType::U8Matrix(r, c) | A2lDataType::I8Matrix(r, c) | A2lDataType::BoolMatrix(r, c) => r * c,
-            A2lDataType::U16Matrix(r, c) | A2lDataType::I16Matrix(r, c) => r * c * 2,
-            A2lDataType::U32Matrix(r, c) | A2lDataType::I32Matrix(r, c) | A2lDataType::F32Matrix(r, c) => r * c * 4,
-            A2lDataType::U64Matrix(r, c) | A2lDataType::I64Matrix(r, c) | A2lDataType::F64Matrix(r, c) => r * c * 8,
-        }
-    }
-
-    /// Get type name string
-    pub fn type_name(&self) -> String {
-        match self {
-            // Scalar types
-            A2lDataType::U8 => "U8".to_string(),
-            A2lDataType::U16 => "U16".to_string(),
-            A2lDataType::U32 => "U32".to_string(),
-            A2lDataType::U64 => "U64".to_string(),
-            A2lDataType::I8 => "I8".to_string(),
-            A2lDataType::I16 => "I16".to_string(),
-            A2lDataType::I32 => "I32".to_string(),
-            A2lDataType::I64 => "I64".to_string(),
-            A2lDataType::F32 => "F32".to_string(),
-            A2lDataType::F64 => "F64".to_string(),
-            A2lDataType::Bool => "BOOL".to_string(),
-            // Array types
-            A2lDataType::U8Array(n) => format!("U8[{}]", n),
-            A2lDataType::U16Array(n) => format!("U16[{}]", n),
-            A2lDataType::U32Array(n) => format!("U32[{}]", n),
-            A2lDataType::U64Array(n) => format!("U64[{}]", n),
-            A2lDataType::I8Array(n) => format!("I8[{}]", n),
-            A2lDataType::I16Array(n) => format!("I16[{}]", n),
-            A2lDataType::I32Array(n) => format!("I32[{}]", n),
-            A2lDataType::I64Array(n) => format!("I64[{}]", n),
-            A2lDataType::F32Array(n) => format!("F32[{}]", n),
-            A2lDataType::F64Array(n) => format!("F64[{}]", n),
-            A2lDataType::BoolArray(n) => format!("BOOL[{}]", n),
-            // Matrix types
-            A2lDataType::U8Matrix(r, c) => format!("U8[{}][{}]", r, c),
-            A2lDataType::U16Matrix(r, c) => format!("U16[{}][{}]", r, c),
-            A2lDataType::U32Matrix(r, c) => format!("U32[{}][{}]", r, c),
-            A2lDataType::U64Matrix(r, c) => format!("U64[{}][{}]", r, c),
-            A2lDataType::I8Matrix(r, c) => format!("I8[{}][{}]", r, c),
-            A2lDataType::I16Matrix(r, c) => format!("I16[{}][{}]", r, c),
-            A2lDataType::I32Matrix(r, c) => format!("I32[{}][{}]", r, c),
-            A2lDataType::I64Matrix(r, c) => format!("I64[{}][{}]", r, c),
-            A2lDataType::F32Matrix(r, c) => format!("F32[{}][{}]", r, c),
-            A2lDataType::F64Matrix(r, c) => format!("F64[{}][{}]", r, c),
-            A2lDataType::BoolMatrix(r, c) => format!("BOOL[{}][{}]", r, c),
-        }
-    }
-}
-
-/// Characteristic type from A2L file
-/// Determines how the characteristic is interpreted and displayed
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CharacteristicType {
-    /// Scalar value (VALUE)
-    Value,
-    /// 1D lookup table with axis (CURVE)
-    Curve,
-    /// 2D lookup table with row and column axes (MAP)
-    Map,
-    /// Value block - array/matrix without axis semantics (VAL_BLK)
-    ValBlk,
-}
-
-impl CharacteristicType {
-    /// Get the string representation for JSON serialization
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Value => "VALUE",
-            Self::Curve => "CURVE",
-            Self::Map => "MAP",
-            Self::ValBlk => "VAL_BLK",
-        }
-    }
-}
-
-/// Storage order for matrix/map data in memory
-/// Determines how 2D data is linearized in memory
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum StorageOrder {
-    /// Row-major order: data stored row by row
-    /// Matrix [[1,2,3],[4,5,6],[7,8,9]] stored as [1,2,3,4,5,6,7,8,9]
-    #[default]
-    RowDir,
-    /// Column-major order: data stored column by column
-    /// Matrix [[1,2,3],[4,5,6],[7,8,9]] stored as [1,4,7,2,5,8,3,6,9]
-    ColumnDir,
-}
-
-impl StorageOrder {
-    /// Get the string representation for JSON serialization
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::RowDir => "ROW_DIR",
-            Self::ColumnDir => "COLUMN_DIR",
-        }
-    }
 }
 
 /// Describes how axis points are obtained for CURVE/MAP characteristics
@@ -269,6 +115,8 @@ pub struct A2lMeasurement {
     pub unit: Option<String>,
     pub min: f64,
     pub max: f64,
+    /// COMPU_METHOD name for value conversion
+    pub conversion_name: String,
 }
 
 /// Characteristic (calibration parameter) information from A2L
@@ -290,6 +138,8 @@ pub struct A2lCharacteristic {
     /// Storage order for matrix/map data (ROW_DIR or COLUMN_DIR)
     /// Only relevant for MAP and VAL_BLK with 2D dimensions
     pub storage_order: StorageOrder,
+    /// COMPU_METHOD name for value conversion
+    pub conversion_name: String,
 }
 
 /// XCP checksum algorithm types
@@ -516,6 +366,9 @@ impl A2lReader {
         let min = meas.lower_limit;
         let max = meas.upper_limit;
 
+        // Get conversion method name
+        let conversion_name = meas.conversion.clone();
+
         Some(A2lMeasurement {
             name,
             description,
@@ -525,6 +378,7 @@ impl A2lReader {
             unit,
             min,
             max,
+            conversion_name,
         })
     }
 
@@ -562,6 +416,9 @@ impl A2lReader {
         // Parse storage order from record layout
         let storage_order = self.parse_storage_order(ch, module);
 
+        // Get conversion method name
+        let conversion_name = ch.conversion.clone();
+
         Some(A2lCharacteristic {
             name,
             description,
@@ -574,6 +431,7 @@ impl A2lReader {
             characteristic_type,
             axis_info,
             storage_order,
+            conversion_name,
         })
     }
 
@@ -1198,6 +1056,39 @@ impl A2lReader {
         }
 
         None
+    }
+
+    /// Get COMPU_METHOD for a conversion method name
+    ///
+    /// # Arguments
+    /// * `conversion_name` - Name of the COMPU_METHOD in the A2L file
+    ///
+    /// # Returns
+    /// A CompuMethod instance for value conversion, or Identical if not found
+    pub fn get_compu_method(&self, conversion_name: &str) -> super::compute_method::CompuMethod {
+        use super::compute_method::CompuMethodFactory;
+
+        if conversion_name.is_empty() || conversion_name == "NO_COMPU_METHOD" {
+            return super::compute_method::CompuMethod::Identical;
+        }
+
+        for module in &self.file.project.module {
+            // Build a map of COMPU_VTAB references
+            let mut vtabs: HashMap<String, &a2lfile::CompuVtab> = HashMap::new();
+            for vtab in &module.compu_vtab {
+                vtabs.insert(vtab.get_name().to_string(), vtab);
+            }
+
+            // Find the COMPU_METHOD
+            for cm in &module.compu_method {
+                if cm.get_name() == conversion_name {
+                    return CompuMethodFactory::from_a2l(cm, &vtabs);
+                }
+            }
+        }
+
+        // Default to Identical if not found
+        super::compute_method::CompuMethod::Identical
     }
 
     /// Get the project name
@@ -2230,5 +2121,45 @@ mod tests {
         assert_eq!(CharacteristicType::Value, CharacteristicType::Value);
         assert_ne!(CharacteristicType::Curve, CharacteristicType::Map);
         assert_ne!(CharacteristicType::Map, CharacteristicType::ValBlk);
+    }
+
+    #[test]
+    fn test_compu_vtab_parsing() {
+        // Test COMPU_VTAB parsing from hello_xcp.a2l
+        let reader = A2lReader::load("hello_xcp.a2l").expect("Failed to load hello_xcp.a2l");
+
+        // Test BOOL conversion method (0="false", 1="true")
+        let bool_method = reader.get_compu_method("BOOL");
+        assert!(bool_method.is_enum(), "BOOL should be an enum type");
+        assert_eq!(bool_method.enum_count(), 2);
+        assert_eq!(bool_method.to_display(0), "false");
+        assert_eq!(bool_method.to_display(1), "true");
+        assert_eq!(bool_method.to_raw("false").unwrap(), 0);
+        assert_eq!(bool_method.to_raw("true").unwrap(), 1);
+
+        // Test OP_MODE conversion method (5 states)
+        let op_mode_method = reader.get_compu_method("OP_MODE");
+        assert!(op_mode_method.is_enum(), "OP_MODE should be an enum type");
+        assert_eq!(op_mode_method.enum_count(), 5);
+        assert_eq!(op_mode_method.to_display(0), "MODE_OFF");
+        assert_eq!(op_mode_method.to_display(2), "MODE_AUTO");
+        assert_eq!(op_mode_method.to_raw("MODE_ON").unwrap(), 1);
+
+        // Test STATE conversion method (4 states)
+        let state_method = reader.get_compu_method("STATE");
+        assert!(state_method.is_enum(), "STATE should be an enum type");
+        assert_eq!(state_method.enum_count(), 4);
+        assert_eq!(state_method.to_display(0), "STATE_INIT");
+        assert_eq!(state_method.to_display(3), "STATE_ERROR");
+
+        // Test unknown raw value returns the number as string
+        assert_eq!(op_mode_method.to_display(99), "99");
+
+        // Test IDENTICAL method
+        let identity_method = reader.get_compu_method("IDENTITY");
+        assert!(!identity_method.is_enum());
+        assert_eq!(identity_method.to_display(42), "42");
+
+        println!("COMPU_VTAB parsing test passed!");
     }
 }

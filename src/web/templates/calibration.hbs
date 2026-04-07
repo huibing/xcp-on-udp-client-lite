@@ -855,6 +855,11 @@ async function readVar(deviceId, idx) {
                 if (valueCell) {
                     valueCell.textContent = data.value;
                     valueCell.style.color = '#00ff88';
+                    // Store enum info for inline editing
+                    valueCell.dataset.isEnum = data.is_enum ? 'true' : 'false';
+                    if (data.is_enum && data.enum_options) {
+                        valueCell.dataset.enumOptions = JSON.stringify(data.enum_options);
+                    }
                 }
             }
         } else {
@@ -868,9 +873,10 @@ async function readVar(deviceId, idx) {
 // Inline editing for scalar values in working page mode
 async function makeEditable(deviceId, idx, cell) {
     // Don't create another input if already editing
-    if (cell.querySelector('input')) return;
+    if (cell.querySelector('input') || cell.querySelector('select')) return;
 
     const currentValue = cell.textContent.trim();
+    const isEnum = cell.dataset.isEnum === 'true';
 
     // If value is "-" (not read yet), read it first
     if (currentValue === '-') {
@@ -881,8 +887,17 @@ async function makeEditable(deviceId, idx, cell) {
             if (data.success) {
                 cell.textContent = data.value;
                 cell.style.color = '#00ff88';
+                // Store enum info
+                cell.dataset.isEnum = data.is_enum ? 'true' : 'false';
+                if (data.is_enum && data.enum_options) {
+                    cell.dataset.enumOptions = JSON.stringify(data.enum_options);
+                }
                 // Now proceed to edit with the read value
-                createEditInput(deviceId, idx, cell, data.value.toString());
+                if (data.is_enum) {
+                    createEnumSelect(deviceId, idx, cell, data.value.toString(), data.enum_options);
+                } else {
+                    createEditInput(deviceId, idx, cell, data.value.toString());
+                }
             } else {
                 cell.textContent = '-';
                 alert('Failed to read value: ' + data.error);
@@ -894,7 +909,13 @@ async function makeEditable(deviceId, idx, cell) {
         return;
     }
 
-    createEditInput(deviceId, idx, cell, currentValue);
+    // Check if this is an enum type
+    if (isEnum) {
+        const enumOptions = cell.dataset.enumOptions ? JSON.parse(cell.dataset.enumOptions) : [];
+        createEnumSelect(deviceId, idx, cell, currentValue, enumOptions);
+    } else {
+        createEditInput(deviceId, idx, cell, currentValue);
+    }
 }
 
 function createEditInput(deviceId, idx, cell, currentValue) {
@@ -924,6 +945,51 @@ function createEditInput(deviceId, idx, cell, currentValue) {
         } else if (e.key === 'Escape') {
             cell.textContent = originalValue;
         }
+    });
+}
+
+// Create enum dropdown select for scalar values
+function createEnumSelect(deviceId, idx, cell, currentValue, enumOptions) {
+    const originalValue = currentValue;
+
+    // Create select element
+    const select = document.createElement('select');
+    select.style.cssText = 'background: #1e1e1e; border: 1px solid #4CAF50; color: #00ff88; padding: 0.25rem; min-width: 100px;';
+
+    // Add options
+    enumOptions.forEach(opt => {
+        const option = document.createElement('option');
+        option.value = opt.text;
+        option.textContent = `${opt.text} (${opt.raw})`;
+        if (opt.text === currentValue) {
+            option.selected = true;
+        }
+        select.appendChild(option);
+    });
+
+    // Clear cell and add select
+    cell.textContent = '';
+    cell.appendChild(select);
+    select.focus();
+
+    // Save on blur
+    select.addEventListener('blur', () => {
+        const selectedText = select.value;
+        saveInlineEdit(deviceId, idx, cell, selectedText, originalValue);
+    });
+
+    // Save on Enter, cancel on Escape
+    select.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            select.blur();
+        } else if (e.key === 'Escape') {
+            cell.textContent = originalValue;
+        }
+    });
+
+    // Save on change
+    select.addEventListener('change', () => {
+        select.blur();
     });
 }
 

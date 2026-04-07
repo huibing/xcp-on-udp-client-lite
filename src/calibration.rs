@@ -344,6 +344,46 @@ impl CalibrationParam {
         !self.axis_info.is_empty()
     }
 
+    /// Check if this parameter uses enum conversion (COMPU_VTAB)
+    pub fn is_enum(&self) -> bool {
+        self.compu_method.is_enum()
+    }
+
+    /// Get number of enum options
+    pub fn enum_count(&self) -> usize {
+        self.compu_method.enum_count()
+    }
+
+    /// Get enum options for dropdown display
+    /// Returns None if not an enum type
+    pub fn enum_options(&self) -> Option<&[crate::a2l::CompuVtabEntry]> {
+        self.compu_method.enum_options()
+    }
+
+    /// Convert raw value to display string using COMPU_METHOD
+    pub fn format_value(&self, raw: i64) -> String {
+        self.compu_method.to_display(raw)
+    }
+
+    /// Convert display string to raw value using COMPU_METHOD
+    pub fn parse_display(&self, display: &str) -> Result<i64, String> {
+        self.compu_method.to_raw(display)
+    }
+
+    /// Convert raw bytes to physical value for DAQ display
+    pub fn bytes_to_physical(&self, bytes: &[u8]) -> f64 {
+        let is_float = matches!(
+            self.data_type,
+            CalibrationType::F32
+                | CalibrationType::F64
+                | CalibrationType::F32Array(_)
+                | CalibrationType::F64Array(_)
+                | CalibrationType::F32Matrix(_, _)
+                | CalibrationType::F64Matrix(_, _)
+        );
+        self.compu_method.bytes_to_display(bytes, is_float)
+    }
+
     /// Serialize parameter metadata to JSON (without value).
     /// Used for API responses that need parameter info but not the current value.
     pub fn to_json(&self, device_id: &str, device_name: &str, idx: usize, connected: bool) -> serde_json::Value {
@@ -452,14 +492,14 @@ impl CalibrationManager {
 
         let params = characteristics
             .into_iter()
-            .filter_map(Self::convert_characteristic)
+            .filter_map(|ch| Self::convert_characteristic(&reader, ch))
             .collect();
 
         Ok(Self { params, memory_segments, supports_short_download })
     }
 
     /// Convert A2L characteristic to CalibrationParam
-    fn convert_characteristic(ch: A2lCharacteristic) -> Option<CalibrationParam> {
+    fn convert_characteristic(reader: &A2lReader, ch: A2lCharacteristic) -> Option<CalibrationParam> {
         let data_type = Self::convert_data_type(&ch.data_type)?;
 
         let mut param = CalibrationParam::new(
@@ -479,6 +519,9 @@ impl CalibrationManager {
         param.characteristic_type = ch.characteristic_type;
         param.axis_info = ch.axis_info;
         param.storage_order = ch.storage_order;
+
+        // Set COMPU_METHOD for value conversion
+        param.compu_method = reader.get_compu_method(&ch.conversion_name);
 
         Some(param)
     }
@@ -990,54 +1033,66 @@ impl CalibrationManager {
     }
 
     /// Parse value from string
+    ///
+    /// For enum types, this will convert enum text to raw value using COMPU_METHOD.
+    /// For numeric types, this will parse the string directly.
     pub fn parse_value(&self, param: &CalibrationParam, input: &str) -> Result<CalibrationValue, String> {
+        // For enum types, convert display text to raw value first
+        let numeric_input = if param.is_enum() {
+            // Use CompuMethod to convert enum text to raw value
+            let raw = param.parse_display(input)?;
+            raw.to_string()
+        } else {
+            input.to_string()
+        };
+
         match &param.data_type {
             CalibrationType::U8 => {
-                let v: u8 = input.parse().map_err(|_| "Invalid U8 value")?;
+                let v: u8 = numeric_input.parse().map_err(|_| "Invalid U8 value")?;
                 Ok(CalibrationValue::U8(v))
             }
             CalibrationType::U16 => {
-                let v: u16 = input.parse().map_err(|_| "Invalid U16 value")?;
+                let v: u16 = numeric_input.parse().map_err(|_| "Invalid U16 value")?;
                 Ok(CalibrationValue::U16(v))
             }
             CalibrationType::U32 => {
-                let v: u32 = input.parse().map_err(|_| "Invalid U32 value")?;
+                let v: u32 = numeric_input.parse().map_err(|_| "Invalid U32 value")?;
                 Ok(CalibrationValue::U32(v))
             }
             CalibrationType::U64 => {
-                let v: u64 = input.parse().map_err(|_| "Invalid U64 value")?;
+                let v: u64 = numeric_input.parse().map_err(|_| "Invalid U64 value")?;
                 Ok(CalibrationValue::U64(v))
             }
             CalibrationType::I8 => {
-                let v: i8 = input.parse().map_err(|_| "Invalid I8 value")?;
+                let v: i8 = numeric_input.parse().map_err(|_| "Invalid I8 value")?;
                 Ok(CalibrationValue::I8(v))
             }
             CalibrationType::I16 => {
-                let v: i16 = input.parse().map_err(|_| "Invalid I16 value")?;
+                let v: i16 = numeric_input.parse().map_err(|_| "Invalid I16 value")?;
                 Ok(CalibrationValue::I16(v))
             }
             CalibrationType::I32 => {
-                let v: i32 = input.parse().map_err(|_| "Invalid I32 value")?;
+                let v: i32 = numeric_input.parse().map_err(|_| "Invalid I32 value")?;
                 Ok(CalibrationValue::I32(v))
             }
             CalibrationType::I64 => {
-                let v: i64 = input.parse().map_err(|_| "Invalid I64 value")?;
+                let v: i64 = numeric_input.parse().map_err(|_| "Invalid I64 value")?;
                 Ok(CalibrationValue::I64(v))
             }
             CalibrationType::F32 => {
-                let v: f32 = input.parse().map_err(|_| "Invalid F32 value")?;
+                let v: f32 = numeric_input.parse().map_err(|_| "Invalid F32 value")?;
                 Ok(CalibrationValue::F32(v))
             }
             CalibrationType::F64 => {
-                let v: f64 = input.parse().map_err(|_| "Invalid F64 value")?;
+                let v: f64 = numeric_input.parse().map_err(|_| "Invalid F64 value")?;
                 Ok(CalibrationValue::F64(v))
             }
             CalibrationType::Bool => {
-                let v: bool = input.parse().map_err(|_| "Invalid BOOL value (true/false)")?;
+                let v: bool = numeric_input.parse().map_err(|_| "Invalid BOOL value (true/false)")?;
                 Ok(CalibrationValue::Bool(v))
             }
             CalibrationType::U8Array(n) => {
-                let values: Vec<&str> = input.split(',').collect();
+                let values: Vec<&str> = numeric_input.split(',').collect();
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
@@ -1048,7 +1103,7 @@ impl CalibrationManager {
             }
             CalibrationType::U8Matrix(rows, cols) => {
                 let total = rows * cols;
-                let values: Vec<&str> = input.split(',').collect();
+                let values: Vec<&str> = numeric_input.split(',').collect();
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
@@ -1830,13 +1885,13 @@ mod tests {
         let mut param = CalibrationParam::new("curve_param", 0x2000, 0, CalibrationType::F32Array(10));
 
         // Add axis info
-        let axis = crate::a2l_reader::AxisInfo {
+        let axis = crate::a2l::AxisInfo {
             name: "x_axis".to_string(),
             unit: Some("rpm".to_string()),
             min: 0.0,
             max: 1000.0,
             num_points: 10,
-            point_source: crate::a2l_reader::AxisPointSource::CalculatedDist {
+            point_source: crate::a2l::AxisPointSource::CalculatedDist {
                 offset: 0.0,
                 distance: 100.0,
                 num_points: 10,
@@ -1864,16 +1919,16 @@ mod tests {
         let mut param = CalibrationParam::new("map_param", 0x3000, 0, CalibrationType::F32Matrix(5, 10));
 
         // Add axis that requires memory read
-        let axis = crate::a2l_reader::AxisInfo {
+        let axis = crate::a2l::AxisInfo {
             name: "memory_axis".to_string(),
             unit: None,
             min: 0.0,
             max: 100.0,
             num_points: 5,
-            point_source: crate::a2l_reader::AxisPointSource::Memory {
+            point_source: crate::a2l::AxisPointSource::Memory {
                 address: 0x4000,
                 address_ext: 0,
-                data_type: crate::a2l_reader::A2lDataType::F32,
+                data_type: crate::a2l::A2lDataType::F32,
                 num_points: 5,
             },
         };
@@ -1979,5 +2034,45 @@ mod tests {
         // Verify roundtrip
         let back_to_flat = matrix_to_flat(&matrix, 2, 3, StorageOrder::ColumnDir);
         assert_eq!(flat, back_to_flat);
+    }
+
+    #[test]
+    fn test_enum_characteristic_from_a2l() {
+        // Test loading characteristics with enum COMPU_METHOD from hello_xcp.a2l
+        let manager = CalibrationManager::from_a2l("hello_xcp.a2l")
+            .expect("Failed to load calibration manager");
+
+        // Find my_params.counter_on (uses BOOL enum)
+        let counter_on = manager.params().iter().find(|p| p.name == "my_params.counter_on");
+        assert!(counter_on.is_some(), "Should find my_params.counter_on");
+
+        let param = counter_on.unwrap();
+        assert!(param.is_enum(), "counter_on should be an enum");
+        assert_eq!(param.enum_count(), 2);
+        assert_eq!(param.format_value(0), "false");
+        assert_eq!(param.format_value(1), "true");
+
+        // Find my_params.op_mode (uses OP_MODE enum with 5 states)
+        let op_mode = manager.params().iter().find(|p| p.name == "my_params.op_mode");
+        assert!(op_mode.is_some(), "Should find my_params.op_mode");
+
+        let op_param = op_mode.unwrap();
+        assert!(op_param.is_enum(), "op_mode should be an enum");
+        assert_eq!(op_param.enum_count(), 5);
+        assert_eq!(op_param.format_value(0), "MODE_OFF");
+        assert_eq!(op_param.format_value(2), "MODE_AUTO");
+        assert_eq!(op_param.parse_display("MODE_ON").unwrap(), 1);
+
+        // Find my_params.state (uses STATE enum with 4 states)
+        let state = manager.params().iter().find(|p| p.name == "my_params.state");
+        assert!(state.is_some(), "Should find my_params.state");
+
+        let state_param = state.unwrap();
+        assert!(state_param.is_enum(), "state should be an enum");
+        assert_eq!(state_param.enum_count(), 4);
+        assert_eq!(state_param.format_value(0), "STATE_INIT");
+        assert_eq!(state_param.format_value(3), "STATE_ERROR");
+
+        println!("Enum characteristic test passed!");
     }
 }

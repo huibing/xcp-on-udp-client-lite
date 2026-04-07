@@ -752,6 +752,16 @@ pub async fn cal_read(
                     map.insert("success".to_string(), serde_json::json!(true));
                     map.insert("value".to_string(), serde_json::json!(value_str));
                     map.insert("cached".to_string(), serde_json::json!(true));
+                    // Add enum info for scalar values
+                    let is_enum = param.is_enum();
+                    let enum_options: Vec<serde_json::Value> = param.enum_options()
+                        .map(|opts| opts.iter().map(|opt| json!({
+                            "raw": opt.raw_value,
+                            "text": opt.text_value,
+                        })).collect())
+                        .unwrap_or_default();
+                    map.insert("is_enum".to_string(), serde_json::json!(is_enum));
+                    map.insert("enum_options".to_string(), serde_json::json!(enum_options));
                 }
                 return Json(base);
             }
@@ -787,6 +797,16 @@ pub async fn cal_read(
                         map.remove("idx");
                         map.insert("success".to_string(), serde_json::json!(true));
                         map.insert("value".to_string(), serde_json::json!(value_str));
+                        // Add enum info for scalar values
+                        let is_enum = param.is_enum();
+                        let enum_options: Vec<serde_json::Value> = param.enum_options()
+                            .map(|opts| opts.iter().map(|opt| json!({
+                                "raw": opt.raw_value,
+                                "text": opt.text_value,
+                            })).collect())
+                            .unwrap_or_default();
+                        map.insert("is_enum".to_string(), serde_json::json!(is_enum));
+                        map.insert("enum_options".to_string(), serde_json::json!(enum_options));
                     }
                     return Json(base);
                 }
@@ -1075,11 +1095,17 @@ pub async fn cal_write_page(
 
     if let Some(param) = cal_manager.params().get(idx) {
         let current = cal_values.get(&param.name).map(|v| v.format());
+        let is_enum = param.is_enum();
+        let enum_options: Vec<(i64, String)> = param.enum_options()
+            .map(|opts| opts.iter().map(|opt| (opt.raw_value, opt.text_value.clone())).collect())
+            .unwrap_or_default();
         let content = templates::cal_write_page(
             &device_id_str,
             idx,
             &param.name,
             current.as_deref(),
+            is_enum,
+            &enum_options,
         );
         Html(templates::page("Write Calibration", &content, None, None))
     } else {
@@ -2004,44 +2030,44 @@ pub async fn a2l_load(
 
 /// Convert A2L characteristic to calibration parameter
 fn convert_characteristic(
-    ch: crate::a2l_reader::A2lCharacteristic,
+    ch: crate::a2l::A2lCharacteristic,
 ) -> Option<crate::calibration::CalibrationParam> {
     use crate::calibration::{CalibrationParam, CalibrationType};
 
     let data_type = match ch.data_type {
-        crate::a2l_reader::A2lDataType::U8 => CalibrationType::U8,
-        crate::a2l_reader::A2lDataType::U16 => CalibrationType::U16,
-        crate::a2l_reader::A2lDataType::U32 => CalibrationType::U32,
-        crate::a2l_reader::A2lDataType::U64 => CalibrationType::U64,
-        crate::a2l_reader::A2lDataType::I8 => CalibrationType::I8,
-        crate::a2l_reader::A2lDataType::I16 => CalibrationType::I16,
-        crate::a2l_reader::A2lDataType::I32 => CalibrationType::I32,
-        crate::a2l_reader::A2lDataType::I64 => CalibrationType::I64,
-        crate::a2l_reader::A2lDataType::F32 => CalibrationType::F32,
-        crate::a2l_reader::A2lDataType::F64 => CalibrationType::F64,
-        crate::a2l_reader::A2lDataType::Bool => CalibrationType::Bool,
-        crate::a2l_reader::A2lDataType::U8Array(n) => CalibrationType::U8Array(n),
-        crate::a2l_reader::A2lDataType::U16Array(n) => CalibrationType::U16Array(n),
-        crate::a2l_reader::A2lDataType::U32Array(n) => CalibrationType::U32Array(n),
-        crate::a2l_reader::A2lDataType::U64Array(n) => CalibrationType::U64Array(n),
-        crate::a2l_reader::A2lDataType::I8Array(n) => CalibrationType::I8Array(n),
-        crate::a2l_reader::A2lDataType::I16Array(n) => CalibrationType::I16Array(n),
-        crate::a2l_reader::A2lDataType::I32Array(n) => CalibrationType::I32Array(n),
-        crate::a2l_reader::A2lDataType::I64Array(n) => CalibrationType::I64Array(n),
-        crate::a2l_reader::A2lDataType::F32Array(n) => CalibrationType::F32Array(n),
-        crate::a2l_reader::A2lDataType::F64Array(n) => CalibrationType::F64Array(n),
-        crate::a2l_reader::A2lDataType::BoolArray(n) => CalibrationType::BoolArray(n),
-        crate::a2l_reader::A2lDataType::U8Matrix(r, c) => CalibrationType::U8Matrix(r, c),
-        crate::a2l_reader::A2lDataType::U16Matrix(r, c) => CalibrationType::U16Matrix(r, c),
-        crate::a2l_reader::A2lDataType::U32Matrix(r, c) => CalibrationType::U32Matrix(r, c),
-        crate::a2l_reader::A2lDataType::U64Matrix(r, c) => CalibrationType::U64Matrix(r, c),
-        crate::a2l_reader::A2lDataType::I8Matrix(r, c) => CalibrationType::I8Matrix(r, c),
-        crate::a2l_reader::A2lDataType::I16Matrix(r, c) => CalibrationType::I16Matrix(r, c),
-        crate::a2l_reader::A2lDataType::I32Matrix(r, c) => CalibrationType::I32Matrix(r, c),
-        crate::a2l_reader::A2lDataType::I64Matrix(r, c) => CalibrationType::I64Matrix(r, c),
-        crate::a2l_reader::A2lDataType::F32Matrix(r, c) => CalibrationType::F32Matrix(r, c),
-        crate::a2l_reader::A2lDataType::F64Matrix(r, c) => CalibrationType::F64Matrix(r, c),
-        crate::a2l_reader::A2lDataType::BoolMatrix(r, c) => CalibrationType::BoolMatrix(r, c),
+        crate::a2l::A2lDataType::U8 => CalibrationType::U8,
+        crate::a2l::A2lDataType::U16 => CalibrationType::U16,
+        crate::a2l::A2lDataType::U32 => CalibrationType::U32,
+        crate::a2l::A2lDataType::U64 => CalibrationType::U64,
+        crate::a2l::A2lDataType::I8 => CalibrationType::I8,
+        crate::a2l::A2lDataType::I16 => CalibrationType::I16,
+        crate::a2l::A2lDataType::I32 => CalibrationType::I32,
+        crate::a2l::A2lDataType::I64 => CalibrationType::I64,
+        crate::a2l::A2lDataType::F32 => CalibrationType::F32,
+        crate::a2l::A2lDataType::F64 => CalibrationType::F64,
+        crate::a2l::A2lDataType::Bool => CalibrationType::Bool,
+        crate::a2l::A2lDataType::U8Array(n) => CalibrationType::U8Array(n),
+        crate::a2l::A2lDataType::U16Array(n) => CalibrationType::U16Array(n),
+        crate::a2l::A2lDataType::U32Array(n) => CalibrationType::U32Array(n),
+        crate::a2l::A2lDataType::U64Array(n) => CalibrationType::U64Array(n),
+        crate::a2l::A2lDataType::I8Array(n) => CalibrationType::I8Array(n),
+        crate::a2l::A2lDataType::I16Array(n) => CalibrationType::I16Array(n),
+        crate::a2l::A2lDataType::I32Array(n) => CalibrationType::I32Array(n),
+        crate::a2l::A2lDataType::I64Array(n) => CalibrationType::I64Array(n),
+        crate::a2l::A2lDataType::F32Array(n) => CalibrationType::F32Array(n),
+        crate::a2l::A2lDataType::F64Array(n) => CalibrationType::F64Array(n),
+        crate::a2l::A2lDataType::BoolArray(n) => CalibrationType::BoolArray(n),
+        crate::a2l::A2lDataType::U8Matrix(r, c) => CalibrationType::U8Matrix(r, c),
+        crate::a2l::A2lDataType::U16Matrix(r, c) => CalibrationType::U16Matrix(r, c),
+        crate::a2l::A2lDataType::U32Matrix(r, c) => CalibrationType::U32Matrix(r, c),
+        crate::a2l::A2lDataType::U64Matrix(r, c) => CalibrationType::U64Matrix(r, c),
+        crate::a2l::A2lDataType::I8Matrix(r, c) => CalibrationType::I8Matrix(r, c),
+        crate::a2l::A2lDataType::I16Matrix(r, c) => CalibrationType::I16Matrix(r, c),
+        crate::a2l::A2lDataType::I32Matrix(r, c) => CalibrationType::I32Matrix(r, c),
+        crate::a2l::A2lDataType::I64Matrix(r, c) => CalibrationType::I64Matrix(r, c),
+        crate::a2l::A2lDataType::F32Matrix(r, c) => CalibrationType::F32Matrix(r, c),
+        crate::a2l::A2lDataType::F64Matrix(r, c) => CalibrationType::F64Matrix(r, c),
+        crate::a2l::A2lDataType::BoolMatrix(r, c) => CalibrationType::BoolMatrix(r, c),
     };
 
     let mut param = CalibrationParam::new(&ch.name, ch.address, ch.address_ext, data_type)
@@ -2062,7 +2088,7 @@ fn convert_characteristic(
 
 /// Convert A2L measurement to DAQ measurement
 fn convert_measurement(
-    m: crate::a2l_reader::A2lMeasurement,
+    m: crate::a2l::A2lMeasurement,
 ) -> Option<crate::daq::Measurement> {
     Some(crate::daq::Measurement::with_type(
         &m.name,
@@ -2176,6 +2202,15 @@ pub async fn cal_value_api(
                         axis_values.len()
                     );
 
+                    // Check if this is an enum type and get options
+                    let is_enum = param.is_enum();
+                    let enum_options: Vec<serde_json::Value> = param.enum_options()
+                        .map(|opts| opts.iter().map(|opt| json!({
+                            "raw": opt.raw_value,
+                            "text": opt.text_value,
+                        })).collect())
+                        .unwrap_or_default();
+
                     Json(json!({
                         "success": true,
                         "name": param.name,
@@ -2188,6 +2223,8 @@ pub async fn cal_value_api(
                         "axis_info": axis_info,
                         "axis_values": axis_values,
                         "characteristic_type": param.characteristic_type.as_str(),
+                        "is_enum": is_enum,
+                        "enum_options": enum_options,
                     }))
                 }
                 Err(e) => {
@@ -2216,7 +2253,7 @@ async fn read_axis_values_from_slave(
     xcp_slave: &crate::slave::XcpSlave,
     param: &CalibrationParam,
 ) -> Vec<Vec<f64>> {
-    use crate::a2l_reader::AxisPointSource;
+    use crate::a2l::AxisPointSource;
     use crate::protocol::Mta;
 
     let mut result = Vec::new();
@@ -2232,10 +2269,10 @@ async fn read_axis_values_from_slave(
         if let AxisPointSource::Memory { address, address_ext, data_type, num_points } = &axis.point_source {
             // Calculate element size (size of single axis point)
             let element_size = match data_type {
-                crate::a2l_reader::A2lDataType::U8 | crate::a2l_reader::A2lDataType::I8 | crate::a2l_reader::A2lDataType::Bool => 1,
-                crate::a2l_reader::A2lDataType::U16 | crate::a2l_reader::A2lDataType::I16 => 2,
-                crate::a2l_reader::A2lDataType::U32 | crate::a2l_reader::A2lDataType::I32 | crate::a2l_reader::A2lDataType::F32 => 4,
-                crate::a2l_reader::A2lDataType::U64 | crate::a2l_reader::A2lDataType::I64 | crate::a2l_reader::A2lDataType::F64 => 8,
+                crate::a2l::A2lDataType::U8 | crate::a2l::A2lDataType::I8 | crate::a2l::A2lDataType::Bool => 1,
+                crate::a2l::A2lDataType::U16 | crate::a2l::A2lDataType::I16 => 2,
+                crate::a2l::A2lDataType::U32 | crate::a2l::A2lDataType::I32 | crate::a2l::A2lDataType::F32 => 4,
+                crate::a2l::A2lDataType::U64 | crate::a2l::A2lDataType::I64 | crate::a2l::A2lDataType::F64 => 8,
                 _ => 4, // Default to 4 bytes
             };
             let total_size = element_size * num_points;
@@ -2262,8 +2299,8 @@ async fn read_axis_values_from_slave(
 }
 
 /// Parse axis values from raw bytes based on data type
-fn parse_axis_values(data: &[u8], data_type: &crate::a2l_reader::A2lDataType, num_points: usize) -> Vec<f64> {
-    use crate::a2l_reader::A2lDataType;
+fn parse_axis_values(data: &[u8], data_type: &crate::a2l::A2lDataType, num_points: usize) -> Vec<f64> {
+    use crate::a2l::A2lDataType;
 
     let mut values = Vec::with_capacity(num_points);
     // Calculate element size
@@ -2510,8 +2547,23 @@ pub async fn cal_write_element_api(
                 }
             };
 
+            // Convert enum text to raw value if needed
+            let value_to_write = if param.is_enum() {
+                match param.parse_display(value_str) {
+                    Ok(raw) => raw.to_string(),
+                    Err(e) => {
+                        return Json(json!({
+                            "success": false,
+                            "error": format!("Invalid enum value '{}': {}", value_str, e)
+                        }));
+                    }
+                }
+            } else {
+                value_str.to_string()
+            };
+
             // Modify the element at (row, col)
-            match modify_element(&mut current_value, &param.data_type, row, col, value_str) {
+            match modify_element(&mut current_value, &param.data_type, row, col, &value_to_write) {
                 Ok(_) => {
                     // Write back the entire value
                     let xcp_slave_guard = xcp_slave.lock().await;

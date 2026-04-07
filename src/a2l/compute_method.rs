@@ -281,11 +281,9 @@ pub struct CompuMethodFactory;
 
 impl CompuMethodFactory {
     /// Create CompuMethod from A2L COMPU_METHOD and available COMPU_VTABs
-    ///
-    /// TODO: Implement full COMPU_VTAB lookup when a2lfile crate types are known
     pub fn from_a2l(
         compu_method: &a2lfile::CompuMethod,
-        _vtabs: &HashMap<String, &a2lfile::CompuVtab>,
+        vtabs: &HashMap<String, &a2lfile::CompuVtab>,
     ) -> CompuMethod {
         use a2lfile::ConversionType;
 
@@ -299,8 +297,22 @@ impl CompuMethodFactory {
                 }
             }
             ConversionType::TabVerb => {
-                // TODO: Implement COMPU_VTAB lookup
-                // This requires knowing the exact type of compu_tab_ref
+                // Look up COMPU_VTAB reference
+                if let Some(ref compu_tab_ref) = compu_method.compu_tab_ref {
+                    let table_name = &compu_tab_ref.conversion_table;
+                    if let Some(vtab) = vtabs.get(table_name) {
+                        // Extract entries from COMPU_VTAB
+                        let entries: Vec<(i64, String)> = vtab
+                            .value_pairs
+                            .iter()
+                            .map(|vp| (vp.in_val as i64, vp.out_val.clone()))
+                            .collect();
+
+                        if !entries.is_empty() {
+                            return CompuMethod::compu_vtab(entries);
+                        }
+                    }
+                }
                 CompuMethod::Identical
             }
             _ => CompuMethod::Identical,

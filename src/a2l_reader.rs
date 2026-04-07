@@ -4,6 +4,7 @@
 //! characteristic information for XCP calibration and DAQ.
 
 use a2lfile::A2lObjectName;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Data type information extracted from A2L
@@ -266,6 +267,8 @@ pub struct A2lMeasurement {
     pub unit: Option<String>,
     pub min: f64,
     pub max: f64,
+    /// COMPU_METHOD name for value conversion
+    pub conversion_name: String,
 }
 
 /// Characteristic (calibration parameter) information from A2L
@@ -287,6 +290,8 @@ pub struct A2lCharacteristic {
     /// Storage order for matrix/map data (ROW_DIR or COLUMN_DIR)
     /// Only relevant for MAP and VAL_BLK with 2D dimensions
     pub storage_order: StorageOrder,
+    /// COMPU_METHOD name for value conversion
+    pub conversion_name: String,
 }
 
 /// XCP checksum algorithm types
@@ -513,6 +518,9 @@ impl A2lReader {
         let min = meas.lower_limit;
         let max = meas.upper_limit;
 
+        // Get conversion method name
+        let conversion_name = meas.conversion.clone();
+
         Some(A2lMeasurement {
             name,
             description,
@@ -522,6 +530,7 @@ impl A2lReader {
             unit,
             min,
             max,
+            conversion_name,
         })
     }
 
@@ -559,6 +568,9 @@ impl A2lReader {
         // Parse storage order from record layout
         let storage_order = self.parse_storage_order(ch, module);
 
+        // Get conversion method name
+        let conversion_name = ch.conversion.clone();
+
         Some(A2lCharacteristic {
             name,
             description,
@@ -571,6 +583,7 @@ impl A2lReader {
             characteristic_type,
             axis_info,
             storage_order,
+            conversion_name,
         })
     }
 
@@ -1195,6 +1208,39 @@ impl A2lReader {
         }
 
         None
+    }
+
+    /// Get COMPU_METHOD for a conversion method name
+    ///
+    /// # Arguments
+    /// * `conversion_name` - Name of the COMPU_METHOD in the A2L file
+    ///
+    /// # Returns
+    /// A CompuMethod instance for value conversion, or Identical if not found
+    pub fn get_compu_method(&self, conversion_name: &str) -> crate::a2l::CompuMethod {
+        use crate::a2l::CompuMethodFactory;
+
+        if conversion_name.is_empty() || conversion_name == "NO_COMPU_METHOD" {
+            return crate::a2l::CompuMethod::Identical;
+        }
+
+        for module in &self.file.project.module {
+            // Build a map of COMPU_VTAB references
+            let mut vtabs: HashMap<String, &a2lfile::CompuVtab> = HashMap::new();
+            for vtab in &module.compu_vtab {
+                vtabs.insert(vtab.get_name().to_string(), vtab);
+            }
+
+            // Find the COMPU_METHOD
+            for cm in &module.compu_method {
+                if cm.get_name() == conversion_name {
+                    return CompuMethodFactory::from_a2l(cm, &vtabs);
+                }
+            }
+        }
+
+        // Default to Identical if not found
+        crate::a2l::CompuMethod::Identical
     }
 
     /// Get the project name

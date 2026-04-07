@@ -7,7 +7,15 @@
     <form method="POST" action="/api/cal/write/{{slave_id}}/{{idx}}">
         <div class="form-group">
             <label for="value">New Value</label>
+            {{#if is_enum}}
+            <select name="value" id="value" required autofocus style="width: 100%; padding: 0.5rem; background: #1e1e1e; border: 1px solid #444; color: #00ff88; border-radius: 4px;">
+                {{#each enum_options}}
+                <option value="{{this.text}}">{{this.text}} ({{this.raw}})</option>
+                {{/each}}
+            </select>
+            {{else}}
             <input type="text" name="value" id="value" required autofocus>
+            {{/if}}
         </div>
         <div class="btn-group">
             <button type="submit">Write</button>

@@ -220,12 +220,21 @@ impl TemplateEngine {
         idx: usize,
         name: &str,
         current_value: Option<&str>,
+        is_enum: bool,
+        enum_options: &[(i64, String)],
     ) -> String {
+        let enum_options_json: Vec<serde_json::Value> = enum_options
+            .iter()
+            .map(|(raw, text)| json!({"raw": raw, "text": text}))
+            .collect();
+
         let data = json!({
             "slave_id": escape_html(slave_id),
             "idx": idx,
             "name": escape_html(name),
             "current_value": current_value.unwrap_or("Not read yet"),
+            "is_enum": is_enum,
+            "enum_options": enum_options_json,
         });
 
         // Note: Only render the content template, NOT wrapped in base template
@@ -453,9 +462,11 @@ pub fn cal_write_page(
     idx: usize,
     name: &str,
     current_value: Option<&str>,
+    is_enum: bool,
+    enum_options: &[(i64, String)],
 ) -> String {
     let engine = TemplateEngine::new();
-    engine.cal_write_page(slave_id, idx, name, current_value)
+    engine.cal_write_page(slave_id, idx, name, current_value, is_enum, enum_options)
 }
 
 /// Render DAQ page
