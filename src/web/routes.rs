@@ -1834,9 +1834,26 @@ pub async fn daq_data(
         }
     }
 
+    // Compute the latest elapsed timestamp across all running slaves
+    let mut latest_ts: f64 = 0.0;
+    {
+        let slaves2 = state.all_slaves().await;
+        for s in slaves2 {
+            if *s.daq_running.read().await {
+                let dm = s.daq_manager.read().await;
+                if let Some(r) = dm.get_latest_sample().await {
+                    if r.timestamp_s > latest_ts {
+                        latest_ts = r.timestamp_s;
+                    }
+                }
+            }
+        }
+    }
+
     Json(json!({
         "success": true,
-        "values": values
+        "values": values,
+        "timestamp_s": format!("{:.6}", latest_ts)
     }))
 }
 

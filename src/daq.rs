@@ -270,9 +270,10 @@ impl Default for DaqConfiguration {
 /// DAQ data record for CSV output
 #[derive(Debug, Clone, Serialize)]
 pub struct DaqRecord {
-    /// Raw timestamp value (base + relative, in slave clock ticks)
-    /// Note: This is NOT UTC time - it's a raw counter value from the slave
-    pub timestamp: u32,
+    /// Elapsed seconds since recording start (converted from slave ticks)
+    pub timestamp_s: f64,
+    /// Raw timestamp value (slave clock ticks, for debugging)
+    pub timestamp_raw: u32,
     /// Measurement values (name -> physical value as f64)
     /// Values are converted from raw bytes using COMPU_METHOD
     pub values: HashMap<String, f64>,
@@ -282,10 +283,11 @@ pub struct DaqRecord {
 }
 
 impl DaqRecord {
-    /// Create a new DAQ record with timestamp
-    pub fn new(timestamp: u32) -> Self {
+    /// Create a new DAQ record
+    pub fn new(timestamp_s: f64, timestamp_raw: u32) -> Self {
         Self {
-            timestamp,
+            timestamp_s,
+            timestamp_raw,
             values: HashMap::new(),
             raw_values: HashMap::new(),
         }
@@ -323,6 +325,67 @@ pub struct DtoData {
     pub data: Vec<u8>,
     /// Timestamp
     pub timestamp: Option<u32>,
+}
+
+/// Tracks timestamp wrapping and converts raw slave ticks to elapsed seconds.
+///
+/// Uses delta-based accumulation: each DTO packet's timestamp is compared to the
+/// previous one. Forward deltas (< half the counter range) are accumulated into
+/// a u64 total. This correctly handles any number of counter wraps.
+#[derive(Debug, Clone)]
+pub struct TimestampTracker {
+    /// Previous raw timestamp value (masked to DTO width)
+    prev_raw: u32,
+    /// Accumulated total ticks since t0
+    cumulative_ticks: u64,
+    /// Bit mask for DTO timestamp width (0xFF, 0xFFFF, or 0xFFFFFFFF)
+    mask: u32,
+    /// Half the counter range — forward/backward threshold
+    half_range: u64,
+    /// Seconds per tick
+    tick_seconds: f64,
+}
+
+impl TimestampTracker {
+    /// Create a new tracker.
+    ///
+    /// - `t0_ticks`: base clock from GET_DAQ_CLOCK (truncated to `timestamp_size` width)
+    /// - `timestamp_size`: 1, 2, or 4 bytes
+    /// - `unit`: timestamp unit for tick-to-seconds conversion
+    pub fn new(t0_ticks: u32, timestamp_size: u8, unit: &TimestampUnit) -> Self {
+        let max_value: u64 = match timestamp_size {
+            1 => 0xFF,
+            2 => 0xFFFF,
+            4 => 0xFFFF_FFFF,
+            _ => 0xFFFF_FFFF,
+        };
+        let mask = max_value as u32;
+        Self {
+            prev_raw: t0_ticks & mask,
+            cumulative_ticks: 0,
+            mask,
+            half_range: (max_value + 1) / 2,
+            tick_seconds: unit.to_seconds(),
+        }
+    }
+
+    /// Compute elapsed seconds from a raw DTO timestamp.
+    ///
+    /// Compares to previous value to detect forward progress vs backward jumps.
+    /// Forward deltas (< half the counter range) are accumulated; backward jumps
+    /// (from out-of-order UDP packets) are ignored.
+    pub fn elapsed_seconds(&mut self, ts_raw: u32) -> f64 {
+        let curr = ts_raw & self.mask;
+        let delta = curr.wrapping_sub(self.prev_raw) & self.mask;
+
+        if (delta as u64) <= self.half_range {
+            self.cumulative_ticks += delta as u64;
+        }
+        // else: backward jump (out-of-order packet), don't accumulate
+
+        self.prev_raw = curr;
+        self.cumulative_ticks as f64 * self.tick_seconds
+    }
 }
 
 /// DAQ Manager - implements Dynamic DAQ
@@ -1059,7 +1122,7 @@ impl DaqManager {
                 .map_err(|e| format!("Failed to create CSV: {}", e))?;
 
             // Build CSV header with selected measurement names
-            let mut header = String::from("timestamp");
+            let mut header = String::from("time_s");
             for meas in &selected_measurements {
                 header.push(',');
                 header.push_str(&meas.name);
@@ -1073,10 +1136,23 @@ impl DaqManager {
         let daq_config = self.daq_config.clone();
         let timestamp_size = self.timestamp_size.unwrap_or(0);
         let iden_field_type = self.indentification_field_type.clone();
-        let base_timestamp = self.base_timestamp;
-        let _timestamp_unit = self.timestamp_unit;
-        let use_slave_timestamp = base_timestamp.is_some();
         let selection_changed = self.selection_changed.clone();
+
+        // Build TimestampTracker if slave provides timestamps, otherwise use local clock
+        let has_slave_timestamp = self.base_timestamp.is_some()
+            && self.timestamp_unit.is_some()
+            && self.timestamp_size.is_some();
+        let mut ts_tracker = if has_slave_timestamp {
+            Some(TimestampTracker::new(
+                self.base_timestamp.unwrap(),
+                self.timestamp_size.unwrap(),
+                self.timestamp_unit.as_ref().unwrap(),
+            ))
+        } else {
+            None
+        };
+        // For no-timestamp fallback: record wall-clock start time
+        let recording_start = std::time::Instant::now();
 
         // Spawn DTO reception task
         let handle = tokio::spawn(async move {
@@ -1131,7 +1207,7 @@ impl DaqManager {
                                 data.daq_list, data.odt, data.data.len(), entries.len());
 
                             // Parse measurement data using configuration
-                            let mut record = DaqRecord::new(0);
+                            let mut record = DaqRecord::new(0.0, 0);
 
                             for entry in entries {
                                 let offset = entry.byte_offset;
@@ -1153,24 +1229,28 @@ impl DaqManager {
                                 }
                             }
 
-                            // Calculate timestamp
-                            let timestamp = if use_slave_timestamp {
-                                if let (Some(base), Some(rel_ts)) = (base_timestamp, data.timestamp) {
-                                    base.wrapping_add(rel_ts)
+                            // Calculate elapsed seconds
+                            let (timestamp_s, timestamp_raw) = if let Some(ref mut tracker) = ts_tracker {
+                                if let Some(raw_ts) = data.timestamp {
+                                    (tracker.elapsed_seconds(raw_ts), raw_ts)
                                 } else {
-                                    data.timestamp.unwrap_or(0)
+                                    // Slave timestamp enabled but DTO missing it — use local clock
+                                    (recording_start.elapsed().as_secs_f64(), 0)
                                 }
                             } else {
-                                0
+                                // No slave timestamp — use local receive time relative to start
+                                (recording_start.elapsed().as_secs_f64(), 0)
                             };
-                            record.timestamp = timestamp;
+                            record.timestamp_s = timestamp_s;
+                            record.timestamp_raw = timestamp_raw;
 
                             // Update latest sample for UI (merge with existing to preserve values from other event groups)
                             {
                                 let mut latest = latest_sample.write().await;
                                 match latest.as_mut() {
                                     Some(existing) => {
-                                        existing.timestamp = record.timestamp;
+                                        existing.timestamp_s = record.timestamp_s;
+                                        existing.timestamp_raw = record.timestamp_raw;
                                         for (name, value) in &record.values {
                                             existing.values.insert(name.clone(), *value);
                                         }
@@ -1185,7 +1265,7 @@ impl DaqManager {
                             }
 
                             // Write CSV line with values in correct order (by entry order)
-                            let mut csv_line = record.timestamp.to_string();
+                            let mut csv_line = format!("{:.6}", record.timestamp_s);
                             for entry in &config.odt_entries {
                                 csv_line.push(',');
                                 if let Some(value) = record.get_value(&entry.name) {
@@ -1698,7 +1778,9 @@ mod tests {
 
     #[test]
     fn test_daq_record_value_storage() {
-        let mut record = DaqRecord::new(0);
+        let mut record = DaqRecord::new(1.234, 1234);
+        assert!((record.timestamp_s - 1.234).abs() < 1e-9);
+        assert_eq!(record.timestamp_raw, 1234);
         record.add_value("temp", 25.5);
         record.add_value("rpm", 1500.0);
         assert_eq!(record.get_value("temp"), Some(25.5));
@@ -1708,10 +1790,94 @@ mod tests {
 
     #[test]
     fn test_daq_record_overwrite_value() {
-        let mut record = DaqRecord::new(0);
+        let mut record = DaqRecord::new(0.0, 0);
         record.add_value("temp", 20.0);
         record.add_value("temp", 30.0);
         assert_eq!(record.get_value("temp"), Some(30.0));
+    }
+
+    // ── TimestampTracker tests ────────────────────────────────
+
+    #[test]
+    fn test_tracker_u16_basic_no_wrap() {
+        // u16, 1ms/tick, t0=60000
+        let mut tracker = TimestampTracker::new(60000, 2, &TimestampUnit::DAQTIMESTAMPUNIT1MS);
+        let t = tracker.elapsed_seconds(60100);
+        assert!((t - 0.100).abs() < 1e-9, "expected 0.100, got {}", t);
+        let t = tracker.elapsed_seconds(60200);
+        assert!((t - 0.200).abs() < 1e-9, "expected 0.200, got {}", t);
+    }
+
+    #[test]
+    fn test_tracker_u16_single_wrap() {
+        // u16, 1ms/tick, t0=60000. After wrapping past 65535 → 100
+        let mut tracker = TimestampTracker::new(60000, 2, &TimestampUnit::DAQTIMESTAMPUNIT1MS);
+        // Before wrap
+        let t = tracker.elapsed_seconds(65400);
+        assert!((t - 5.400).abs() < 1e-9, "expected 5.400, got {}", t);
+        // At max
+        let t = tracker.elapsed_seconds(65535);
+        assert!((t - 5.535).abs() < 1e-9, "expected 5.535, got {}", t);
+        // After wrap
+        let t = tracker.elapsed_seconds(100);
+        assert!((t - 5.636).abs() < 1e-6, "expected 5.636, got {}", t);
+        let t = tracker.elapsed_seconds(200);
+        assert!((t - 5.736).abs() < 1e-6, "expected 5.736, got {}", t);
+    }
+
+    #[test]
+    fn test_tracker_u16_multi_wrap() {
+        // u16, 1ms/tick, t0=0. Simulate regular packet arrival (step=10000) through 2+ wraps.
+        let mut tracker = TimestampTracker::new(0, 2, &TimestampUnit::DAQTIMESTAMPUNIT1MS);
+
+        // 13 steps × 10000 ticks = 130000 ticks elapsed (2 full u16 cycles)
+        let mut raw: u32 = 0;
+        for _ in 0..13 {
+            raw = (raw + 10000) % 65536;
+            tracker.elapsed_seconds(raw);
+        }
+        // One more step of 5000 → total 135000 ticks = 135.0s
+        raw = (raw + 5000) % 65536;
+        let t = tracker.elapsed_seconds(raw);
+        assert!((t - 135.0).abs() < 1e-3, "expected 135.0, got {}", t);
+    }
+
+    #[test]
+    fn test_tracker_u8_fast_wrap() {
+        // u8, 1ms/tick, t0=200
+        let mut tracker = TimestampTracker::new(200, 1, &TimestampUnit::DAQTIMESTAMPUNIT1MS);
+        let t = tracker.elapsed_seconds(250);
+        assert!((t - 0.050).abs() < 1e-9, "expected 0.050, got {}", t);
+        // Wrap: 250 → 10
+        let t = tracker.elapsed_seconds(10);
+        assert!((t - 0.066).abs() < 1e-3, "expected ~0.066, got {}", t);
+    }
+
+    #[test]
+    fn test_tracker_u32_no_wrap() {
+        // u32, 1µs/tick, t0=1_000_000
+        let mut tracker = TimestampTracker::new(1_000_000, 4, &TimestampUnit::DAQTIMESTAMPUNIT1US);
+        let t = tracker.elapsed_seconds(2_000_000);
+        assert!((t - 1.0).abs() < 1e-9, "expected 1.0s, got {}", t);
+    }
+
+    #[test]
+    fn test_tracker_u32_wrap() {
+        // u32, 1µs/tick, t0 = 0xFFFF_FF00 (near max)
+        let mut tracker = TimestampTracker::new(0xFFFF_FF00, 4, &TimestampUnit::DAQTIMESTAMPUNIT1US);
+        // After wrap: raw = 0x100
+        let t = tracker.elapsed_seconds(0x0000_0100);
+        // expected: 0x200 = 512 ticks = 512µs = 0.000512s
+        assert!((t - 0.000512).abs() < 1e-9, "expected 0.000512, got {}", t);
+    }
+
+    #[test]
+    fn test_tracker_t0_truncation() {
+        // GET_DAQ_CLOCK returns u32=0x0001_EA60 (125536), but DTO is u16
+        // Truncated t0 = 0xEA60 = 60000
+        let mut tracker = TimestampTracker::new(0x0001_EA60, 2, &TimestampUnit::DAQTIMESTAMPUNIT1MS);
+        let t = tracker.elapsed_seconds(60100);
+        assert!((t - 0.100).abs() < 1e-9, "expected 0.100, got {}", t);
     }
 
     // ── Selection / restart flag tests ────────────────────────

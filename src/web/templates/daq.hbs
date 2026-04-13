@@ -16,7 +16,7 @@
     </div>
 
     <div class="card">
-        <h2>Live Data <span id="daqStatus" class="tag stopped">STOPPED</span></h2>
+        <h2>Live Data <span id="daqStatus" class="tag stopped">STOPPED</span> <span id="elapsedTime" style="font-size: 0.8em; color: #888; margin-left: 12px;"></span></h2>
         <div id="liveData" style="max-height: 400px; overflow-y: auto;">
             <p style="color: #666; text-align: center;">No data (DAQ not running)</p>
         </div>
@@ -547,6 +547,7 @@ async function stopDaq() {
         if (data.success) {
             daqRunning = false;
             updateDaqStatus();
+            document.getElementById('elapsedTime').textContent = '';
             // Update remove buttons (show them when stopped)
             updateSelectedListButtons();
             stopRefresh();
@@ -656,6 +657,11 @@ async function fetchLiveData() {
         const data = await response.json();
 
         if (data.values && data.values.length > 0) {
+            // Update elapsed timestamp display
+            if (data.timestamp_s !== undefined) {
+                const ts = parseFloat(data.timestamp_s);
+                document.getElementById('elapsedTime').textContent = 't = ' + ts.toFixed(3) + ' s';
+            }
             // Update values in place without re-rendering
             data.values.forEach(v => {
                 const key = `${v.device_id}:${v.var_name}`.replace(/:/g, '-');
