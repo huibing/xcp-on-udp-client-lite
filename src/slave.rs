@@ -1471,7 +1471,10 @@ impl XcpSlave {
         }
     }
 
-    /// Query all DAQ event channels from slave using GET_DAQ_EVENT_INFO
+    /// Query all DAQ event channels from slave using GET_DAQ_EVENT_INFO.
+    ///
+    /// After GET_DAQ_EVENT_INFO, the slave automatically sets its MTA to the start of
+    /// the event name string. A subsequent UPLOAD fetches the name bytes.
     pub async fn get_daq_events(&self, max_event_channel: u16) -> Result<Vec<crate::a2l::DaqEvent>, SlaveError> {
         let mut events = Vec::new();
         for channel in 0..max_event_channel {
@@ -1479,11 +1482,23 @@ impl XcpSlave {
             let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
             match parsed {
                 Response::Res(data) if data.len() >= 6 => {
+                    // Response layout (after 0xFF status byte):
+                    //   [0] DAQ_EVENT_PROPERTIES
+                    //   [1] MAX_DAQ_LIST
+                    //   [2] EVENT_CHANNEL_NAME_LENGTH
+                    //   [3] EVENT_CHANNEL_TIME_CYCLE
+                    //   [4] EVENT_CHANNEL_TIME_UNIT
+                    //   [5] EVENT_CHANNEL_PRIORITY
+                    // After sending the command, the slave's MTA is set to the name string.
                     let name_len = data[2] as usize;
-                    let name = if name_len > 0 && data.len() >= 6 + name_len {
-                        String::from_utf8_lossy(&data[6..6 + name_len])
-                            .trim_end_matches('\0')
-                            .to_string()
+                    let name = if name_len > 0 {
+                        // MTA was auto-set by the slave; just UPLOAD the name bytes.
+                        match self.upload(name_len as u8).await {
+                            Ok(name_bytes) => String::from_utf8_lossy(&name_bytes)
+                                .trim_end_matches('\0')
+                                .to_string(),
+                            Err(_) => format!("Event{}", channel),
+                        }
                     } else {
                         format!("Event{}", channel)
                     };
