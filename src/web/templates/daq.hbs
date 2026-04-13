@@ -507,6 +507,14 @@ function renderSelectedVars() {
     }).join('');
 }
 
+function getEventCycleBadge(channel) {
+    const evt = availableEvents.find(e => e.channel == channel);
+    if (!evt) return `<span style="font-size: 0.7em; color: #888; background: #333; padding: 1px 4px; border-radius: 3px;">Ch${channel}</span>`;
+    const ms = evt.cycle_time_ms !== undefined ? evt.cycle_time_ms : null;
+    const label = ms !== null ? (ms >= 1000 ? (ms/1000) + 's' : ms + 'ms') : evt.short_name || evt.name;
+    return `<span style="font-size: 0.7em; color: #4af; background: #1a2a3a; padding: 1px 5px; border-radius: 3px;" title="${escapeHtml(evt.display_label || '')}">${escapeHtml(label)}</span>`;
+}
+
 function renderSelectedList(selectedVars) {
     const list = document.getElementById('selectedList');
     const hasEvents = availableEvents.length > 0;
@@ -532,11 +540,18 @@ function renderSelectedList(selectedVars) {
         const currentEvent = measurementEvents[v.idx.toString()] !== undefined
             ? measurementEvents[v.idx.toString()]
             : selectedEventChannel;
-        const eventSelect = hasEvents
-            ? `<select class="event-select" onchange="setMeasurementEvent(${v.idx}, this.value)" ${daqRunning ? 'disabled' : ''}>
-                   ${buildEventOptions(currentEvent)}
-               </select>`
-            : '';
+        let eventWidget = '';
+        if (hasEvents) {
+            if (daqRunning) {
+                // Show rate badge during running
+                eventWidget = getEventCycleBadge(currentEvent);
+            } else {
+                // Show dropdown when not running
+                eventWidget = `<select class="event-select" onchange="setMeasurementEvent(${v.idx}, this.value)">
+                       ${buildEventOptions(currentEvent)}
+                   </select>`;
+            }
+        }
         return `
             <div class="daq-item">
                 <span class="name" style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
@@ -544,7 +559,7 @@ function renderSelectedList(selectedVars) {
                     ${escapeHtml(v.name)}
                 </span>
                 <div class="btn-group" style="display: flex; align-items: center; gap: 0.3rem; flex-shrink: 0;">
-                    ${eventSelect}
+                    ${eventWidget}
                     <button onclick="openInfoModal('${v.device_id}', ${v.idx}, '${escapeHtml(v.name)}')" title="Info" style="padding: 0.2rem 0.5rem;">ℹ️</button>
                     ${removeBtn}
                 </div>
@@ -1023,8 +1038,9 @@ const CHART_COLORS = [
     '#ff8800', '#00cccc', '#cc44cc', '#88ccff', '#ffcc44'
 ];
 
-let chartTimestamps = [];
-let chartSeries = {};      // { "device_id:var_name": [val, ...] }
+let chartSignalTimes = {};  // { "device_id:var_name": [t, ...] }
+let chartSignalValues = {}; // { "device_id:var_name": [v, ...] }
+let chartSignalLastTs = {}; // { "device_id:var_name": last_updated_at }
 let chartSignalNames = {}; // { "device_id:var_name": "display_name" }
 let chartVisible = false;
 let chartSelectedSignals = new Set();
@@ -1061,38 +1077,36 @@ function toggleGraph() {
 
 function accumulateChartData(data) {
     if (!data.values || data.values.length === 0) return;
-    const ts = parseFloat(data.timestamp_s);
-    if (isNaN(ts)) return;
-    if (chartTimestamps.length > 0 && chartTimestamps[chartTimestamps.length - 1] === ts) return;
-
-    chartTimestamps.push(ts);
     let newSignalAdded = false;
 
     data.values.forEach(v => {
         const key = `${v.device_id}:${v.var_name}`;
-        if (!chartSeries[key]) {
-            chartSeries[key] = new Array(chartTimestamps.length - 1).fill(NaN);
+        const ts = parseFloat(v.updated_at || data.timestamp_s);
+        const val = parseFloat(v.value);
+        if (isNaN(ts) || isNaN(val)) return;
+
+        // Only add if timestamp is newer
+        if (chartSignalLastTs[key] !== undefined && ts <= chartSignalLastTs[key]) return;
+
+        if (!chartSignalTimes[key]) {
+            chartSignalTimes[key] = [];
+            chartSignalValues[key] = [];
             chartSignalNames[key] = v.var_name;
             chartSelectedSignals.add(key);
             newSignalAdded = true;
         }
-        chartSeries[key].push(parseFloat(v.value));
+
+        chartSignalTimes[key].push(ts);
+        chartSignalValues[key].push(val);
+        chartSignalLastTs[key] = ts;
     });
 
-    // Fill missing signals with last known value
-    for (const key of Object.keys(chartSeries)) {
-        while (chartSeries[key].length < chartTimestamps.length) {
-            const arr = chartSeries[key];
-            arr.push(arr.length > 0 ? arr[arr.length - 1] : NaN);
-        }
-    }
-
-    // Trim to max points
-    if (chartTimestamps.length > MAX_CHART_POINTS) {
-        const excess = chartTimestamps.length - MAX_CHART_POINTS;
-        chartTimestamps.splice(0, excess);
-        for (const key of Object.keys(chartSeries)) {
-            chartSeries[key].splice(0, excess);
+    // Trim per-signal to max points
+    for (const key of Object.keys(chartSignalTimes)) {
+        if (chartSignalTimes[key].length > MAX_CHART_POINTS) {
+            const excess = chartSignalTimes[key].length - MAX_CHART_POINTS;
+            chartSignalTimes[key].splice(0, excess);
+            chartSignalValues[key].splice(0, excess);
         }
     }
 
@@ -1102,8 +1116,9 @@ function accumulateChartData(data) {
 }
 
 function clearChartData() {
-    chartTimestamps = [];
-    chartSeries = {};
+    chartSignalTimes = {};
+    chartSignalValues = {};
+    chartSignalLastTs = {};
     chartSignalNames = {};
     chartSelectedSignals.clear();
     chartResetView();
@@ -1124,11 +1139,11 @@ function chartResetView() {
 
 // Compute the full data range for Y-axis across selected signals
 function chartFullYRange() {
-    const allKeys = Object.keys(chartSeries);
+    const allKeys = Object.keys(chartSignalValues);
     const signalKeys = allKeys.filter(k => chartSelectedSignals.has(k));
     let yMin = Infinity, yMax = -Infinity;
     signalKeys.forEach(key => {
-        chartSeries[key].forEach(v => {
+        chartSignalValues[key].forEach(v => {
             if (!isNaN(v) && isFinite(v)) {
                 if (v < yMin) yMin = v;
                 if (v > yMax) yMax = v;
@@ -1145,7 +1160,7 @@ function chartFullYRange() {
 
 function updateGraphSignalCheckboxes() {
     const container = document.getElementById('graphSignals');
-    const signalKeys = Object.keys(chartSeries);
+    const signalKeys = Object.keys(chartSignalTimes);
     if (signalKeys.length === 0) {
         container.innerHTML = '<span style="color: #888;">No data yet. Start DAQ to collect data.</span>';
         return;
@@ -1156,10 +1171,12 @@ function updateGraphSignalCheckboxes() {
         const color = CHART_COLORS[i % CHART_COLORS.length];
         const checked = chartSelectedSignals.has(key) ? 'checked' : '';
         const name = chartSignalNames[key] || key;
+        const pts = chartSignalTimes[key] ? chartSignalTimes[key].length : 0;
         html += `<label style="display: inline-flex; align-items: center; gap: 4px; cursor: pointer; padding: 2px 8px; border-radius: 4px; background: #2a2a3a;">
             <input type="checkbox" ${checked} onchange="toggleChartSignal('${key.replace(/'/g, "\\'")}')">
             <span style="display: inline-block; width: 14px; height: 3px; background: ${color}; border-radius: 1px;"></span>
             <span style="font-size: 0.85em;">${escapeHtml(name)}</span>
+            <span style="font-size: 0.7em; color: #666;">(${pts})</span>
         </label>`;
     });
     container.innerHTML = html;
@@ -1197,20 +1214,30 @@ function drawChart() {
     ctx.fillRect(0, 0, W, H);
 
     // Get selected signal keys (preserve insertion order)
-    const allKeys = Object.keys(chartSeries);
+    const allKeys = Object.keys(chartSignalTimes);
     const signalKeys = allKeys.filter(k => chartSelectedSignals.has(k));
 
-    if (chartTimestamps.length < 2 || signalKeys.length === 0) {
+    // Check total data points
+    const totalPoints = allKeys.reduce((s, k) => s + (chartSignalTimes[k] ? chartSignalTimes[k].length : 0), 0);
+
+    if (totalPoints < 2 || signalKeys.length === 0) {
         ctx.fillStyle = '#666';
         ctx.font = '14px sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(chartTimestamps.length < 2 ? 'Waiting for data...' : 'Select signals to display', W / 2, H / 2);
+        ctx.fillText(totalPoints < 2 ? 'Waiting for data...' : 'Select signals to display', W / 2, H / 2);
         return;
     }
 
-    // Determine X range (time)
-    const dataT0 = chartTimestamps[0];
-    const dataT1 = chartTimestamps[chartTimestamps.length - 1];
+    // Determine global X range (time) across all signals
+    let dataT0 = Infinity, dataT1 = -Infinity;
+    allKeys.forEach(k => {
+        const times = chartSignalTimes[k];
+        if (times && times.length > 0) {
+            dataT0 = Math.min(dataT0, times[0]);
+            dataT1 = Math.max(dataT1, times[times.length - 1]);
+        }
+    });
+
     let tMin, tMax;
     if (chartViewTMin !== null && chartViewTMax !== null) {
         tMin = chartViewTMin;
@@ -1239,11 +1266,12 @@ function drawChart() {
         yMin = Infinity;
         yMax = -Infinity;
         signalKeys.forEach(key => {
-            const data = chartSeries[key];
-            for (let i = 0; i < data.length; i++) {
-                const t = chartTimestamps[i];
-                if (t < tMin || t > tMax) continue;
-                const v = data[i];
+            const times = chartSignalTimes[key];
+            const vals = chartSignalValues[key];
+            if (!times) return;
+            for (let i = 0; i < times.length; i++) {
+                if (times[i] < tMin || times[i] > tMax) continue;
+                const v = vals[i];
                 if (!isNaN(v) && isFinite(v)) {
                     if (v < yMin) yMin = v;
                     if (v > yMax) yMax = v;
@@ -1306,19 +1334,22 @@ function drawChart() {
     ctx.rect(ML, MT, plotW, plotH);
     ctx.clip();
 
-    // Draw signal lines
+    // Draw signal lines (per-signal time series)
     signalKeys.forEach(key => {
         const colorIdx = allKeys.indexOf(key);
         const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
-        const data = chartSeries[key];
+        const times = chartSignalTimes[key];
+        const vals = chartSignalValues[key];
+        if (!times || times.length < 1) return;
+
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         let started = false;
-        for (let i = 0; i < data.length; i++) {
-            if (isNaN(data[i])) { started = false; continue; }
-            const x = toX(chartTimestamps[i]);
-            const y = toY(data[i]);
+        for (let i = 0; i < times.length; i++) {
+            if (isNaN(vals[i])) { started = false; continue; }
+            const x = toX(times[i]);
+            const y = toY(vals[i]);
             if (!started) { ctx.moveTo(x, y); started = true; }
             else { ctx.lineTo(x, y); }
         }
@@ -1343,11 +1374,27 @@ function fmtAxis(v) {
     const canvas = document.getElementById('chartCanvas');
     if (!canvas) return;
 
+    // Helper: get total data points across all signals
+    function getTotalPoints() {
+        return Object.values(chartSignalTimes).reduce((s, a) => s + a.length, 0);
+    }
+
+    // Helper: get global time range across all signals
+    function getGlobalTimeRange() {
+        let t0 = Infinity, t1 = -Infinity;
+        for (const times of Object.values(chartSignalTimes)) {
+            if (times.length > 0) {
+                t0 = Math.min(t0, times[0]);
+                t1 = Math.max(t1, times[times.length - 1]);
+            }
+        }
+        return { t0, t1 };
+    }
+
     // Helper: get effective view ranges (matching drawChart logic)
     function getViewRanges() {
-        if (chartTimestamps.length < 2) return null;
-        const dataT0 = chartTimestamps[0];
-        const dataT1 = chartTimestamps[chartTimestamps.length - 1];
+        if (getTotalPoints() < 2) return null;
+        const { t0: dataT0, t1: dataT1 } = getGlobalTimeRange();
         let tMin = chartViewTMin !== null ? chartViewTMin : dataT0;
         let tMax = chartViewTMax !== null ? chartViewTMax : dataT1;
         const tRange = tMax - tMin || 1;
@@ -1368,7 +1415,7 @@ function fmtAxis(v) {
     // Mouse wheel: zoom
     canvas.addEventListener('wheel', function(e) {
         e.preventDefault();
-        if (chartTimestamps.length < 2) return;
+        if (getTotalPoints() < 2) return;
 
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left;
@@ -1407,7 +1454,7 @@ function fmtAxis(v) {
     // Mouse drag: pan
     canvas.addEventListener('mousedown', function(e) {
         if (e.button !== 0) return;
-        if (chartTimestamps.length < 2) return;
+        if (getTotalPoints() < 2) return;
 
         const ranges = getViewRanges();
         if (!ranges) return;
@@ -1451,7 +1498,7 @@ function fmtAxis(v) {
         }
 
         // Tooltip (only when not dragging)
-        if (!chartVisible || chartTimestamps.length < 2) {
+        if (!chartVisible || getTotalPoints() < 2) {
             tooltip.style.display = 'none';
             return;
         }
@@ -1470,26 +1517,32 @@ function fmtAxis(v) {
 
         const t = ranges.tMin + ((mx - CHART_ML) / plotW) * ranges.tRange;
 
-        // Find nearest timestamp index (binary search for performance)
-        let lo = 0, hi = chartTimestamps.length - 1;
-        while (lo < hi) {
-            const mid = (lo + hi) >> 1;
-            if (chartTimestamps[mid] < t) lo = mid + 1;
-            else hi = mid;
-        }
-        if (lo > 0 && Math.abs(chartTimestamps[lo - 1] - t) < Math.abs(chartTimestamps[lo] - t)) lo--;
-        const idx = lo;
-
-        const allKeys = Object.keys(chartSeries);
+        const allKeys = Object.keys(chartSignalTimes);
         const signalKeys = allKeys.filter(k => chartSelectedSignals.has(k));
         if (signalKeys.length === 0) { tooltip.style.display = 'none'; return; }
 
-        let html = `<b>t = ${chartTimestamps[idx].toFixed(4)}s</b><br>`;
+        let html = `<b>t = ${t.toFixed(4)}s</b><br>`;
         signalKeys.forEach(key => {
             const colorIdx = allKeys.indexOf(key);
             const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
-            const v = chartSeries[key][idx];
+            const times = chartSignalTimes[key];
+            const vals = chartSignalValues[key];
             const name = chartSignalNames[key] || key;
+
+            if (!times || times.length === 0) {
+                html += `<span style="color:${color}">●</span> ${escapeHtml(name)}: -<br>`;
+                return;
+            }
+
+            // Binary search for nearest point in this signal's time array
+            let lo = 0, hi = times.length - 1;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (times[mid] < t) lo = mid + 1;
+                else hi = mid;
+            }
+            if (lo > 0 && Math.abs(times[lo - 1] - t) < Math.abs(times[lo] - t)) lo--;
+            const v = vals[lo];
             html += `<span style="color:${color}">●</span> ${escapeHtml(name)}: ${isNaN(v) ? '-' : v.toFixed(6)}<br>`;
         });
 

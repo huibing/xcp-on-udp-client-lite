@@ -287,6 +287,8 @@ pub struct DaqRecord {
     /// Measurement values (name -> physical value as f64)
     /// Values are converted from raw bytes using COMPU_METHOD
     pub values: HashMap<String, f64>,
+    /// Per-signal update timestamps (name -> elapsed seconds when last updated)
+    pub signal_timestamps: HashMap<String, f64>,
     /// Raw values for debugging (name -> raw bytes)
     #[serde(skip)]
     pub raw_values: HashMap<String, Vec<u8>>,
@@ -299,6 +301,7 @@ impl DaqRecord {
             timestamp_s,
             timestamp_raw,
             values: HashMap::new(),
+            signal_timestamps: HashMap::new(),
             raw_values: HashMap::new(),
         }
     }
@@ -1271,13 +1274,18 @@ impl DaqManager {
                                         existing.timestamp_raw = record.timestamp_raw;
                                         for (name, value) in &record.values {
                                             existing.values.insert(name.clone(), *value);
+                                            existing.signal_timestamps.insert(name.clone(), display_timestamp_s);
                                         }
                                         for (name, raw) in &record.raw_values {
                                             existing.raw_values.insert(name.clone(), raw.clone());
                                         }
                                     }
                                     None => {
-                                        *latest = Some(record.clone());
+                                        let mut r = record.clone();
+                                        for name in r.values.keys() {
+                                            r.signal_timestamps.insert(name.clone(), display_timestamp_s);
+                                        }
+                                        *latest = Some(r);
                                     }
                                 }
                             }
@@ -1303,7 +1311,7 @@ impl DaqManager {
                                     }
                                 };
 
-                                // Write CSV line
+                                // Write CSV line (empty cell for non-updated signals from other event groups)
                                 {
                                     let mut csv_guard = csv_writer.lock().await;
                                     if let Some(ref mut writer) = *csv_guard {
@@ -1319,9 +1327,8 @@ impl DaqManager {
                                                         csv_line.push_str(&format!("{:.0}", value));
                                                     }
                                                 }
-                                            } else {
-                                                csv_line.push('0');
                                             }
+                                            // Non-updated signals: leave cell empty
                                         }
                                         if let Err(e) = writeln!(writer, "{}", csv_line) {
                                             tracing::error!("Failed to write CSV: {}", e);

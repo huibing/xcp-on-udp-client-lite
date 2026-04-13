@@ -1918,16 +1918,18 @@ pub async fn daq_data(
         if *slave.daq_running.read().await {
             let daq_manager = slave.daq_manager.read().await;
             if let Some(r) = daq_manager.get_latest_sample().await {
-                for (k, v) in r.values {
+                for (k, v) in &r.values {
                     let device_id = slave.id.to_string();
 
                     // Filter by selected variables if any
                     if filter_set.is_empty() || filter_set.contains(&(device_id.clone(), k.clone())) {
+                        let updated_at = r.signal_timestamps.get(k).copied().unwrap_or(r.timestamp_s);
                         values.push(json!({
                             "device_id": device_id,
                             "var_name": k,
                             "display_name": slave.display_name(),
-                            "value": format!("{:.6}", v)
+                            "value": format!("{:.6}", v),
+                            "updated_at": format!("{:.6}", updated_at)
                         }));
                     }
                 }
