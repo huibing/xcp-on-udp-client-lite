@@ -27,11 +27,26 @@
             <button onclick="clearData()" class="secondary">Clear</button>
             <button onclick="downloadFile('csv')" class="secondary" title="Download CSV">⬇ CSV</button>
             <button onclick="downloadFile('mf4')" class="secondary" title="Download MDF4">⬇ MF4</button>
+            <button id="graphBtn" onclick="toggleGraph()" class="secondary" title="Toggle Graph">📊 Graph</button>
         </div>
     </div>
 </div>
 
-<!-- Modal for variable selection -->
+<!-- Graph Panel (hidden by default) -->
+<div id="graphPanel" class="card" style="display: none; margin-top: 1rem;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+        <h2 style="margin: 0;">Graph</h2>
+        <div class="btn-group">
+            <button class="secondary" onclick="clearChartData()" style="font-size: 0.85em;">Clear</button>
+            <button class="secondary" onclick="toggleGraph()" style="font-size: 0.85em;">✕ Close</button>
+        </div>
+    </div>
+    <div id="graphSignals" style="margin-bottom: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem;">
+        <span style="color: #888;">No data yet. Start DAQ to collect data.</span>
+    </div>
+    <canvas id="chartCanvas" style="width: 100%; height: 350px; background: #111; border-radius: 4px; cursor: crosshair;"></canvas>
+    <div id="chartTooltip" style="display: none; position: absolute; background: rgba(30,30,50,0.95); color: #eee; padding: 6px 10px; border-radius: 4px; font-size: 0.8em; pointer-events: none; border: 1px solid #555; z-index: 10;"></div>
+</div>
 <div id="varModal" class="modal" style="display: none;">
     <div class="modal-content" style="width: 80%; min-width: 600px; max-width: 1200px; max-height: 80vh; overflow: hidden; display: flex; flex-direction: column;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem; border-bottom: 1px solid #444;">
@@ -676,6 +691,12 @@ async function fetchLiveData() {
                     valueCell.textContent = v.value;
                 }
             });
+
+            // Accumulate data for graph
+            accumulateChartData(data);
+            if (chartVisible) {
+                drawChart();
+            }
         }
     } catch (e) {
         console.error('Failed to fetch live data:', e);
@@ -839,4 +860,299 @@ async function setAllMeasurementEvents(channel) {
     }
     renderSelectedVars();
 }
+
+// ========== Graph / Chart ==========
+const MAX_CHART_POINTS = 2000;
+const CHART_COLORS = [
+    '#00ff88', '#ff4488', '#44aaff', '#ffaa00', '#aa44ff',
+    '#ff6644', '#44ffaa', '#ff44ff', '#88ff44', '#4488ff',
+    '#ff8800', '#00cccc', '#cc44cc', '#88ccff', '#ffcc44'
+];
+
+let chartTimestamps = [];
+let chartSeries = {};      // { "device_id:var_name": [val, ...] }
+let chartSignalNames = {}; // { "device_id:var_name": "display_name" }
+let chartVisible = false;
+let chartSelectedSignals = new Set();
+// Chart layout constants
+const CHART_ML = 70, CHART_MR = 20, CHART_MT = 10, CHART_MB = 30;
+
+function toggleGraph() {
+    chartVisible = !chartVisible;
+    const panel = document.getElementById('graphPanel');
+    panel.style.display = chartVisible ? 'block' : 'none';
+    const btn = document.getElementById('graphBtn');
+    btn.textContent = chartVisible ? '📊 Hide Graph' : '📊 Graph';
+    if (chartVisible) {
+        updateGraphSignalCheckboxes();
+        drawChart();
+    }
+}
+
+function accumulateChartData(data) {
+    if (!data.values || data.values.length === 0) return;
+    const ts = parseFloat(data.timestamp_s);
+    if (isNaN(ts)) return;
+    if (chartTimestamps.length > 0 && chartTimestamps[chartTimestamps.length - 1] === ts) return;
+
+    chartTimestamps.push(ts);
+    let newSignalAdded = false;
+
+    data.values.forEach(v => {
+        const key = `${v.device_id}:${v.var_name}`;
+        if (!chartSeries[key]) {
+            chartSeries[key] = new Array(chartTimestamps.length - 1).fill(NaN);
+            chartSignalNames[key] = v.var_name;
+            chartSelectedSignals.add(key);
+            newSignalAdded = true;
+        }
+        chartSeries[key].push(parseFloat(v.value));
+    });
+
+    // Fill missing signals with last known value
+    for (const key of Object.keys(chartSeries)) {
+        while (chartSeries[key].length < chartTimestamps.length) {
+            const arr = chartSeries[key];
+            arr.push(arr.length > 0 ? arr[arr.length - 1] : NaN);
+        }
+    }
+
+    // Trim to max points
+    if (chartTimestamps.length > MAX_CHART_POINTS) {
+        const excess = chartTimestamps.length - MAX_CHART_POINTS;
+        chartTimestamps.splice(0, excess);
+        for (const key of Object.keys(chartSeries)) {
+            chartSeries[key].splice(0, excess);
+        }
+    }
+
+    if (newSignalAdded && chartVisible) {
+        updateGraphSignalCheckboxes();
+    }
+}
+
+function clearChartData() {
+    chartTimestamps = [];
+    chartSeries = {};
+    chartSignalNames = {};
+    chartSelectedSignals.clear();
+    updateGraphSignalCheckboxes();
+    drawChart();
+}
+
+function updateGraphSignalCheckboxes() {
+    const container = document.getElementById('graphSignals');
+    const signalKeys = Object.keys(chartSeries);
+    if (signalKeys.length === 0) {
+        container.innerHTML = '<span style="color: #888;">No data yet. Start DAQ to collect data.</span>';
+        return;
+    }
+
+    let html = '';
+    signalKeys.forEach((key, i) => {
+        const color = CHART_COLORS[i % CHART_COLORS.length];
+        const checked = chartSelectedSignals.has(key) ? 'checked' : '';
+        const name = chartSignalNames[key] || key;
+        html += `<label style="display: inline-flex; align-items: center; gap: 4px; cursor: pointer; padding: 2px 8px; border-radius: 4px; background: #2a2a3a;">
+            <input type="checkbox" ${checked} onchange="toggleChartSignal('${key.replace(/'/g, "\\'")}')">
+            <span style="display: inline-block; width: 14px; height: 3px; background: ${color}; border-radius: 1px;"></span>
+            <span style="font-size: 0.85em;">${escapeHtml(name)}</span>
+        </label>`;
+    });
+    container.innerHTML = html;
+}
+
+function toggleChartSignal(key) {
+    if (chartSelectedSignals.has(key)) {
+        chartSelectedSignals.delete(key);
+    } else {
+        chartSelectedSignals.add(key);
+    }
+    drawChart();
+}
+
+function drawChart() {
+    const canvas = document.getElementById('chartCanvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    // Handle high DPI and actual dimensions
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    const W = rect.width;
+    const H = rect.height;
+
+    const ML = CHART_ML, MR = CHART_MR, MT = CHART_MT, MB = CHART_MB;
+    const plotW = W - ML - MR;
+    const plotH = H - MT - MB;
+
+    // Clear
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, W, H);
+
+    // Get selected signal keys (preserve insertion order)
+    const allKeys = Object.keys(chartSeries);
+    const signalKeys = allKeys.filter(k => chartSelectedSignals.has(k));
+
+    if (chartTimestamps.length < 2 || signalKeys.length === 0) {
+        ctx.fillStyle = '#666';
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(chartTimestamps.length < 2 ? 'Waiting for data...' : 'Select signals to display', W / 2, H / 2);
+        return;
+    }
+
+    // Calculate ranges
+    const tMin = chartTimestamps[0];
+    const tMax = chartTimestamps[chartTimestamps.length - 1];
+    const tRange = tMax - tMin || 1;
+
+    let yMin = Infinity, yMax = -Infinity;
+    signalKeys.forEach(key => {
+        chartSeries[key].forEach(v => {
+            if (!isNaN(v) && isFinite(v)) {
+                if (v < yMin) yMin = v;
+                if (v > yMax) yMax = v;
+            }
+        });
+    });
+    if (!isFinite(yMin)) { yMin = 0; yMax = 1; }
+    let yRange = yMax - yMin;
+    if (yRange === 0) { yRange = 1; yMin -= 0.5; yMax += 0.5; }
+    yMin -= yRange * 0.05;
+    yMax += yRange * 0.05;
+    yRange = yMax - yMin;
+
+    const toX = t => ML + ((t - tMin) / tRange) * plotW;
+    const toY = v => MT + plotH - ((v - yMin) / yRange) * plotH;
+
+    // Draw grid
+    ctx.strokeStyle = '#2a2a2a';
+    ctx.lineWidth = 0.5;
+
+    const yTicks = 5;
+    for (let i = 0; i <= yTicks; i++) {
+        const y = MT + (plotH / yTicks) * i;
+        ctx.beginPath();
+        ctx.moveTo(ML, y);
+        ctx.lineTo(ML + plotW, y);
+        ctx.stroke();
+
+        const val = yMax - (i / yTicks) * yRange;
+        ctx.fillStyle = '#888';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(fmtAxis(val), ML - 5, y + 3);
+    }
+
+    const xTicks = 5;
+    for (let i = 0; i <= xTicks; i++) {
+        const x = ML + (plotW / xTicks) * i;
+        ctx.beginPath();
+        ctx.moveTo(x, MT);
+        ctx.lineTo(x, MT + plotH);
+        ctx.stroke();
+
+        const t = tMin + (i / xTicks) * tRange;
+        ctx.fillStyle = '#888';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(t.toFixed(2) + 's', x, MT + plotH + 15);
+    }
+
+    // Plot border
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(ML, MT, plotW, plotH);
+
+    // Draw signal lines
+    signalKeys.forEach(key => {
+        const colorIdx = allKeys.indexOf(key);
+        const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
+        const data = chartSeries[key];
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i < data.length; i++) {
+            if (isNaN(data[i])) { started = false; continue; }
+            const x = toX(chartTimestamps[i]);
+            const y = toY(data[i]);
+            if (!started) { ctx.moveTo(x, y); started = true; }
+            else { ctx.lineTo(x, y); }
+        }
+        ctx.stroke();
+    });
+}
+
+function fmtAxis(v) {
+    const a = Math.abs(v);
+    if (a === 0) return '0';
+    if (a >= 10000) return v.toFixed(0);
+    if (a >= 100) return v.toFixed(1);
+    if (a >= 1) return v.toFixed(2);
+    if (a >= 0.01) return v.toFixed(4);
+    return v.toExponential(2);
+}
+
+// Tooltip on mouse move over chart
+(function() {
+    const canvas = document.getElementById('chartCanvas');
+    if (!canvas) return;
+    canvas.addEventListener('mousemove', function(e) {
+        const tooltip = document.getElementById('chartTooltip');
+        if (!chartVisible || chartTimestamps.length < 2) {
+            tooltip.style.display = 'none';
+            return;
+        }
+
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const W = rect.width;
+        const plotW = W - CHART_ML - CHART_MR;
+
+        if (mx < CHART_ML || mx > CHART_ML + plotW) {
+            tooltip.style.display = 'none';
+            return;
+        }
+
+        const tMin = chartTimestamps[0];
+        const tMax = chartTimestamps[chartTimestamps.length - 1];
+        const tRange = tMax - tMin || 1;
+        const t = tMin + ((mx - CHART_ML) / plotW) * tRange;
+
+        // Find nearest timestamp index
+        let idx = 0;
+        let minDist = Infinity;
+        for (let i = 0; i < chartTimestamps.length; i++) {
+            const d = Math.abs(chartTimestamps[i] - t);
+            if (d < minDist) { minDist = d; idx = i; }
+        }
+
+        const allKeys = Object.keys(chartSeries);
+        const signalKeys = allKeys.filter(k => chartSelectedSignals.has(k));
+        if (signalKeys.length === 0) { tooltip.style.display = 'none'; return; }
+
+        let html = `<b>t = ${chartTimestamps[idx].toFixed(4)}s</b><br>`;
+        signalKeys.forEach(key => {
+            const colorIdx = allKeys.indexOf(key);
+            const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
+            const v = chartSeries[key][idx];
+            const name = chartSignalNames[key] || key;
+            html += `<span style="color:${color}">●</span> ${escapeHtml(name)}: ${isNaN(v) ? '-' : v.toFixed(6)}<br>`;
+        });
+
+        tooltip.innerHTML = html;
+        tooltip.style.display = 'block';
+        tooltip.style.left = (e.clientX + 12) + 'px';
+        tooltip.style.top = (e.clientY - 10) + 'px';
+    });
+
+    canvas.addEventListener('mouseleave', function() {
+        document.getElementById('chartTooltip').style.display = 'none';
+    });
+})();
 </script>
