@@ -1781,16 +1781,25 @@ pub async fn daq_set_selection(
 pub async fn daq_status(State(state): State<AppState>) -> impl IntoResponse {
     let current_slave = state.current_slave().await;
 
-    let (running, recording) = if let Some(ref slave) = current_slave {
+    let (running, recording, rec_duration, csv_size, mf4_size) = if let Some(ref slave) = current_slave {
         let daq = slave.daq_manager.read().await;
-        (*slave.daq_running.read().await, daq.is_recording())
+        let is_rec = daq.is_recording();
+        let (dur, csv, mf4) = if is_rec {
+            daq.recording_stats().await
+        } else {
+            (0.0, 0, 0)
+        };
+        (*slave.daq_running.read().await, is_rec, dur, csv, mf4)
     } else {
-        (false, false)
+        (false, false, 0.0, 0, 0)
     };
 
     Json(json!({
         "running": running,
-        "recording": recording
+        "recording": recording,
+        "rec_duration_s": rec_duration,
+        "csv_size": csv_size,
+        "mf4_size": mf4_size
     }))
 }
 

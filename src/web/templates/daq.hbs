@@ -16,7 +16,7 @@
     </div>
 
     <div class="card">
-        <h2>Live Data <span id="daqStatus" class="tag stopped">STOPPED</span> <span id="elapsedTime" style="font-size: 0.8em; color: #888; margin-left: 12px;"></span></h2>
+        <h2>Live Data <span id="daqStatus" class="tag stopped">STOPPED</span> <span id="elapsedTime" style="font-size: 0.8em; color: #888; margin-left: 12px;"></span> <span id="recInfo" style="font-size: 0.75em; color: #ff6666; margin-left: 8px;"></span></h2>
         <div id="liveData" style="max-height: 400px; overflow-y: auto;">
             <p style="color: #666; text-align: center;">No data (DAQ not running)</p>
         </div>
@@ -198,6 +198,7 @@ let tempSelectedKeys = new Set();
 let daqRunning = false;
 let daqRecording = false;
 let refreshInterval = null;
+let recInfoInterval = null;
 // Lazy loading state
 let displayedCount = 0;
 const BATCH_SIZE = 50;
@@ -730,6 +731,46 @@ function updateDaqStatus() {
         recordBtn.style.display = 'none';
         stopRecordBtn.style.display = 'none';
         stopBtn.style.display = 'none';
+    }
+
+    // Start/stop recording info polling
+    if (daqRecording && !recInfoInterval) {
+        recInfoInterval = setInterval(updateRecordingInfo, 1000);
+        updateRecordingInfo();
+    } else if (!daqRecording) {
+        if (recInfoInterval) { clearInterval(recInfoInterval); recInfoInterval = null; }
+        document.getElementById('recInfo').textContent = '';
+    }
+}
+
+function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function formatDuration(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+async function updateRecordingInfo() {
+    if (!daqRecording) return;
+    try {
+        const response = await fetch('/api/daq/status');
+        const data = await response.json();
+        if (data.recording) {
+            const dur = formatDuration(data.rec_duration_s || 0);
+            const csv = formatFileSize(data.csv_size || 0);
+            const mf4 = formatFileSize(data.mf4_size || 0);
+            document.getElementById('recInfo').textContent =
+                `⏺ ${dur} | CSV: ${csv} | MF4: ${mf4}`;
+        }
+    } catch (e) {
+        // ignore
     }
 }
 

@@ -1615,6 +1615,20 @@ impl DaqManager {
         self.recording.load(Ordering::SeqCst)
     }
 
+    /// Get recording statistics (duration in seconds, file sizes in bytes)
+    pub async fn recording_stats(&self) -> (f64, u64, u64) {
+        let duration = if let Some(start) = *self.recording_start_instant.read().await {
+            start.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
+
+        let csv_size = std::fs::metadata(&self.csv_path).map(|m| m.len()).unwrap_or(0);
+        let mf4_size = std::fs::metadata(&self.mdf4_path).map(|m| m.len()).unwrap_or(0);
+
+        (duration, csv_size, mf4_size)
+    }
+
     /// Stop DAQ acquisition
     ///
     /// If recording is active, stops recording first (finalizes files).
