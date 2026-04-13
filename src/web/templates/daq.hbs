@@ -23,10 +23,10 @@
         <br>
         <div class="btn-group">
             <button id="startBtn" onclick="startDaq()">Start</button>
-            <button id="stopBtn" onclick="stopDaq()" class="danger" style="display: none;">Stop</button>
+            <button id="recordBtn" onclick="startRecording()" class="danger" style="display: none;" title="Start Recording">⏺ Record</button>
+            <button id="stopRecordBtn" onclick="stopRecording()" class="danger" style="display: none;" title="Stop Recording">⏹ Stop Rec</button>
+            <button id="stopBtn" onclick="stopDaq()" class="secondary" style="display: none;">Stop</button>
             <button onclick="clearData()" class="secondary">Clear</button>
-            <button onclick="downloadFile('csv')" class="secondary" title="Download CSV">⬇ CSV</button>
-            <button onclick="downloadFile('mf4')" class="secondary" title="Download MDF4">⬇ MF4</button>
             <button id="graphBtn" onclick="toggleGraph()" class="secondary" title="Toggle Graph">📊 Graph</button>
         </div>
     </div>
@@ -170,11 +170,33 @@
 }
 </style>
 
+<!-- Download Popup Modal (shown after recording stops) -->
+<div id="downloadModal" class="modal" style="display: none;">
+    <div class="modal-content" style="width: 400px; max-width: 90vw;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem; border-bottom: 1px solid #444;">
+            <h3 style="margin: 0;">📁 Recording Complete</h3>
+            <button onclick="closeDownloadModal()" style="background: none; border: none; color: #aaa; font-size: 1.2em; cursor: pointer;">✕</button>
+        </div>
+        <div style="padding: 1.5rem;">
+            <p style="color: #ccc; margin-bottom: 1rem;">Recording has been saved. Choose a format to download:</p>
+            <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+                <button onclick="downloadFile('csv')" class="btn" style="width: 100%; padding: 0.75rem;">⬇ Download CSV</button>
+                <button onclick="downloadFile('mf4')" class="btn" style="width: 100%; padding: 0.75rem;">⬇ Download MDF4</button>
+                <button onclick="downloadBoth()" class="btn secondary" style="width: 100%; padding: 0.75rem;">⬇ Download Both</button>
+            </div>
+            <div style="margin-top: 1rem; text-align: right;">
+                <button onclick="closeDownloadModal()" class="secondary" style="padding: 0.5rem 1rem;">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 let allVariables = [];
 let selectedKeys = new Set();
 let tempSelectedKeys = new Set();
 let daqRunning = false;
+let daqRecording = false;
 let refreshInterval = null;
 // Lazy loading state
 let displayedCount = 0;
@@ -551,10 +573,9 @@ async function startDaq() {
         const data = await response.json();
         if (data.success) {
             daqRunning = true;
+            daqRecording = false;
             updateDaqStatus();
-            // Update remove buttons (hide them when running)
             updateSelectedListButtons();
-            // Reset all values to "-" before starting
             resetLiveValues();
             startRefresh();
         } else {
@@ -565,17 +586,65 @@ async function startDaq() {
     }
 }
 
-async function stopDaq() {
+async function startRecording() {
+    if (!daqRunning) {
+        alert('Start DAQ first before recording');
+        return;
+    }
     try {
+        const response = await fetch('/api/daq/record/start', { method: 'POST' });
+        const data = await response.json();
+        if (data.success) {
+            daqRecording = true;
+            updateDaqStatus();
+        } else {
+            alert('Failed to start recording: ' + data.error);
+        }
+    } catch (e) {
+        alert('Failed to start recording: ' + e.message);
+    }
+}
+
+async function stopRecording() {
+    try {
+        const response = await fetch('/api/daq/record/stop', { method: 'POST' });
+        const data = await response.json();
+        if (data.success) {
+            daqRecording = false;
+            updateDaqStatus();
+            // Show download popup
+            document.getElementById('downloadModal').style.display = 'flex';
+        } else {
+            alert('Failed to stop recording: ' + data.error);
+        }
+    } catch (e) {
+        alert('Failed to stop recording: ' + e.message);
+    }
+}
+
+async function stopDaq() {
+    const wasRecording = daqRecording;
+    try {
+        // If recording, stop recording first (backend handles this, but we want the popup)
+        if (daqRecording) {
+            const recResp = await fetch('/api/daq/record/stop', { method: 'POST' });
+            await recResp.json();
+            daqRecording = false;
+        }
+
         const response = await fetch('/api/daq/stop');
         const data = await response.json();
         if (data.success) {
             daqRunning = false;
+            daqRecording = false;
             updateDaqStatus();
             document.getElementById('elapsedTime').textContent = '';
-            // Update remove buttons (show them when stopped)
             updateSelectedListButtons();
             stopRefresh();
+            // Show download popup if was recording
+            if (wasRecording) {
+                document.getElementById('downloadModal').style.display = 'flex';
+            }
         } else {
             alert('Failed to stop DAQ: ' + data.error);
         }
@@ -586,6 +655,15 @@ async function stopDaq() {
 
 function downloadFile(format) {
     window.location.href = '/api/daq/download/' + format;
+}
+
+function downloadBoth() {
+    window.location.href = '/api/daq/download/csv';
+    setTimeout(() => { window.location.href = '/api/daq/download/mf4'; }, 500);
+}
+
+function closeDownloadModal() {
+    document.getElementById('downloadModal').style.display = 'none';
 }
 
 function updateSelectedListButtons() {
@@ -622,16 +700,35 @@ function updateDaqStatus() {
     const status = document.getElementById('daqStatus');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
+    const recordBtn = document.getElementById('recordBtn');
+    const stopRecordBtn = document.getElementById('stopRecordBtn');
 
-    if (daqRunning) {
+    if (daqRecording) {
+        // RECORDING state
+        status.className = 'tag running';
+        status.textContent = '⏺ RECORDING';
+        status.style.color = '#ff4444';
+        startBtn.style.display = 'none';
+        recordBtn.style.display = 'none';
+        stopRecordBtn.style.display = 'inline-block';
+        stopBtn.style.display = 'inline-block';
+    } else if (daqRunning) {
+        // RUNNING (streaming only) state
         status.className = 'tag running';
         status.textContent = 'RUNNING';
+        status.style.color = '';
         startBtn.style.display = 'none';
+        recordBtn.style.display = 'inline-block';
+        stopRecordBtn.style.display = 'none';
         stopBtn.style.display = 'inline-block';
     } else {
+        // STOPPED state
         status.className = 'tag stopped';
         status.textContent = 'STOPPED';
+        status.style.color = '';
         startBtn.style.display = 'inline-block';
+        recordBtn.style.display = 'none';
+        stopRecordBtn.style.display = 'none';
         stopBtn.style.display = 'none';
     }
 }
@@ -641,6 +738,7 @@ async function checkDaqStatus() {
         const response = await fetch('/api/daq/status');
         const data = await response.json();
         daqRunning = data.running;
+        daqRecording = data.recording || false;
         updateDaqStatus();
         updateSelectedListButtons();
         if (daqRunning) {
@@ -791,6 +889,13 @@ document.getElementById('varModal').addEventListener('click', (e) => {
 document.getElementById('infoModal').addEventListener('click', (e) => {
     if (e.target.id === 'infoModal') {
         closeInfoModal();
+    }
+});
+
+// Close download modal on outside click
+document.getElementById('downloadModal').addEventListener('click', (e) => {
+    if (e.target.id === 'downloadModal') {
+        closeDownloadModal();
     }
 });
 

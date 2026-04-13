@@ -90,6 +90,8 @@ impl WebServer {
             .route("/api/daq/available", get(routes::daq_available))
             .route("/api/daq/start", get(routes::daq_start))
             .route("/api/daq/stop", get(routes::daq_stop))
+            .route("/api/daq/record/start", post(routes::daq_start_recording))
+            .route("/api/daq/record/stop", post(routes::daq_stop_recording))
             .route("/api/daq/status", get(routes::daq_status))
             .route("/api/daq/toggle", post(routes::daq_toggle))
             .route("/api/daq/select", post(routes::daq_set_selection))

@@ -28,7 +28,7 @@ use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
 
 /// ODT Entry allocation - represents a single measurement entry in an ODT
@@ -440,6 +440,25 @@ pub struct DaqManager {
     daq_config: Arc<RwLock<DaqConfiguration>>,
     /// Flag indicating if selection has changed while DAQ was running
     selection_changed: Arc<AtomicBool>,
+    /// Recording flag (file writing active)
+    recording: Arc<AtomicBool>,
+    /// Shared CSV writer for background task (created on start_recording, taken on stop_recording)
+    csv_writer: Arc<TokioMutex<Option<std::io::BufWriter<std::fs::File>>>>,
+    /// Shared MF4 writer (mf4-native) for background task
+    #[cfg(feature = "mf4-native")]
+    mf4_writer: Arc<TokioMutex<Option<mf4_parse::writer::simple_writer::SimpleWriter>>>,
+    /// Shared MF4 writer (mdf4-rs) for background task
+    #[cfg(feature = "mf4-rs-backend")]
+    mf4_writer: Arc<TokioMutex<Option<MdfWriter<mdf4_rs::writer::FileWriter>>>>,
+    /// MDF4 channel group ID (mdf4-rs only)
+    #[cfg(feature = "mf4-rs-backend")]
+    mf4_cg_id: Arc<TokioMutex<Option<String>>>,
+    /// Recording timestamp tracker (reset when recording starts)
+    recording_ts_tracker: Arc<RwLock<Option<TimestampTracker>>>,
+    /// Recording start instant (fallback when slave has no timestamps)
+    recording_start_instant: Arc<RwLock<Option<std::time::Instant>>>,
+    /// Measurement info for MDF4 channel setup (name, unit)
+    recording_measurement_info: Arc<RwLock<Vec<(String, Option<String>)>>>,
 }
 
 impl DaqManager {
@@ -470,6 +489,17 @@ impl DaqManager {
             daq_resolution: None,
             daq_config: Arc::new(RwLock::new(DaqConfiguration::new())),
             selection_changed: Arc::new(AtomicBool::new(false)),
+            recording: Arc::new(AtomicBool::new(false)),
+            csv_writer: Arc::new(TokioMutex::new(None)),
+            #[cfg(feature = "mf4-native")]
+            mf4_writer: Arc::new(TokioMutex::new(None)),
+            #[cfg(feature = "mf4-rs-backend")]
+            mf4_writer: Arc::new(TokioMutex::new(None)),
+            #[cfg(feature = "mf4-rs-backend")]
+            mf4_cg_id: Arc::new(TokioMutex::new(None)),
+            recording_ts_tracker: Arc::new(RwLock::new(None)),
+            recording_start_instant: Arc::new(RwLock::new(None)),
+            recording_measurement_info: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -508,6 +538,17 @@ impl DaqManager {
             daq_resolution: None,
             daq_config: Arc::new(RwLock::new(DaqConfiguration::new())),
             selection_changed: Arc::new(AtomicBool::new(false)),
+            recording: Arc::new(AtomicBool::new(false)),
+            csv_writer: Arc::new(TokioMutex::new(None)),
+            #[cfg(feature = "mf4-native")]
+            mf4_writer: Arc::new(TokioMutex::new(None)),
+            #[cfg(feature = "mf4-rs-backend")]
+            mf4_writer: Arc::new(TokioMutex::new(None)),
+            #[cfg(feature = "mf4-rs-backend")]
+            mf4_cg_id: Arc::new(TokioMutex::new(None)),
+            recording_ts_tracker: Arc::new(RwLock::new(None)),
+            recording_start_instant: Arc::new(RwLock::new(None)),
+            recording_measurement_info: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -1072,9 +1113,11 @@ impl DaqManager {
         Ok(())
     }
 
-    /// Start DAQ acquisition
+    /// Start DAQ acquisition (streaming only, no file recording)
     ///
-    /// This starts the DAQ list and begins receiving DTO packets from slave
+    /// This starts the DAQ list and begins receiving DTO packets from slave.
+    /// Data is only streamed for live display — no files are created.
+    /// Call `start_recording()` to begin file recording.
     pub async fn start(&mut self, slave: &XcpSlave, _interval_ms: u64) -> Result<(), String> {
         if self.running.load(Ordering::SeqCst) {
             return Err("DAQ already running".to_string());
@@ -1101,130 +1144,55 @@ impl DaqManager {
 
         tracing::info!("All {} DAQ lists selected, starting DAQ...", daq_list_count);
 
-        // Get base timestamp from slave if timestamp mode is enabled
-        // This is used for relative timestamp calculation in DTO packets
+        // Query timestamp mode info for later use by start_recording()
         if self.timestamp_unit.is_some() && self.timestamp_size.is_some() {
-            match slave.get_daq_clock().await {
-                Ok(base_ts) => {
-                    tracing::info!("Got base timestamp from slave: {} ticks", base_ts);
-                    self.base_timestamp = Some(base_ts);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to get DAQ clock from slave: {}. Using receive time as fallback.", e);
-                    self.base_timestamp = None;
-                }
-            }
+            tracing::info!("Timestamp mode enabled (size={:?}, unit={:?})",
+                self.timestamp_size, self.timestamp_unit);
         } else {
-            tracing::trace!("Timestamp mode not enabled, skipping GET_DAQ_CLOCK");
-            self.base_timestamp = None;
+            tracing::trace!("Timestamp mode not enabled");
         }
 
-        // slave.start_stop_synch(0x03).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
         slave.start_stop_synch(0x01).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
 
         self.running.store(true, Ordering::SeqCst);
 
-        // Get selected measurements for CSV header
+        // Store measurement info for recording (needed by start_recording later)
         let selected_measurements = self.selected_measurements();
         if selected_measurements.is_empty() {
             return Err("No measurements selected for DAQ".to_string());
         }
-
-        // Create CSV file with header
-        let csv_path = self.csv_path.clone();
         {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&csv_path)
-                .map_err(|e| format!("Failed to create CSV: {}", e))?;
-
-            // Build CSV header with selected measurement names
-            let mut header = String::from("time_s");
-            for meas in &selected_measurements {
-                header.push(',');
-                header.push_str(&meas.name);
-            }
-            writeln!(file, "{}", header)
-                .map_err(|e| format!("Failed to write CSV header: {}", e))?;
+            let measurement_info: Vec<(String, Option<String>)> = selected_measurements
+                .iter()
+                .map(|m| (m.name.clone(), m.unit.clone()))
+                .collect();
+            *self.recording_measurement_info.write().await = measurement_info;
         }
 
         let running = self.running.clone();
+        let recording = self.recording.clone();
         let latest_sample = self.latest_sample.clone();
         let daq_config = self.daq_config.clone();
         let timestamp_size = self.timestamp_size.unwrap_or(0);
         let iden_field_type = self.indentification_field_type.clone();
         let selection_changed = self.selection_changed.clone();
+        let csv_writer = self.csv_writer.clone();
+        let recording_ts_tracker = self.recording_ts_tracker.clone();
+        let recording_start_instant = self.recording_start_instant.clone();
 
-        // Prepare measurement metadata for MDF4 channel setup (name, unit)
-        let _mdf4_path = self.mdf4_path.clone();
-        let _mdf4_measurement_info: Vec<(String, Option<String>)> = selected_measurements
-            .iter()
-            .map(|m| (m.name.clone(), m.unit.clone()))
-            .collect();
+        #[cfg(feature = "mf4-native")]
+        let mf4_writer = self.mf4_writer.clone();
+        #[cfg(feature = "mf4-rs-backend")]
+        let mf4_writer = self.mf4_writer.clone();
+        #[cfg(feature = "mf4-rs-backend")]
+        let mf4_cg_id = self.mf4_cg_id.clone();
+        let recording_meas_info = self.recording_measurement_info.clone();
 
-        // Build TimestampTracker if slave provides timestamps, otherwise use local clock
-        let has_slave_timestamp = self.base_timestamp.is_some()
-            && self.timestamp_unit.is_some()
-            && self.timestamp_size.is_some();
-        let mut ts_tracker = if has_slave_timestamp {
-            Some(TimestampTracker::new(
-                self.base_timestamp.unwrap(),
-                self.timestamp_size.unwrap(),
-                self.timestamp_unit.as_ref().unwrap(),
-            ))
-        } else {
-            None
-        };
-        // For no-timestamp fallback: record wall-clock start time
-        let recording_start = std::time::Instant::now();
+        // Build TimestampTracker for live display using local clock
+        let display_start = std::time::Instant::now();
 
         // Spawn DTO reception task
         let handle = tokio::spawn(async move {
-            let mut csv_file = OpenOptions::new()
-                .append(true)
-                .open(&csv_path)
-                .expect("Failed to open CSV for appending");
-
-            // Initialize MDF4 writer with channels matching selected measurements
-            #[cfg(feature = "mf4-native")]
-            let mut mdf_writer: Option<mf4_parse::writer::simple_writer::SimpleWriter> = {
-                let mut builder = SimpleWriter::new(_mdf4_path.to_str().unwrap_or("daq_data.mf4"))
-                    .time_channel("time_s", "s");
-                for (name, unit) in &_mdf4_measurement_info {
-                    builder = builder.f64_channel(name, unit.as_deref().unwrap_or(""));
-                }
-                match builder.stream_mode().build() {
-                    Ok(w) => Some(w),
-                    Err(e) => {
-                        tracing::warn!("Failed to create MDF4 file (mf4_parse): {}", e);
-                        None
-                    }
-                }
-            };
-
-            #[cfg(feature = "mf4-rs-backend")]
-            let mut mdf_writer = match MdfWriter::new(_mdf4_path.to_str().unwrap_or("daq_data.mf4")) {
-                Ok(w) => Some(w.with_flush_policy(FlushPolicy::EveryNRecords(1000))),
-                Err(e) => {
-                    tracing::warn!("Failed to create MDF4 file (mdf4-rs): {}", e);
-                    None
-                }
-            };
-            #[cfg(feature = "mf4-rs-backend")]
-            let mut mdf_cg_id: Option<String> = None;
-            #[cfg(feature = "mf4-rs-backend")]
-            if let Some(ref mut writer) = mdf_writer {
-                match Self::init_mdf4_channels(writer, &_mdf4_measurement_info) {
-                    Ok(cg_id) => { mdf_cg_id = Some(cg_id); }
-                    Err(e) => {
-                        tracing::warn!("Failed to init MDF4 channels: {}", e);
-                        mdf_writer = None;
-                    }
-                }
-            }
-
             tracing::info!("DAQ started, waiting for DTO packets...");
 
             while running.load(Ordering::SeqCst) {
@@ -1255,7 +1223,7 @@ impl DaqManager {
                                 .filter(|e| {
                                     let daq_list_match = match data.daq_list {
                                         Some(dl) => e.daq_list == dl,
-                                        None => e.daq_list == 0, // Default to list 0 if not specified
+                                        None => e.daq_list == 0,
                                     };
                                     daq_list_match && e.odt == data.odt
                                 })
@@ -1273,18 +1241,15 @@ impl DaqManager {
                             // Parse measurement data using configuration
                             let mut record = DaqRecord::new(0.0, 0);
 
-                            for entry in entries {
+                            for entry in &entries {
                                 let offset = entry.byte_offset;
                                 if offset + entry.size <= data.data.len() {
                                     let raw_bytes = &data.data[offset..offset + entry.size];
-
-                                    // Convert raw bytes to physical value using COMPU_METHOD
                                     let is_float = entry.data_type.is_float();
                                     let physical_value = entry.compu_method.bytes_to_display(
                                         raw_bytes,
                                         is_float
                                     );
-
                                     record.add_value(&entry.name, physical_value);
                                     record.add_raw_value(&entry.name, raw_bytes.to_vec());
                                 } else {
@@ -1293,20 +1258,9 @@ impl DaqManager {
                                 }
                             }
 
-                            // Calculate elapsed seconds
-                            let (timestamp_s, timestamp_raw) = if let Some(ref mut tracker) = ts_tracker {
-                                if let Some(raw_ts) = data.timestamp {
-                                    (tracker.elapsed_seconds(raw_ts), raw_ts)
-                                } else {
-                                    // Slave timestamp enabled but DTO missing it — use local clock
-                                    (recording_start.elapsed().as_secs_f64(), 0)
-                                }
-                            } else {
-                                // No slave timestamp — use local receive time relative to start
-                                (recording_start.elapsed().as_secs_f64(), 0)
-                            };
-                            record.timestamp_s = timestamp_s;
-                            record.timestamp_raw = timestamp_raw;
+                            // Calculate display timestamp (always relative to DAQ start)
+                            let display_timestamp_s = display_start.elapsed().as_secs_f64();
+                            record.timestamp_s = display_timestamp_s;
 
                             // Update latest sample for UI (merge with existing to preserve values from other event groups)
                             {
@@ -1328,51 +1282,86 @@ impl DaqManager {
                                 }
                             }
 
-                            // Write CSV line with values in correct order (by entry order)
-                            let mut csv_line = format!("{:.6}", record.timestamp_s);
-                            for entry in &config.odt_entries {
-                                csv_line.push(',');
-                                if let Some(value) = record.get_value(&entry.name) {
-                                    // Format based on data type
-                                    match entry.data_type {
-                                        A2lDataType::F32 | A2lDataType::F64 => {
-                                            csv_line.push_str(&format!("{:.6}", value));
+                            // If recording is active, write to files
+                            if recording.load(Ordering::SeqCst) {
+                                // Calculate recording timestamp (relative to recording start)
+                                let rec_ts = {
+                                    let mut tracker = recording_ts_tracker.write().await;
+                                    let start_instant = recording_start_instant.read().await;
+                                    if let Some(ref mut tracker) = *tracker {
+                                        if let Some(raw_ts) = data.timestamp {
+                                            tracker.elapsed_seconds(raw_ts)
+                                        } else if let Some(ref start) = *start_instant {
+                                            start.elapsed().as_secs_f64()
+                                        } else {
+                                            display_timestamp_s
                                         }
-                                        _ => {
-                                            csv_line.push_str(&format!("{:.0}", value));
+                                    } else if let Some(ref start) = *start_instant {
+                                        start.elapsed().as_secs_f64()
+                                    } else {
+                                        display_timestamp_s
+                                    }
+                                };
+
+                                // Write CSV line
+                                {
+                                    let mut csv_guard = csv_writer.lock().await;
+                                    if let Some(ref mut writer) = *csv_guard {
+                                        let mut csv_line = format!("{:.6}", rec_ts);
+                                        for entry in &config.odt_entries {
+                                            csv_line.push(',');
+                                            if let Some(value) = record.get_value(&entry.name) {
+                                                match entry.data_type {
+                                                    A2lDataType::F32 | A2lDataType::F64 => {
+                                                        csv_line.push_str(&format!("{:.6}", value));
+                                                    }
+                                                    _ => {
+                                                        csv_line.push_str(&format!("{:.0}", value));
+                                                    }
+                                                }
+                                            } else {
+                                                csv_line.push('0');
+                                            }
+                                        }
+                                        if let Err(e) = writeln!(writer, "{}", csv_line) {
+                                            tracing::error!("Failed to write CSV: {}", e);
                                         }
                                     }
-                                } else {
-                                    csv_line.push('0');
                                 }
-                            }
-                            if let Err(e) = writeln!(csv_file, "{}", csv_line) {
-                                tracing::error!("Failed to write CSV: {}", e);
-                            }
 
-                            // Write MDF4 record (same values in measurement order)
-                            #[cfg(feature = "mf4-native")]
-                            if let Some(ref mut writer) = mdf_writer {
-                                let mut values = Vec::with_capacity(_mdf4_measurement_info.len() + 1);
-                                values.push(record.timestamp_s);
-                                for (name, _) in &_mdf4_measurement_info {
-                                    values.push(record.get_value(name).unwrap_or(0.0));
+                                // Write MDF4 record
+                                #[cfg(feature = "mf4-native")]
+                                {
+                                    let mut mf4_guard = mf4_writer.lock().await;
+                                    if let Some(ref mut writer) = *mf4_guard {
+                                        let meas_info = recording_meas_info.read().await;
+                                        let mut values = Vec::with_capacity(meas_info.len() + 1);
+                                        values.push(rec_ts);
+                                        for (name, _) in meas_info.iter() {
+                                            values.push(record.get_value(name).unwrap_or(0.0));
+                                        }
+                                        if let Err(e) = writer.write_record(&values) {
+                                            tracing::error!("Failed to write MDF4 record: {}", e);
+                                        }
+                                    }
                                 }
-                                if let Err(e) = writer.write_record(&values) {
-                                    tracing::error!("Failed to write MDF4 record: {}", e);
-                                }
-                            }
 
-                            #[cfg(feature = "mf4-rs-backend")]
-                            if let (Some(ref mut writer), Some(ref cg_id)) = (&mut mdf_writer, &mdf_cg_id) {
-                                let mut mdf_values = Vec::with_capacity(_mdf4_measurement_info.len() + 1);
-                                mdf_values.push(DecodedValue::Float(record.timestamp_s));
-                                for (name, _) in &_mdf4_measurement_info {
-                                    let v = record.get_value(name).unwrap_or(0.0);
-                                    mdf_values.push(DecodedValue::Float(v));
-                                }
-                                if let Err(e) = writer.write_record(cg_id, &mdf_values) {
-                                    tracing::error!("Failed to write MDF4 record: {}", e);
+                                #[cfg(feature = "mf4-rs-backend")]
+                                {
+                                    let mut mf4_guard = mf4_writer.lock().await;
+                                    let cg_guard = mf4_cg_id.lock().await;
+                                    if let (Some(ref mut writer), Some(ref cg_id)) = (&mut *mf4_guard, &*cg_guard) {
+                                        let meas_info = recording_meas_info.read().await;
+                                        let mut mdf_values = Vec::with_capacity(meas_info.len() + 1);
+                                        mdf_values.push(DecodedValue::Float(rec_ts));
+                                        for (name, _) in meas_info.iter() {
+                                            let v = record.get_value(name).unwrap_or(0.0);
+                                            mdf_values.push(DecodedValue::Float(v));
+                                        }
+                                        if let Err(e) = writer.write_record(cg_id, &mdf_values) {
+                                            tracing::error!("Failed to write MDF4 record: {}", e);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1388,25 +1377,45 @@ impl DaqManager {
                 }
             }
 
-            // Finalize MDF4 file
-            #[cfg(feature = "mf4-native")]
-            if let Some(writer) = mdf_writer {
-                if let Err(e) = writer.finalize() {
-                    tracing::warn!("Failed to finalize MDF4 file: {}", e);
-                } else {
-                    tracing::info!("MDF4 file finalized successfully (mf4_parse)");
-                }
-            }
+            // If recording was still active when task exits, finalize files
+            if recording.load(Ordering::SeqCst) {
+                recording.store(false, Ordering::SeqCst);
 
-            #[cfg(feature = "mf4-rs-backend")]
-            if let (Some(ref mut writer), Some(ref cg_id)) = (&mut mdf_writer, &mdf_cg_id) {
-                if let Err(e) = writer.finish_data_block(cg_id) {
-                    tracing::warn!("Failed to finish MDF4 data block: {}", e);
+                // Flush CSV
+                {
+                    let mut csv_guard = csv_writer.lock().await;
+                    if let Some(writer) = csv_guard.take() {
+                        drop(writer);
+                    }
                 }
-                if let Err(e) = writer.finalize() {
-                    tracing::warn!("Failed to finalize MDF4 file: {}", e);
-                } else {
-                    tracing::info!("MDF4 file finalized successfully (mdf4-rs)");
+
+                // Finalize MDF4
+                #[cfg(feature = "mf4-native")]
+                {
+                    let mut mf4_guard = mf4_writer.lock().await;
+                    if let Some(writer) = mf4_guard.take() {
+                        if let Err(e) = writer.finalize() {
+                            tracing::warn!("Failed to finalize MDF4 file: {}", e);
+                        } else {
+                            tracing::info!("MDF4 file finalized successfully (mf4_parse)");
+                        }
+                    }
+                }
+
+                #[cfg(feature = "mf4-rs-backend")]
+                {
+                    let mut mf4_guard = mf4_writer.lock().await;
+                    let cg_guard = mf4_cg_id.lock().await;
+                    if let (Some(ref mut writer), Some(ref cg_id)) = (&mut *mf4_guard, &*cg_guard) {
+                        if let Err(e) = writer.finish_data_block(cg_id) {
+                            tracing::warn!("Failed to finish MDF4 data block: {}", e);
+                        }
+                        if let Err(e) = writer.finalize() {
+                            tracing::warn!("Failed to finalize MDF4 file: {}", e);
+                        } else {
+                            tracing::info!("MDF4 file finalized successfully (mdf4-rs)");
+                        }
+                    }
                 }
             }
 
@@ -1422,10 +1431,203 @@ impl DaqManager {
         Ok(())
     }
 
+    /// Start file recording while DAQ is already streaming
+    ///
+    /// Sends GET_DAQ_CLOCK to the slave, creates CSV/MF4 files, and begins
+    /// writing data. Recording timestamps start from 0.
+    pub async fn start_recording(&mut self, slave: &XcpSlave) -> Result<(), String> {
+        if !self.running.load(Ordering::SeqCst) {
+            return Err("DAQ not running — start DAQ first".to_string());
+        }
+        if self.recording.load(Ordering::SeqCst) {
+            return Err("Already recording".to_string());
+        }
+
+        // Get base timestamp from slave if timestamp mode is enabled
+        let has_slave_timestamp = self.timestamp_unit.is_some() && self.timestamp_size.is_some();
+        if has_slave_timestamp {
+            match slave.get_daq_clock().await {
+                Ok(base_ts) => {
+                    tracing::info!("Recording: got base timestamp from slave: {} ticks", base_ts);
+                    self.base_timestamp = Some(base_ts);
+                    let tracker = TimestampTracker::new(
+                        base_ts,
+                        self.timestamp_size.unwrap(),
+                        self.timestamp_unit.as_ref().unwrap(),
+                    );
+                    *self.recording_ts_tracker.write().await = Some(tracker);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to get DAQ clock: {}. Using local time.", e);
+                    *self.recording_ts_tracker.write().await = None;
+                }
+            }
+        } else {
+            *self.recording_ts_tracker.write().await = None;
+        }
+
+        // Set recording start instant (fallback for local-clock timestamps)
+        *self.recording_start_instant.write().await = Some(std::time::Instant::now());
+
+        // Get selected measurements for CSV header
+        let selected_measurements = self.selected_measurements();
+        if selected_measurements.is_empty() {
+            return Err("No measurements selected for recording".to_string());
+        }
+
+        // Create CSV file with header
+        let csv_path = self.csv_path.clone();
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&csv_path)
+                .map_err(|e| format!("Failed to create CSV: {}", e))?;
+
+            let mut header = String::from("time_s");
+            for meas in &selected_measurements {
+                header.push(',');
+                header.push_str(&meas.name);
+            }
+            writeln!(file, "{}", header)
+                .map_err(|e| format!("Failed to write CSV header: {}", e))?;
+        }
+
+        // Open CSV for appending and store in shared writer
+        let csv_file = OpenOptions::new()
+            .append(true)
+            .open(&csv_path)
+            .map_err(|e| format!("Failed to open CSV for appending: {}", e))?;
+        *self.csv_writer.lock().await = Some(std::io::BufWriter::new(csv_file));
+
+        // Create MDF4 writer
+        let mf4_measurement_info = self.recording_measurement_info.read().await.clone();
+
+        #[cfg(feature = "mf4-native")]
+        {
+            let mf4_path = self.mdf4_path.clone();
+            let mut builder = SimpleWriter::new(mf4_path.to_str().unwrap_or("daq_data.mf4"))
+                .time_channel("time_s", "s");
+            for (name, unit) in &mf4_measurement_info {
+                builder = builder.f64_channel(name, unit.as_deref().unwrap_or(""));
+            }
+            match builder.stream_mode().build() {
+                Ok(w) => {
+                    *self.mf4_writer.lock().await = Some(w);
+                    tracing::info!("MDF4 recording started (mf4_parse)");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create MDF4 file: {}", e);
+                }
+            }
+        }
+
+        #[cfg(feature = "mf4-rs-backend")]
+        {
+            let mf4_path = self.mdf4_path.clone();
+            match MdfWriter::new(mf4_path.to_str().unwrap_or("daq_data.mf4")) {
+                Ok(w) => {
+                    let mut writer = w.with_flush_policy(FlushPolicy::EveryNRecords(1000));
+                    match Self::init_mdf4_channels(&mut writer, &mf4_measurement_info) {
+                        Ok(cg_id) => {
+                            *self.mf4_writer.lock().await = Some(writer);
+                            *self.mf4_cg_id.lock().await = Some(cg_id);
+                            tracing::info!("MDF4 recording started (mdf4-rs)");
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to init MDF4 channels: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create MDF4 file: {}", e);
+                }
+            }
+        }
+
+        self.recording.store(true, Ordering::SeqCst);
+        tracing::info!("Recording started — writing to {} and {}", self.csv_path.display(), self.mdf4_path.display());
+        Ok(())
+    }
+
+    /// Stop file recording (DAQ streaming continues)
+    ///
+    /// Finalizes CSV and MDF4 files. DAQ remains running for live display.
+    pub async fn stop_recording(&self) -> Result<(), String> {
+        if !self.recording.load(Ordering::SeqCst) {
+            return Err("Not recording".to_string());
+        }
+
+        // Signal background task to stop writing
+        self.recording.store(false, Ordering::SeqCst);
+
+        // Small delay to let any in-flight writes complete
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Take and close CSV writer
+        {
+            let mut csv_guard = self.csv_writer.lock().await;
+            if let Some(writer) = csv_guard.take() {
+                drop(writer); // flush & close
+            }
+        }
+
+        // Finalize MDF4
+        #[cfg(feature = "mf4-native")]
+        {
+            let mut mf4_guard = self.mf4_writer.lock().await;
+            if let Some(writer) = mf4_guard.take() {
+                if let Err(e) = writer.finalize() {
+                    tracing::warn!("Failed to finalize MDF4 file: {}", e);
+                } else {
+                    tracing::info!("MDF4 file finalized successfully (mf4_parse)");
+                }
+            }
+        }
+
+        #[cfg(feature = "mf4-rs-backend")]
+        {
+            let mut mf4_guard = self.mf4_writer.lock().await;
+            let cg_guard = self.mf4_cg_id.lock().await;
+            if let (Some(ref mut writer), Some(ref cg_id)) = (&mut *mf4_guard, &*cg_guard) {
+                if let Err(e) = writer.finish_data_block(cg_id) {
+                    tracing::warn!("Failed to finish MDF4 data block: {}", e);
+                }
+                if let Err(e) = writer.finalize() {
+                    tracing::warn!("Failed to finalize MDF4 file: {}", e);
+                } else {
+                    tracing::info!("MDF4 file finalized successfully (mdf4-rs)");
+                }
+            }
+        }
+
+        // Clear recording state
+        *self.recording_ts_tracker.write().await = None;
+        *self.recording_start_instant.write().await = None;
+
+        tracing::info!("Recording stopped. Data saved to {} and {}", self.csv_path.display(), self.mdf4_path.display());
+        Ok(())
+    }
+
+    /// Check if recording is active
+    pub fn is_recording(&self) -> bool {
+        self.recording.load(Ordering::SeqCst)
+    }
+
     /// Stop DAQ acquisition
+    ///
+    /// If recording is active, stops recording first (finalizes files).
     pub async fn stop(&self, slave: &XcpSlave) -> Result<(), String> {
         if !self.running.load(Ordering::SeqCst) {
             return Err("DAQ not running".to_string());
+        }
+
+        // Stop recording first if active
+        if self.recording.load(Ordering::SeqCst) {
+            if let Err(e) = self.stop_recording().await {
+                tracing::warn!("Error stopping recording during DAQ stop: {}", e);
+            }
         }
 
         // First, stop DAQ on slave side to prevent further DTO packets
@@ -1448,7 +1650,7 @@ impl DaqManager {
             }
         }
 
-        tracing::info!("DAQ acquisition stopped. Data saved to {} and {}", self.csv_path.display(), self.mdf4_path.display());
+        tracing::info!("DAQ acquisition stopped");
         Ok(())
     }
 

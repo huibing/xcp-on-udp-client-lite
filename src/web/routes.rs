@@ -1631,6 +1631,96 @@ pub async fn daq_stop(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// DAQ start recording (POST /api/daq/record/start)
+///
+/// Sends GET_DAQ_CLOCK to all slaves with running DAQ, creates CSV/MF4 files,
+/// and begins file recording. Timestamps start from 0.
+pub async fn daq_start_recording(State(state): State<AppState>) -> impl IntoResponse {
+    let slaves = state.all_slaves().await;
+    let client = state.client.lock().await;
+    let mut errors = Vec::new();
+    let mut started_count = 0;
+
+    for slave in &slaves {
+        if !*slave.daq_running.read().await || !slave.is_connected() {
+            continue;
+        }
+
+        let xcp_slave = match client.get_slave(slave.id) {
+            Some(s) => s,
+            None => continue,
+        };
+        let xcp_slave_guard = xcp_slave.lock().await;
+        let mut daq_manager = slave.daq_manager.write().await;
+
+        match daq_manager.start_recording(&*xcp_slave_guard).await {
+            Ok(_) => {
+                started_count += 1;
+                tracing::info!("Recording started on slave {}", slave.display_name());
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", slave.display_name(), e));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        Json(json!({
+            "success": false,
+            "error": errors.join("; "),
+            "started": started_count
+        }))
+    } else if started_count == 0 {
+        Json(json!({
+            "success": false,
+            "error": "No running DAQ found to record"
+        }))
+    } else {
+        state.set_status(format!("Recording started on {} slave(s)", started_count)).await;
+        Json(json!({ "success": true, "started": started_count }))
+    }
+}
+
+/// DAQ stop recording (POST /api/daq/record/stop)
+///
+/// Stops file recording on all slaves. DAQ streaming continues for live display.
+/// Returns success so the frontend can show the download popup.
+pub async fn daq_stop_recording(State(state): State<AppState>) -> impl IntoResponse {
+    let slaves = state.all_slaves().await;
+    let mut errors = Vec::new();
+    let mut stopped_count = 0;
+
+    for slave in &slaves {
+        let daq_manager = slave.daq_manager.read().await;
+        if !daq_manager.is_recording() {
+            continue;
+        }
+        drop(daq_manager);
+
+        let daq_manager = slave.daq_manager.read().await;
+        match daq_manager.stop_recording().await {
+            Ok(_) => {
+                stopped_count += 1;
+                tracing::info!("Recording stopped on slave {}", slave.display_name());
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", slave.display_name(), e));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        Json(json!({
+            "success": false,
+            "error": errors.join("; "),
+            "stopped": stopped_count
+        }))
+    } else {
+        state.set_status(format!("Recording stopped on {} slave(s)", stopped_count)).await;
+        Json(json!({ "success": true, "stopped": stopped_count }))
+    }
+}
+
 /// DAQ set selected measurements (POST /api/daq/select)
 pub async fn daq_set_selection(
     State(state): State<AppState>,
@@ -1691,14 +1781,16 @@ pub async fn daq_set_selection(
 pub async fn daq_status(State(state): State<AppState>) -> impl IntoResponse {
     let current_slave = state.current_slave().await;
 
-    let running = if let Some(ref slave) = current_slave {
-        *slave.daq_running.read().await
+    let (running, recording) = if let Some(ref slave) = current_slave {
+        let daq = slave.daq_manager.read().await;
+        (*slave.daq_running.read().await, daq.is_recording())
     } else {
-        false
+        (false, false)
     };
 
     Json(json!({
-        "running": running
+        "running": running,
+        "recording": recording
     }))
 }
 
