@@ -25,6 +25,8 @@
             <button id="startBtn" onclick="startDaq()">Start</button>
             <button id="stopBtn" onclick="stopDaq()" class="danger" style="display: none;">Stop</button>
             <button onclick="clearData()" class="secondary">Clear</button>
+            <button onclick="downloadFile('csv')" class="secondary" title="Download CSV">⬇ CSV</button>
+            <button onclick="downloadFile('mf4')" class="secondary" title="Download MDF4">⬇ MF4</button>
         </div>
     </div>
 </div>
@@ -557,6 +559,10 @@ async function stopDaq() {
     } catch (e) {
         alert('Failed to stop DAQ: ' + e.message);
     }
+}
+
+function downloadFile(format) {
+    window.location.href = '/api/daq/download/' + format;
 }
 
 function updateSelectedListButtons() {

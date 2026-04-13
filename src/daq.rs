@@ -10,6 +10,7 @@ use crate::client::DAQResolutionInfo;
 use crate::protocol::Mta;
 use crate::slave::XcpSlave;
 // Note: chrono not used - timestamps are raw slave clock values, not UTC time
+use mdf4_rs::{DataType as MdfDataType, DecodedValue, FlushPolicy, MdfWriter};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -401,6 +402,8 @@ pub struct DaqManager {
     task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
     /// CSV output path
     csv_path: PathBuf,
+    /// MDF4 output path (derived from csv_path)
+    mdf4_path: PathBuf,
     /// Slave address for DAQ connection
     slave_addr: String,
     /// Number of DAQ lists configured
@@ -443,6 +446,7 @@ impl DaqManager {
             running: Arc::new(AtomicBool::new(false)),
             task_handle: Arc::new(RwLock::new(None)),
             csv_path: PathBuf::from("daq_data.csv"),
+            mdf4_path: PathBuf::from("daq_data.mf4"),
             slave_addr: "127.0.0.1:5555".to_string(),
             daq_list_count: 1,
             event_channel: 0,
@@ -451,7 +455,7 @@ impl DaqManager {
             latest_sample: Arc::new(RwLock::new(None)),
             timestamp_fixed: false,
             timestamp_size: None,
-            indentification_field_type: IdentificationFieldType::AbosulteODT,
+            indentification_field_type: IdentificationFieldType::AbosulteODT,   // most commonly used
             timestamp_unit: None,
             base_timestamp: None,
             daq_resolution: None,
@@ -480,6 +484,7 @@ impl DaqManager {
             running: Arc::new(AtomicBool::new(false)),
             task_handle: Arc::new(RwLock::new(None)),
             csv_path: PathBuf::from("daq_data.csv"),
+            mdf4_path: PathBuf::from("daq_data.mf4"),
             slave_addr: "127.0.0.1:5555".to_string(),
             daq_list_count: 1,
             event_channel: 0,
@@ -488,7 +493,7 @@ impl DaqManager {
             latest_sample: Arc::new(RwLock::new(None)),
             timestamp_fixed: false,
             timestamp_size: None,
-            indentification_field_type: IdentificationFieldType::AbosulteODT,   // most commonly used
+            indentification_field_type: IdentificationFieldType::AbosulteODT,
             timestamp_unit: None,
             base_timestamp: None,
             daq_resolution: None,
@@ -518,6 +523,11 @@ impl DaqManager {
     /// Get the DAQ configuration (for use by other components)
     pub fn get_config(&self) -> Arc<RwLock<DaqConfiguration>> {
         self.daq_config.clone()
+    }
+
+    /// Get the MDF4 output file path
+    pub fn get_mdf4_path(&self) -> &Path {
+        &self.mdf4_path
     }
 
     pub fn set_available_events(&mut self, events: Vec<crate::a2l::DaqEvent>) {
@@ -1138,6 +1148,13 @@ impl DaqManager {
         let iden_field_type = self.indentification_field_type.clone();
         let selection_changed = self.selection_changed.clone();
 
+        // Prepare measurement metadata for MDF4 channel setup (name, unit)
+        let mdf4_path = self.mdf4_path.clone();
+        let mdf4_measurement_info: Vec<(String, Option<String>)> = selected_measurements
+            .iter()
+            .map(|m| (m.name.clone(), m.unit.clone()))
+            .collect();
+
         // Build TimestampTracker if slave provides timestamps, otherwise use local clock
         let has_slave_timestamp = self.base_timestamp.is_some()
             && self.timestamp_unit.is_some()
@@ -1160,6 +1177,25 @@ impl DaqManager {
                 .append(true)
                 .open(&csv_path)
                 .expect("Failed to open CSV for appending");
+
+            // Initialize MDF4 writer with channels matching selected measurements
+            let mut mdf_writer = match MdfWriter::new(mdf4_path.to_str().unwrap_or("daq_data.mf4")) {
+                Ok(w) => Some(w.with_flush_policy(FlushPolicy::EveryNRecords(1000))),
+                Err(e) => {
+                    tracing::warn!("Failed to create MDF4 file: {}", e);
+                    None
+                }
+            };
+            let mut mdf_cg_id: Option<String> = None;
+            if let Some(ref mut writer) = mdf_writer {
+                match Self::init_mdf4_channels(writer, &mdf4_measurement_info) {
+                    Ok(cg_id) => { mdf_cg_id = Some(cg_id); }
+                    Err(e) => {
+                        tracing::warn!("Failed to init MDF4 channels: {}", e);
+                        mdf_writer = None;
+                    }
+                }
+            }
 
             tracing::info!("DAQ started, waiting for DTO packets...");
 
@@ -1285,6 +1321,19 @@ impl DaqManager {
                             if let Err(e) = writeln!(csv_file, "{}", csv_line) {
                                 tracing::error!("Failed to write CSV: {}", e);
                             }
+
+                            // Write MDF4 record (same values in measurement order)
+                            if let (Some(ref mut writer), Some(ref cg_id)) = (&mut mdf_writer, &mdf_cg_id) {
+                                let mut mdf_values = Vec::with_capacity(mdf4_measurement_info.len() + 1);
+                                mdf_values.push(DecodedValue::Float(record.timestamp_s));
+                                for (name, _) in &mdf4_measurement_info {
+                                    let v = record.get_value(name).unwrap_or(0.0);
+                                    mdf_values.push(DecodedValue::Float(v));
+                                }
+                                if let Err(e) = writer.write_record(cg_id, &mdf_values) {
+                                    tracing::error!("Failed to write MDF4 record: {}", e);
+                                }
+                            }
                         }
                     }
                     Ok(None) => {
@@ -1295,6 +1344,18 @@ impl DaqManager {
                         // Timeout, continue to check running flag
                         continue;
                     }
+                }
+            }
+
+            // Finalize MDF4 file
+            if let (Some(ref mut writer), Some(ref cg_id)) = (&mut mdf_writer, &mdf_cg_id) {
+                if let Err(e) = writer.finish_data_block(cg_id) {
+                    tracing::warn!("Failed to finish MDF4 data block: {}", e);
+                }
+                if let Err(e) = writer.finalize() {
+                    tracing::warn!("Failed to finalize MDF4 file: {}", e);
+                } else {
+                    tracing::info!("MDF4 file finalized successfully");
                 }
             }
 
@@ -1336,8 +1397,55 @@ impl DaqManager {
             }
         }
 
-        tracing::info!("DAQ acquisition stopped. Data saved to {}", self.csv_path.display());
+        tracing::info!("DAQ acquisition stopped. Data saved to {} and {}", self.csv_path.display(), self.mdf4_path.display());
         Ok(())
+    }
+
+    /// Initialize MDF4 file structure with time channel and measurement channels.
+    /// Returns the channel group ID for use in `write_record`.
+    fn init_mdf4_channels(
+        writer: &mut MdfWriter<mdf4_rs::writer::FileWriter>,
+        measurements: &[(String, Option<String>)],
+    ) -> Result<String, String> {
+        writer.init_mdf_file().map_err(|e| format!("MDF4 init: {}", e))?;
+
+        let cg_id = writer
+            .add_channel_group(None, |_| {})
+            .map_err(|e| format!("MDF4 add_channel_group: {}", e))?;
+
+        // Time master channel (f64, seconds)
+        let time_ch = writer
+            .add_channel(&cg_id, None, |ch| {
+                ch.data_type = MdfDataType::FloatLE;
+                ch.name = Some("time_s".into());
+                ch.bit_count = 64;
+            })
+            .map_err(|e| format!("MDF4 add time channel: {}", e))?;
+        writer.set_time_channel(&time_ch).map_err(|e| format!("MDF4 set_time_channel: {}", e))?;
+        writer.set_channel_unit(&time_ch, "s").map_err(|e| format!("MDF4 set_channel_unit: {}", e))?;
+
+        // Signal channels (all f64 — physical values after COMPU_METHOD conversion)
+        let mut prev_ch = time_ch;
+        for (name, unit) in measurements {
+            let ch = writer
+                .add_channel(&cg_id, Some(&prev_ch), |ch| {
+                    ch.data_type = MdfDataType::FloatLE;
+                    ch.name = Some(name.clone());
+                    ch.bit_count = 64;
+                })
+                .map_err(|e| format!("MDF4 add channel '{}': {}", name, e))?;
+            if let Some(u) = unit {
+                writer.set_channel_unit(&ch, u).map_err(|e| format!("MDF4 set unit: {}", e))?;
+            }
+            prev_ch = ch;
+        }
+
+        // Start the data block for streaming writes
+        writer
+            .start_data_block_for_cg(&cg_id, 0)
+            .map_err(|e| format!("MDF4 start_data_block: {}", e))?;
+
+        Ok(cg_id)
     }
 
     /// Check if DAQ is running

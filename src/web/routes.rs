@@ -2193,6 +2193,46 @@ pub async fn daq_set_measurement_events(
     Json(json!({ "success": false, "error": "No device selected" }))
 }
 
+/// Download DAQ CSV file
+pub async fn daq_download_csv(
+    State(_state): State<AppState>,
+) -> impl IntoResponse {
+    serve_file_download("daq_data.csv", "text/csv", "daq_data.csv").await
+}
+
+/// Download DAQ MDF4 file
+pub async fn daq_download_mf4(
+    State(_state): State<AppState>,
+) -> impl IntoResponse {
+    serve_file_download("daq_data.mf4", "application/octet-stream", "daq_data.mf4").await
+}
+
+/// Serve a file for download with proper headers
+async fn serve_file_download(
+    path: &str,
+    content_type: &str,
+    filename: &str,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::body::Body;
+
+    match tokio::fs::read(path).await {
+        Ok(data) => {
+            let headers = [
+                (header::CONTENT_TYPE, content_type.to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}\"", filename),
+                ),
+            ];
+            (StatusCode::OK, headers, Body::from(data)).into_response()
+        }
+        Err(_) => {
+            (StatusCode::NOT_FOUND, "File not found").into_response()
+        }
+    }
+}
+
 /// Convert A2L characteristic to calibration parameter
 fn convert_characteristic(
     ch: crate::a2l::A2lCharacteristic,
