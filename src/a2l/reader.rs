@@ -293,6 +293,7 @@ impl A2lMemorySegment {
 /// A2L file reader and parser
 pub struct A2lReader {
     file: a2lfile::A2lFile,
+    events: Vec<super::types::DaqEvent>,
 }
 
 impl A2lReader {
@@ -304,10 +305,12 @@ impl A2lReader {
             format!("Failed to load A2L file '{}': {:?}", path.display(), e)
         })?;
 
-        // Suppress non-fatal parsing warnings (deprecated tags, etc.)
-        // These are common in real-world A2L files and don't affect functionality
+        // Parse EVENT blocks from raw file (a2lfile crate doesn't support EVENT blocks)
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_default();
+        let events = Self::parse_events_from_raw(&raw);
 
-        Ok(Self { file })
+        Ok(Self { file, events })
     }
 
     /// Get all measurements from the A2L file
@@ -338,6 +341,95 @@ impl A2lReader {
         }
 
         characteristics
+    }
+
+    /// Get all DAQ event channels parsed from the A2L file
+    pub fn get_events(&self) -> Vec<super::types::DaqEvent> {
+        self.events.clone()
+    }
+
+    fn parse_events_from_raw(raw: &str) -> Vec<super::types::DaqEvent> {
+        let mut events = Vec::new();
+        let mut search = raw;
+
+        while let Some(begin_pos) = search.to_uppercase().find("/BEGIN EVENT") {
+            let after_begin = &search[begin_pos + "/BEGIN EVENT".len()..];
+            let end_pos = after_begin.to_uppercase().find("/END EVENT")
+                .unwrap_or(after_begin.len());
+            let block = &after_begin[..end_pos];
+
+            let clean = Self::strip_comments(block);
+            let tokens = Self::tokenize_a2l(&clean);
+
+            if tokens.len() >= 7 {
+                let name = tokens[0].trim_matches('"').to_string();
+                let short_name = tokens[1].trim_matches('"').to_string();
+                let channel: u16 = tokens[2].parse().unwrap_or(0);
+                // tokens[3] is DAQ/STIM direction keyword — skip
+                let max_daq_list: u8 = tokens[4].parse().unwrap_or(0);
+                let time_cycle: u8 = tokens[5].parse().unwrap_or(0);
+                let time_unit: u8 = tokens[6].parse().unwrap_or(0);
+                let priority: u8 = tokens.get(7).and_then(|t| t.parse().ok()).unwrap_or(0);
+
+                events.push(super::types::DaqEvent {
+                    channel, name, short_name, time_cycle, time_unit, max_daq_list, priority,
+                });
+            }
+
+            search = &search[begin_pos + "/BEGIN EVENT".len() + end_pos + "/END EVENT".len()..];
+        }
+
+        events
+    }
+
+    fn strip_comments(s: &str) -> String {
+        let mut result = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '/' && chars.peek() == Some(&'*') {
+                chars.next(); // consume '*'
+                loop {
+                    match chars.next() {
+                        Some('*') if chars.peek() == Some(&'/') => { chars.next(); break; }
+                        None => break,
+                        _ => {}
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    fn tokenize_a2l(s: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut chars = s.chars().peekable();
+        while let Some(&c) = chars.peek() {
+            if c.is_whitespace() {
+                chars.next();
+            } else if c == '"' {
+                chars.next(); // consume opening quote
+                let mut token = String::from('"');
+                loop {
+                    match chars.next() {
+                        Some('"') => { token.push('"'); break; }
+                        Some(ch) => token.push(ch),
+                        None => break,
+                    }
+                }
+                tokens.push(token);
+            } else {
+                let mut token = String::new();
+                while let Some(&ch) = chars.peek() {
+                    if ch.is_whitespace() { break; }
+                    token.push(ch);
+                    chars.next();
+                }
+                tokens.push(token);
+            }
+        }
+        tokens
     }
 
     /// Parse a single measurement

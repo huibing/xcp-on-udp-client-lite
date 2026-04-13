@@ -143,6 +143,39 @@ impl CharacteristicType {
     }
 }
 
+/// DAQ Event Channel — from A2L EVENT block or slave GET_DAQ_EVENT_INFO
+#[derive(Debug, Clone)]
+pub struct DaqEvent {
+    pub channel: u16,
+    pub name: String,
+    pub short_name: String,
+    pub time_cycle: u8,
+    pub time_unit: u8,
+    pub max_daq_list: u8,
+    pub priority: u8,
+}
+
+impl DaqEvent {
+    pub fn cycle_time_ms(&self) -> f64 {
+        let unit_ns: f64 = match self.time_unit {
+            0 => 1.0, 1 => 10.0, 2 => 100.0,
+            3 => 1_000.0, 4 => 10_000.0, 5 => 100_000.0,
+            6 => 1_000_000.0, 7 => 10_000_000.0,
+            8 => 100_000_000.0, 9 => 1_000_000_000.0,
+            _ => 1_000_000.0,
+        };
+        self.time_cycle as f64 * unit_ns / 1_000_000.0
+    }
+
+    pub fn display_label(&self) -> String {
+        if self.time_cycle > 0 {
+            format!("Ch{}: {} ({:.1} ms)", self.channel, self.name, self.cycle_time_ms())
+        } else {
+            format!("Ch{}: {}", self.channel, self.name)
+        }
+    }
+}
+
 /// Storage order for matrix/map data in memory
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StorageOrder {

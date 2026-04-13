@@ -48,6 +48,8 @@ pub enum AppMode {
     SelectA2L,
     /// Search dialog for selecting variables
     SearchDialog,
+    /// Event channel selection dialog
+    EventSelect,
 }
 
 /// Menu items
@@ -170,6 +172,11 @@ pub struct App {
     /// Selected DAQ measurement indices for CombinedView display
     selected_daq_meas: Vec<usize>,
 
+    /// Available DAQ events for event selection
+    daq_events: Vec<xcp_client::a2l::DaqEvent>,
+    /// Cursor in event selection dialog
+    event_select_cursor: usize,
+
     /// Search dialog focus (input box or list)
     search_dialog_focus: SearchDialogFocus,
     /// Temporarily selected indices in search dialog (before confirming)
@@ -248,6 +255,8 @@ impl App {
             cal_values: HashMap::new(),
             selected_cal_params: Vec::new(),
             selected_daq_meas: Vec::new(),
+            daq_events: Vec::new(),
+            event_select_cursor: 0,
             search_dialog_focus: SearchDialogFocus::Input,
             search_dialog_selected: Vec::new(),
         }
@@ -305,6 +314,7 @@ impl App {
             AppMode::Input => self.handle_input_key(key).await,
             AppMode::SelectA2L => self.handle_select_a2l_key(key).await,
             AppMode::SearchDialog => self.handle_search_dialog_key(key).await,
+            AppMode::EventSelect => self.handle_event_select_key(key).await,
         };
 
         // Catch errors and display them instead of propagating
@@ -908,6 +918,59 @@ impl App {
                 }
                 self.mode = AppMode::Menu;
             }
+            KeyCode::Char('e') => {
+                let events = {
+                    let daq_manager = self.daq_manager.lock().await;
+                    daq_manager.get_available_events().to_vec()
+                };
+                if !events.is_empty() {
+                    let current_channel = {
+                        let daq_manager = self.daq_manager.lock().await;
+                        daq_manager.get_event_channel()
+                    };
+                    self.event_select_cursor = events.iter()
+                        .position(|ev| ev.channel == current_channel)
+                        .unwrap_or(0);
+                    self.daq_events = events;
+                    self.mode = AppMode::EventSelect;
+                } else {
+                    self.status = Some("No events available (load A2L with EVENT blocks)".to_string());
+                }
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    async fn handle_event_select_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = AppMode::CombinedView;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.event_select_cursor > 0 {
+                    self.event_select_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.event_select_cursor < self.daq_events.len().saturating_sub(1) {
+                    self.event_select_cursor += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(ev) = self.daq_events.get(self.event_select_cursor) {
+                    let channel = ev.channel;
+                    let label = ev.display_label();
+                    let mut daq_manager = self.daq_manager.lock().await;
+                    daq_manager.set_event_channel(channel);
+                    drop(daq_manager);
+                    self.status = Some(format!("Event channel set to: {}", label));
+                }
+                self.mode = AppMode::CombinedView;
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Ok(false);
+            }
             _ => {}
         }
         Ok(true)
@@ -1465,6 +1528,10 @@ impl App {
             AppMode::Input => self.render_input(frame, chunks[1]),
             AppMode::SelectA2L => self.render_select_a2l(frame, chunks[1]),
             AppMode::SearchDialog => self.render_search_dialog(frame, chunks[1]),
+            AppMode::EventSelect => {
+                self.render_combined_view(frame, chunks[1]);
+                self.render_event_select(frame, chunks[1]);
+            }
         }
 
         // Footer
@@ -1479,6 +1546,34 @@ impl App {
         if self.loading {
             self.render_loading(frame, area);
         }
+    }
+
+    fn render_event_select(&self, frame: &mut Frame, area: Rect) {
+        let width = 60.min(area.width.saturating_sub(4));
+        let height = (self.daq_events.len() as u16 + 4).min(area.height.saturating_sub(4));
+        let x = area.x + (area.width.saturating_sub(width)) / 2;
+        let y = area.y + (area.height.saturating_sub(height)) / 2;
+        let dialog_area = Rect { x, y, width, height };
+
+        frame.render_widget(Clear, dialog_area);
+
+        let items: Vec<ListItem> = self.daq_events.iter().enumerate().map(|(i, ev)| {
+            let label = ev.display_label();
+            let style = if i == self.event_select_cursor {
+                Style::default().fg(MATRIX_BRIGHT_GREEN).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MATRIX_GREEN)
+            };
+            ListItem::new(label).style(style)
+        }).collect();
+
+        let list = List::new(items)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(" Select Event Channel [↑↓ navigate, Enter select, Esc cancel] ")
+                .border_style(Style::default().fg(MATRIX_GREEN)));
+
+        frame.render_widget(list, dialog_area);
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {

@@ -343,6 +343,8 @@ pub struct DaqManager {
     daq_list_count: u16,
     /// Event channel for DAQ trigger
     event_channel: u16,
+    /// Available DAQ events (from A2L or slave query)
+    available_events: Vec<crate::a2l::DaqEvent>,
     /// Latest DAQ sample (for UI display)
     latest_sample: Arc<RwLock<Option<DaqRecord>>>,
     /// timestamp mode and size
@@ -377,6 +379,7 @@ impl DaqManager {
             slave_addr: "127.0.0.1:5555".to_string(),
             daq_list_count: 1,
             event_channel: 0,
+            available_events: Vec::new(),
             latest_sample: Arc::new(RwLock::new(None)),
             timestamp_fixed: false,
             timestamp_size: None,
@@ -412,6 +415,7 @@ impl DaqManager {
             slave_addr: "127.0.0.1:5555".to_string(),
             daq_list_count: 1,
             event_channel: 0,
+            available_events: Vec::new(),
             latest_sample: Arc::new(RwLock::new(None)),
             timestamp_fixed: false,
             timestamp_size: None,
@@ -445,6 +449,22 @@ impl DaqManager {
     /// Get the DAQ configuration (for use by other components)
     pub fn get_config(&self) -> Arc<RwLock<DaqConfiguration>> {
         self.daq_config.clone()
+    }
+
+    pub fn set_available_events(&mut self, events: Vec<crate::a2l::DaqEvent>) {
+        self.available_events = events;
+    }
+
+    pub fn get_available_events(&self) -> &[crate::a2l::DaqEvent] {
+        &self.available_events
+    }
+
+    pub fn set_event_channel(&mut self, channel: u16) {
+        self.event_channel = channel;
+    }
+
+    pub fn get_event_channel(&self) -> u16 {
+        self.event_channel
     }
 
     /// Check if DAQ needs restart due to selection changes

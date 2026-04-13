@@ -1471,6 +1471,39 @@ impl XcpSlave {
         }
     }
 
+    /// Query all DAQ event channels from slave using GET_DAQ_EVENT_INFO
+    pub async fn get_daq_events(&self, max_event_channel: u16) -> Result<Vec<crate::a2l::DaqEvent>, SlaveError> {
+        let mut events = Vec::new();
+        for channel in 0..max_event_channel {
+            let response = self.send_command_and_wait(&commands::get_daq_event_info(channel)).await?;
+            let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
+            match parsed {
+                Response::Res(data) if data.len() >= 6 => {
+                    let name_len = data[2] as usize;
+                    let name = if name_len > 0 && data.len() >= 6 + name_len {
+                        String::from_utf8_lossy(&data[6..6 + name_len])
+                            .trim_end_matches('\0')
+                            .to_string()
+                    } else {
+                        format!("Event{}", channel)
+                    };
+                    events.push(crate::a2l::DaqEvent {
+                        channel,
+                        name,
+                        short_name: String::new(),
+                        time_cycle: data[3],
+                        time_unit: data[4],
+                        max_daq_list: data[1],
+                        priority: data[5],
+                    });
+                }
+                Response::Err(_) => break,
+                _ => {}
+            }
+        }
+        Ok(events)
+    }
+
     /// Get DAQ clock from slave
     pub async fn get_daq_clock(&self) -> Result<u32, SlaveError> {
         let response = self.send_command_and_wait(&commands::get_daq_clock()).await?;

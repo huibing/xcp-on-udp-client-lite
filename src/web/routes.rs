@@ -329,7 +329,26 @@ pub async fn connect_all_devices(State(state): State<AppState>) -> impl IntoResp
                 if let Some(xcp_slave) = client.get_slave(slave_id) {
                     let guard = xcp_slave.lock().await;
                     let info = guard.info.clone();
+
+                    // Query live DAQ events from slave; takes precedence over A2L events
+                    let live_events_opt = if let Ok(daq_info) = guard.get_daq_processor_info().await {
+                        if daq_info.max_event_channel > 0 {
+                            guard.get_daq_events(daq_info.max_event_channel).await.ok()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     drop(guard);
+
+                    if let Some(live_events) = live_events_opt {
+                        if !live_events.is_empty() {
+                            let mut daq_mgr = device.daq_manager.write().await;
+                            daq_mgr.set_available_events(live_events);
+                            tracing::info!("Loaded {} live DAQ events from slave '{}'", daq_mgr.get_available_events().len(), device.name);
+                        }
+                    }
 
                     // Create SlaveState using device's cal_manager and daq_manager
                     let slave_state = SlaveState {
@@ -432,16 +451,37 @@ pub async fn connect_device(State(state): State<AppState>, Json(payload): Json<s
                 }
             }
 
-            // Get slave info from XcpClient
-            let info = if let Some(xcp_slave) = client.get_slave(slave_id) {
-                let guard = xcp_slave.lock().await;
-                guard.info.clone()
-            } else {
-                return Json(serde_json::json!({
+            // Get slave info from XcpClient and query live DAQ events
+            let xcp_slave_arc = match client.get_slave(slave_id) {
+                Some(s) => s,
+                None => return Json(serde_json::json!({
                     "success": false,
                     "error": "Failed to get slave info after connection",
-                }));
+                })),
             };
+            let info = xcp_slave_arc.lock().await.info.clone();
+
+            // Query live DAQ events from slave; takes precedence over A2L events
+            {
+                let slave_guard = xcp_slave_arc.lock().await;
+                let live_events_opt = if let Ok(daq_info) = slave_guard.get_daq_processor_info().await {
+                    if daq_info.max_event_channel > 0 {
+                        slave_guard.get_daq_events(daq_info.max_event_channel).await.ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                drop(slave_guard);
+                if let Some(live_events) = live_events_opt {
+                    if !live_events.is_empty() {
+                        let mut daq_mgr = device.daq_manager.write().await;
+                        daq_mgr.set_available_events(live_events);
+                        tracing::info!("Loaded {} live DAQ events from slave '{}'", daq_mgr.get_available_events().len(), device.name);
+                    }
+                }
+            }
 
             // Create SlaveState using device's cal_manager and daq_manager
             let slave_state = SlaveState {
@@ -1948,6 +1988,7 @@ pub async fn a2l_load(
         // Get A2L data
         let characteristics = reader.get_characteristics();
         let measurements = reader.get_measurements();
+        let a2l_events = reader.get_events();
 
         // Get MAX_CTO from A2L (default to 255 if not specified)
         let max_cto = reader.get_max_cto().unwrap_or(255);
@@ -1982,6 +2023,12 @@ pub async fn a2l_load(
             if let Some(meas) = convert_measurement(m) {
                 daq_manager.add_measurement(meas);
             }
+        }
+
+        // Parse A2L EVENT blocks and store in DaqManager
+        if !a2l_events.is_empty() {
+            tracing::info!("Found {} DAQ events in A2L file", a2l_events.len());
+            daq_manager.set_available_events(a2l_events);
         }
 
         // Create and add device
@@ -2026,6 +2073,61 @@ pub async fn a2l_load(
         "success": false,
         "error": "No file provided"
     }))
+}
+
+/// Get available DAQ events (GET /api/daq/events)
+pub async fn daq_events(State(state): State<AppState>) -> impl IntoResponse {
+    let get_events_from_daq = |daq: &DaqManager| -> (Vec<serde_json::Value>, u16) {
+        let events = daq.get_available_events().iter().map(|e| {
+            json!({
+                "channel": e.channel,
+                "name": e.name,
+                "short_name": e.short_name,
+                "time_cycle": e.time_cycle,
+                "time_unit": e.time_unit,
+                "max_daq_list": e.max_daq_list,
+                "priority": e.priority,
+                "display_label": e.display_label(),
+                "cycle_time_ms": e.cycle_time_ms(),
+            })
+        }).collect();
+        (events, daq.get_event_channel())
+    };
+
+    if let Some(slave) = state.current_slave().await {
+        let daq = slave.daq_manager.read().await;
+        let (events, selected) = get_events_from_daq(&daq);
+        return Json(json!({ "success": true, "events": events, "selected_channel": selected }));
+    }
+    if let Some(device) = state.current_device().await {
+        let daq = device.daq_manager.read().await;
+        let (events, selected) = get_events_from_daq(&daq);
+        return Json(json!({ "success": true, "events": events, "selected_channel": selected }));
+    }
+    Json(json!({ "success": true, "events": [], "selected_channel": 0u16 }))
+}
+
+/// Set selected DAQ event channel (POST /api/daq/event)
+pub async fn daq_set_event(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let channel = match payload.get("channel").and_then(|c| c.as_u64()) {
+        Some(c) => c as u16,
+        None => return Json(json!({ "success": false, "error": "Missing channel field" })),
+    };
+
+    if let Some(slave) = state.current_slave().await {
+        let mut daq = slave.daq_manager.write().await;
+        daq.set_event_channel(channel);
+        return Json(json!({ "success": true, "channel": channel }));
+    }
+    if let Some(device) = state.current_device().await {
+        let mut daq = device.daq_manager.write().await;
+        daq.set_event_channel(channel);
+        return Json(json!({ "success": true, "channel": channel }));
+    }
+    Json(json!({ "success": false, "error": "No device connected" }))
 }
 
 /// Convert A2L characteristic to calibration parameter

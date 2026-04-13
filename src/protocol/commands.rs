@@ -279,6 +279,15 @@ pub fn build_checksum(block_size: u32) -> Vec<u8> {
     cmd
 }
 
+/// Build GET_DAQ_EVENT_INFO command
+pub fn get_daq_event_info(event_channel: u16) -> Vec<u8> {
+    let mut cmd = Vec::with_capacity(4);
+    cmd.push(CommandCode::GetDaqEventInfo as u8);
+    cmd.push(0x00); // reserved
+    cmd.extend_from_slice(&event_channel.to_le_bytes());
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

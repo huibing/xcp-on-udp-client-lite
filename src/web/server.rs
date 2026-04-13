@@ -95,6 +95,8 @@ impl WebServer {
             .route("/api/daq/select", post(routes::daq_set_selection))
             .route("/api/daq/clear", get(routes::daq_clear))
             .route("/api/daq/data", post(routes::daq_data))
+            .route("/api/daq/events", get(routes::daq_events))
+            .route("/api/daq/event", post(routes::daq_set_event))
             // A2L
             .route("/a2l", get(routes::a2l_page))
             .route("/api/a2l/load", post(routes::a2l_load))

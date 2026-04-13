@@ -15,4 +15,4 @@ pub use reader::{
     A2lReader, A2lCharacteristic, A2lMeasurement, A2lMemorySegment,
     AxisInfo, AxisPointSource,
 };
-pub use types::{A2lDataType, CharacteristicType, StorageOrder};
+pub use types::{A2lDataType, CharacteristicType, StorageOrder, DaqEvent};

@@ -21,6 +21,11 @@
             <p style="color: #666; text-align: center;">No data (DAQ not running)</p>
         </div>
         <br>
+        <div id="eventSelector" style="margin-bottom: 1rem; display: none;">
+            <label style="color: #aaa; font-size: 0.85rem;">Event Channel:</label>
+            <select id="eventSelect" onchange="setEventChannel(this.value)" style="margin-left: 0.5rem; background: #2a2a2a; color: #fff; border: 1px solid #555; padding: 0.3rem 0.5rem; border-radius: 4px;">
+            </select>
+        </div>
         <div class="btn-group">
             <button id="startBtn" onclick="startDaq()">Start</button>
             <button id="stopBtn" onclick="stopDaq()" class="danger" style="display: none;">Stop</button>
@@ -147,6 +152,7 @@ const STORAGE_PREFIX = 'daq'; // Prefix for localStorage keys
 
 document.addEventListener('DOMContentLoaded', async () => {
     await loadAvailableVars();
+    await loadEvents();
     loadSelectionFromStorage(STORAGE_PREFIX, allVariables, selectedKeys);
     renderSelectedVars();
     checkDaqStatus();
@@ -722,4 +728,51 @@ document.addEventListener('keydown', (e) => {
         closeInfoModal();
     }
 });
+
+let availableEvents = [];
+let selectedEventChannel = 0;
+
+async function loadEvents() {
+    try {
+        const response = await fetch('/api/daq/events');
+        const data = await response.json();
+        if (data.success && data.events && data.events.length > 0) {
+            availableEvents = data.events;
+            selectedEventChannel = data.selected_channel;
+            renderEventSelector();
+        }
+    } catch (e) {
+        console.error('Failed to load DAQ events:', e);
+    }
+}
+
+function renderEventSelector() {
+    const selector = document.getElementById('eventSelector');
+    const select = document.getElementById('eventSelect');
+    if (availableEvents.length === 0) {
+        selector.style.display = 'none';
+        return;
+    }
+    selector.style.display = 'block';
+    select.innerHTML = availableEvents.map(e => {
+        const selected = e.channel === selectedEventChannel ? 'selected' : '';
+        return `<option value="${e.channel}" ${selected}>${escapeHtml(e.display_label)}</option>`;
+    }).join('');
+}
+
+async function setEventChannel(channel) {
+    try {
+        const response = await fetch('/api/daq/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ channel: parseInt(channel) })
+        });
+        const data = await response.json();
+        if (data.success) {
+            selectedEventChannel = parseInt(channel);
+        }
+    } catch (e) {
+        console.error('Failed to set event channel:', e);
+    }
+}
 </script>

@@ -21,7 +21,7 @@ pub use a2l::{
     CompuMethod, CompuVtabEntry,
     A2lReader, A2lMeasurement, A2lCharacteristic, A2lDataType,
     A2lMemorySegment, AxisInfo, AxisPointSource,
-    CharacteristicType, StorageOrder,
+    CharacteristicType, StorageOrder, DaqEvent,
 };
 pub use slave::{XcpSlave, SlaveId, SlaveInfo, SlaveEvent, SlaveError, SegmentPageState, CalibrationWriteError, PageMode};
 pub use variable::{DeviceVariable, VariableType, VariableFilter, VariableSearchManager, VariableSummary};
