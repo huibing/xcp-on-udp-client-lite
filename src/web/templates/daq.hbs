@@ -44,6 +44,14 @@
     <div id="graphSignals" style="margin-bottom: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem;">
         <span style="color: #888;">No data yet. Start DAQ to collect data.</span>
     </div>
+    <div style="margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.75rem; font-size: 0.85em;">
+        <label style="display: inline-flex; align-items: center; gap: 4px; cursor: pointer;">
+            <input type="checkbox" id="chartAutoFollow" checked onchange="chartAutoFollow = this.checked; drawChart();">
+            Auto-follow
+        </label>
+        <button class="secondary" onclick="chartResetView()" style="font-size: 0.85em; padding: 2px 10px;">Reset View</button>
+        <span style="color: #666; font-size: 0.8em;">Scroll: zoom X &nbsp;|&nbsp; Shift+Scroll: zoom Y &nbsp;|&nbsp; Drag: pan &nbsp;|&nbsp; Dbl-click: reset</span>
+    </div>
     <canvas id="chartCanvas" style="width: 100%; height: 350px; background: #111; border-radius: 4px; cursor: crosshair;"></canvas>
     <div id="chartTooltip" style="display: none; position: absolute; background: rgba(30,30,50,0.95); color: #eee; padding: 6px 10px; border-radius: 4px; font-size: 0.8em; pointer-events: none; border: 1px solid #555; z-index: 10;"></div>
 </div>
@@ -877,6 +885,22 @@ let chartSelectedSignals = new Set();
 // Chart layout constants
 const CHART_ML = 70, CHART_MR = 20, CHART_MT = 10, CHART_MB = 30;
 
+// Zoom/pan state (null = auto-scale)
+let chartViewTMin = null;
+let chartViewTMax = null;
+let chartViewYMin = null;
+let chartViewYMax = null;
+let chartAutoFollow = true;
+
+// Drag state
+let chartDragging = false;
+let chartDragStartX = 0;
+let chartDragStartY = 0;
+let chartDragTMin = 0;
+let chartDragTMax = 0;
+let chartDragYMin = 0;
+let chartDragYMax = 0;
+
 function toggleGraph() {
     chartVisible = !chartVisible;
     const panel = document.getElementById('graphPanel');
@@ -936,8 +960,41 @@ function clearChartData() {
     chartSeries = {};
     chartSignalNames = {};
     chartSelectedSignals.clear();
+    chartResetView();
     updateGraphSignalCheckboxes();
     drawChart();
+}
+
+function chartResetView() {
+    chartViewTMin = null;
+    chartViewTMax = null;
+    chartViewYMin = null;
+    chartViewYMax = null;
+    chartAutoFollow = true;
+    const cb = document.getElementById('chartAutoFollow');
+    if (cb) cb.checked = true;
+    if (chartVisible) drawChart();
+}
+
+// Compute the full data range for Y-axis across selected signals
+function chartFullYRange() {
+    const allKeys = Object.keys(chartSeries);
+    const signalKeys = allKeys.filter(k => chartSelectedSignals.has(k));
+    let yMin = Infinity, yMax = -Infinity;
+    signalKeys.forEach(key => {
+        chartSeries[key].forEach(v => {
+            if (!isNaN(v) && isFinite(v)) {
+                if (v < yMin) yMin = v;
+                if (v > yMax) yMax = v;
+            }
+        });
+    });
+    if (!isFinite(yMin)) { yMin = 0; yMax = 1; }
+    let yRange = yMax - yMin;
+    if (yRange === 0) { yRange = 1; yMin -= 0.5; yMax += 0.5; }
+    yMin -= yRange * 0.05;
+    yMax += yRange * 0.05;
+    return { yMin, yMax };
 }
 
 function updateGraphSignalCheckboxes() {
@@ -1005,26 +1062,55 @@ function drawChart() {
         return;
     }
 
-    // Calculate ranges
-    const tMin = chartTimestamps[0];
-    const tMax = chartTimestamps[chartTimestamps.length - 1];
+    // Determine X range (time)
+    const dataT0 = chartTimestamps[0];
+    const dataT1 = chartTimestamps[chartTimestamps.length - 1];
+    let tMin, tMax;
+    if (chartViewTMin !== null && chartViewTMax !== null) {
+        tMin = chartViewTMin;
+        tMax = chartViewTMax;
+        // Auto-follow: shift window to include latest data
+        if (chartAutoFollow && dataT1 > tMax) {
+            const span = tMax - tMin;
+            tMax = dataT1;
+            tMin = tMax - span;
+            chartViewTMin = tMin;
+            chartViewTMax = tMax;
+        }
+    } else {
+        tMin = dataT0;
+        tMax = dataT1;
+    }
     const tRange = tMax - tMin || 1;
 
-    let yMin = Infinity, yMax = -Infinity;
-    signalKeys.forEach(key => {
-        chartSeries[key].forEach(v => {
-            if (!isNaN(v) && isFinite(v)) {
-                if (v < yMin) yMin = v;
-                if (v > yMax) yMax = v;
+    // Determine Y range
+    let yMin, yMax;
+    if (chartViewYMin !== null && chartViewYMax !== null) {
+        yMin = chartViewYMin;
+        yMax = chartViewYMax;
+    } else {
+        // Auto Y: scan only visible data range for better scaling
+        yMin = Infinity;
+        yMax = -Infinity;
+        signalKeys.forEach(key => {
+            const data = chartSeries[key];
+            for (let i = 0; i < data.length; i++) {
+                const t = chartTimestamps[i];
+                if (t < tMin || t > tMax) continue;
+                const v = data[i];
+                if (!isNaN(v) && isFinite(v)) {
+                    if (v < yMin) yMin = v;
+                    if (v > yMax) yMax = v;
+                }
             }
         });
-    });
-    if (!isFinite(yMin)) { yMin = 0; yMax = 1; }
-    let yRange = yMax - yMin;
-    if (yRange === 0) { yRange = 1; yMin -= 0.5; yMax += 0.5; }
-    yMin -= yRange * 0.05;
-    yMax += yRange * 0.05;
-    yRange = yMax - yMin;
+        if (!isFinite(yMin)) { yMin = 0; yMax = 1; }
+        let yR = yMax - yMin;
+        if (yR === 0) { yR = 1; yMin -= 0.5; yMax += 0.5; }
+        yMin -= yR * 0.05;
+        yMax += yR * 0.05;
+    }
+    const yRange = yMax - yMin || 1;
 
     const toX = t => ML + ((t - tMin) / tRange) * plotW;
     const toY = v => MT + plotH - ((v - yMin) / yRange) * plotH;
@@ -1068,6 +1154,12 @@ function drawChart() {
     ctx.lineWidth = 1;
     ctx.strokeRect(ML, MT, plotW, plotH);
 
+    // Clip to plot area for signal drawing
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ML, MT, plotW, plotH);
+    ctx.clip();
+
     // Draw signal lines
     signalKeys.forEach(key => {
         const colorIdx = allKeys.indexOf(key);
@@ -1086,6 +1178,8 @@ function drawChart() {
         }
         ctx.stroke();
     });
+
+    ctx.restore();
 }
 
 function fmtAxis(v) {
@@ -1098,12 +1192,119 @@ function fmtAxis(v) {
     return v.toExponential(2);
 }
 
-// Tooltip on mouse move over chart
+// Chart interaction: zoom, pan, tooltip, double-click reset
 (function() {
     const canvas = document.getElementById('chartCanvas');
     if (!canvas) return;
-    canvas.addEventListener('mousemove', function(e) {
+
+    // Helper: get effective view ranges (matching drawChart logic)
+    function getViewRanges() {
+        if (chartTimestamps.length < 2) return null;
+        const dataT0 = chartTimestamps[0];
+        const dataT1 = chartTimestamps[chartTimestamps.length - 1];
+        let tMin = chartViewTMin !== null ? chartViewTMin : dataT0;
+        let tMax = chartViewTMax !== null ? chartViewTMax : dataT1;
+        const tRange = tMax - tMin || 1;
+
+        let yMin, yMax;
+        if (chartViewYMin !== null && chartViewYMax !== null) {
+            yMin = chartViewYMin;
+            yMax = chartViewYMax;
+        } else {
+            const yr = chartFullYRange();
+            yMin = yr.yMin;
+            yMax = yr.yMax;
+        }
+        const yRange = yMax - yMin || 1;
+        return { tMin, tMax, tRange, yMin, yMax, yRange };
+    }
+
+    // Mouse wheel: zoom
+    canvas.addEventListener('wheel', function(e) {
+        e.preventDefault();
+        if (chartTimestamps.length < 2) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const plotW = rect.width - CHART_ML - CHART_MR;
+        const plotH = rect.height - CHART_MT - CHART_MB;
+
+        const ranges = getViewRanges();
+        if (!ranges) return;
+
+        const zoomFactor = e.deltaY > 0 ? 1.15 : 0.87; // scroll down = zoom out
+
+        if (e.shiftKey) {
+            // Zoom Y-axis centered on cursor
+            const yFrac = 1 - (my - CHART_MT) / plotH;
+            const yCenter = ranges.yMin + yFrac * ranges.yRange;
+            const newYRange = ranges.yRange * zoomFactor;
+            chartViewYMin = yCenter - yFrac * newYRange;
+            chartViewYMax = yCenter + (1 - yFrac) * newYRange;
+        } else {
+            // Zoom X-axis centered on cursor
+            const xFrac = (mx - CHART_ML) / plotW;
+            const tCenter = ranges.tMin + xFrac * ranges.tRange;
+            const newTRange = ranges.tRange * zoomFactor;
+            chartViewTMin = tCenter - xFrac * newTRange;
+            chartViewTMax = tCenter + (1 - xFrac) * newTRange;
+            // Disable auto-follow when user zooms X
+            chartAutoFollow = false;
+            const cb = document.getElementById('chartAutoFollow');
+            if (cb) cb.checked = false;
+        }
+
+        drawChart();
+    }, { passive: false });
+
+    // Mouse drag: pan
+    canvas.addEventListener('mousedown', function(e) {
+        if (e.button !== 0) return;
+        if (chartTimestamps.length < 2) return;
+
+        const ranges = getViewRanges();
+        if (!ranges) return;
+
+        chartDragging = true;
+        chartDragStartX = e.clientX;
+        chartDragStartY = e.clientY;
+        chartDragTMin = ranges.tMin;
+        chartDragTMax = ranges.tMax;
+        chartDragYMin = ranges.yMin;
+        chartDragYMax = ranges.yMax;
+        canvas.style.cursor = 'grabbing';
+    });
+
+    window.addEventListener('mousemove', function(e) {
         const tooltip = document.getElementById('chartTooltip');
+
+        if (chartDragging) {
+            const rect = canvas.getBoundingClientRect();
+            const plotW = rect.width - CHART_ML - CHART_MR;
+            const plotH = rect.height - CHART_MT - CHART_MB;
+
+            const dx = e.clientX - chartDragStartX;
+            const dy = e.clientY - chartDragStartY;
+
+            const tSpan = chartDragTMax - chartDragTMin;
+            const ySpan = chartDragYMax - chartDragYMin;
+
+            chartViewTMin = chartDragTMin - (dx / plotW) * tSpan;
+            chartViewTMax = chartDragTMax - (dx / plotW) * tSpan;
+            chartViewYMin = chartDragYMin + (dy / plotH) * ySpan;
+            chartViewYMax = chartDragYMax + (dy / plotH) * ySpan;
+
+            chartAutoFollow = false;
+            const cb = document.getElementById('chartAutoFollow');
+            if (cb) cb.checked = false;
+
+            tooltip.style.display = 'none';
+            drawChart();
+            return;
+        }
+
+        // Tooltip (only when not dragging)
         if (!chartVisible || chartTimestamps.length < 2) {
             tooltip.style.display = 'none';
             return;
@@ -1111,26 +1312,27 @@ function fmtAxis(v) {
 
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left;
-        const W = rect.width;
-        const plotW = W - CHART_ML - CHART_MR;
+        const plotW = rect.width - CHART_ML - CHART_MR;
 
         if (mx < CHART_ML || mx > CHART_ML + plotW) {
             tooltip.style.display = 'none';
             return;
         }
 
-        const tMin = chartTimestamps[0];
-        const tMax = chartTimestamps[chartTimestamps.length - 1];
-        const tRange = tMax - tMin || 1;
-        const t = tMin + ((mx - CHART_ML) / plotW) * tRange;
+        const ranges = getViewRanges();
+        if (!ranges) { tooltip.style.display = 'none'; return; }
 
-        // Find nearest timestamp index
-        let idx = 0;
-        let minDist = Infinity;
-        for (let i = 0; i < chartTimestamps.length; i++) {
-            const d = Math.abs(chartTimestamps[i] - t);
-            if (d < minDist) { minDist = d; idx = i; }
+        const t = ranges.tMin + ((mx - CHART_ML) / plotW) * ranges.tRange;
+
+        // Find nearest timestamp index (binary search for performance)
+        let lo = 0, hi = chartTimestamps.length - 1;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (chartTimestamps[mid] < t) lo = mid + 1;
+            else hi = mid;
         }
+        if (lo > 0 && Math.abs(chartTimestamps[lo - 1] - t) < Math.abs(chartTimestamps[lo] - t)) lo--;
+        const idx = lo;
 
         const allKeys = Object.keys(chartSeries);
         const signalKeys = allKeys.filter(k => chartSelectedSignals.has(k));
@@ -1151,8 +1353,20 @@ function fmtAxis(v) {
         tooltip.style.top = (e.clientY - 10) + 'px';
     });
 
+    window.addEventListener('mouseup', function() {
+        if (chartDragging) {
+            chartDragging = false;
+            canvas.style.cursor = 'crosshair';
+        }
+    });
+
     canvas.addEventListener('mouseleave', function() {
         document.getElementById('chartTooltip').style.display = 'none';
+    });
+
+    // Double-click: reset view
+    canvas.addEventListener('dblclick', function() {
+        chartResetView();
     });
 })();
 </script>
