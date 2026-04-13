@@ -1392,6 +1392,185 @@ fn parse_dto_packet(packet: &[u8], timestamp_size: u8, ind_field_type: &Identifi
 mod tests {
     use super::*;
 
+    /// Helper: create a DaqManager with N dummy U32 measurements, all selected
+    fn make_daq_manager(n: usize) -> DaqManager {
+        let mut mgr = DaqManager::new();
+        mgr.all_measurements = (0..n)
+            .map(|i| Measurement {
+                name: format!("sig_{}", i),
+                address: 0x1000 + (i as u32) * 4,
+                address_ext: 0,
+                size: 4,
+                data_type: A2lDataType::U32,
+                unit: None,
+                compu_method: CompuMethod::Identical,
+            })
+            .collect();
+        mgr.selected_indices = (0..n).collect();
+        mgr
+    }
+
+    // ── Per-measurement event methods ──────────────────────────
+
+    #[test]
+    fn test_get_measurement_event_fallback_to_default() {
+        let mut mgr = make_daq_manager(4);
+        mgr.event_channel = 5;
+        // No per-measurement override → returns default
+        assert_eq!(mgr.get_measurement_event(0), 5);
+        assert_eq!(mgr.get_measurement_event(3), 5);
+    }
+
+    #[test]
+    fn test_set_and_get_measurement_event() {
+        let mut mgr = make_daq_manager(4);
+        mgr.event_channel = 0;
+        mgr.set_measurement_event(1, 10);
+        mgr.set_measurement_event(3, 20);
+        assert_eq!(mgr.get_measurement_event(0), 0); // default
+        assert_eq!(mgr.get_measurement_event(1), 10);
+        assert_eq!(mgr.get_measurement_event(2), 0); // default
+        assert_eq!(mgr.get_measurement_event(3), 20);
+    }
+
+    #[test]
+    fn test_set_measurement_event_out_of_bounds_ignored() {
+        let mut mgr = make_daq_manager(2);
+        mgr.set_measurement_event(99, 7);
+        // Out-of-bounds index should not be inserted
+        assert!(mgr.measurement_events.is_empty());
+    }
+
+    #[test]
+    fn test_set_measurement_events_batch() {
+        let mut mgr = make_daq_manager(5);
+        mgr.set_measurement_events_batch(&[(0, 1), (2, 2), (4, 3), (99, 9)]);
+        assert_eq!(mgr.get_measurement_event(0), 1);
+        assert_eq!(mgr.get_measurement_event(1), 0); // default
+        assert_eq!(mgr.get_measurement_event(2), 2);
+        assert_eq!(mgr.get_measurement_event(4), 3);
+        // out-of-bounds 99 not stored
+        assert!(!mgr.measurement_events.contains_key(&99));
+    }
+
+    // ── calculate_odt_allocation tests ────────────────────────
+
+    #[test]
+    fn test_allocation_empty_selection() {
+        let mut mgr = make_daq_manager(5);
+        mgr.selected_indices.clear();
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.daq_list_count, 0);
+        assert!(alloc.daq_lists.is_empty());
+        assert!(alloc.event_channel_per_list.is_empty());
+    }
+
+    #[test]
+    fn test_allocation_single_event_all_signals() {
+        // 5 signals, all on default event 0 → 1 DAQ list, 1 ODT, 5 entries
+        let mgr = make_daq_manager(5);
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.daq_list_count, 1);
+        assert_eq!(alloc.event_channel_per_list, vec![0]);
+        assert_eq!(alloc.daq_lists.len(), 1);
+        assert_eq!(alloc.daq_lists[0].odts.len(), 1);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 5);
+    }
+
+    #[test]
+    fn test_allocation_two_events_separate_lists() {
+        // 6 signals: [0,1,2] on event 1, [3,4,5] on event 2
+        let mut mgr = make_daq_manager(6);
+        mgr.set_measurement_event(0, 1);
+        mgr.set_measurement_event(1, 1);
+        mgr.set_measurement_event(2, 1);
+        mgr.set_measurement_event(3, 2);
+        mgr.set_measurement_event(4, 2);
+        mgr.set_measurement_event(5, 2);
+
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.daq_list_count, 2);
+        // BTreeMap orders by key, so event 1 first, then event 2
+        assert_eq!(alloc.event_channel_per_list, vec![1, 2]);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 3);
+        assert_eq!(alloc.daq_lists[1].odts[0].entries.len(), 3);
+    }
+
+    #[test]
+    fn test_allocation_three_events_mixed() {
+        // 8 signals: indices 0,1 → event 10; 2,3,4 → event 5; 5,6,7 → event 20
+        let mut mgr = make_daq_manager(8);
+        mgr.set_measurement_event(0, 10);
+        mgr.set_measurement_event(1, 10);
+        mgr.set_measurement_event(2, 5);
+        mgr.set_measurement_event(3, 5);
+        mgr.set_measurement_event(4, 5);
+        mgr.set_measurement_event(5, 20);
+        mgr.set_measurement_event(6, 20);
+        mgr.set_measurement_event(7, 20);
+
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.daq_list_count, 3);
+        // BTreeMap: sorted by event channel → 5, 10, 20
+        assert_eq!(alloc.event_channel_per_list, vec![5, 10, 20]);
+        // event 5 has 3 signals, event 10 has 2, event 20 has 3
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 3);
+        assert_eq!(alloc.daq_lists[1].odts[0].entries.len(), 2);
+        assert_eq!(alloc.daq_lists[2].odts[0].entries.len(), 3);
+    }
+
+    #[test]
+    fn test_allocation_partial_overrides_use_default() {
+        // 4 signals: 0 → event 3, rest use default event 0
+        let mut mgr = make_daq_manager(4);
+        mgr.event_channel = 0;
+        mgr.set_measurement_event(0, 3);
+
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.daq_list_count, 2);
+        // event 0 (default, 3 signals), event 3 (1 signal)
+        assert_eq!(alloc.event_channel_per_list, vec![0, 3]);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 3);
+        assert_eq!(alloc.daq_lists[1].odts[0].entries.len(), 1);
+    }
+
+    #[test]
+    fn test_allocation_measurement_too_large() {
+        let mut mgr = DaqManager::new();
+        mgr.all_measurements.push(Measurement {
+            name: "big_signal".to_string(),
+            address: 0x1000,
+            address_ext: 0,
+            size: 16, // 16 bytes
+            data_type: A2lDataType::U8,
+            unit: None,
+            compu_method: CompuMethod::Identical,
+        });
+        mgr.selected_indices = vec![0];
+        // max_odt_entry_size = 8, signal is 16 → should fail
+        let result = mgr.calculate_odt_allocation(8);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds max ODT entry size"));
+    }
+
+    #[test]
+    fn test_allocation_preserves_measurement_indices() {
+        // Verify that measurement_idx in entries refers to selected_measurements position
+        let mut mgr = make_daq_manager(4);
+        mgr.set_measurement_event(0, 1);
+        mgr.set_measurement_event(1, 1);
+        mgr.set_measurement_event(2, 2);
+        mgr.set_measurement_event(3, 2);
+
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        // event 1 list: sel_idx 0, 1
+        let entries_ev1: Vec<usize> = alloc.daq_lists[0].odts[0].entries.iter().map(|e| e.measurement_idx).collect();
+        assert_eq!(entries_ev1, vec![0, 1]);
+        // event 2 list: sel_idx 2, 3
+        let entries_ev2: Vec<usize> = alloc.daq_lists[1].odts[0].entries.iter().map(|e| e.measurement_idx).collect();
+        assert_eq!(entries_ev2, vec![2, 3]);
+    }
+
     #[test]
     fn test_parse_dto_packet() {
         // Valid DTO packet: header + ODT (0x00) + data (AbosulteODT mode)
