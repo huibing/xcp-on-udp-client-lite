@@ -2132,38 +2132,53 @@ impl App {
     }
 
     fn render_combined_daq(&self, frame: &mut Frame, area: Rect) {
-        // Get measurement info
-        let (selected_names, daq_running_count, available_count, all_measurements) =
+        // Get measurement info + active event channel
+        let (selected_names, daq_running_count, available_count, all_measurements, event_channel) =
             if let Ok(daq_manager) = self.daq_manager.try_lock() {
                 let names: Vec<String> = daq_manager.selected_measurements()
                     .iter()
                     .map(|m| m.name.clone())
                     .collect();
                 let all = daq_manager.all_measurements().to_vec();
-                (names, daq_manager.selected_count(), daq_manager.available_count(), all)
+                let ch = daq_manager.get_event_channel();
+                (names, daq_manager.selected_count(), daq_manager.available_count(), all, ch)
             } else {
-                (vec![], 0, 0, vec![])
+                (vec![], 0, 0, vec![], 0u16)
             };
 
-        // Create vertical layout: status (fixed), live data (40%), measurements (60%)
+        // Look up the active event for cycle-time display
+        let active_event = self.daq_events.iter().find(|e| e.channel == event_channel);
+
+        // Create vertical layout: status (fixed), live data (35%), bottom (remaining)
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),      // Status bar
                 Constraint::Percentage(35), // Live data
-                Constraint::Min(0),         // Measurement selection
+                Constraint::Min(0),         // Bottom: event list + measurements
             ])
             .split(area);
 
-        // Status bar
+        // ── Status bar ──────────────────────────────────────────────────────────
         let view_mode_str = match self.daq_display_mode {
             DaqDisplayMode::Text => "TEXT",
             DaqDisplayMode::Chart => "CHART",
         };
+        let event_status = match active_event {
+            Some(ev) if ev.time_cycle > 0 => format!(
+                "ch{} {} ({:.0}ms)",
+                ev.channel,
+                ev.short_name.chars().take(12).collect::<String>(),
+                ev.cycle_time_ms()
+            ),
+            Some(ev) => format!("ch{} {}", ev.channel, ev.short_name.chars().take(12).collect::<String>()),
+            None => format!("ch{}", event_channel),
+        };
         let status_text = format!(
-            " Status: {} | Mode: {} | Acquiring: {}/{}",
+            " Status: {} | Mode: {} | Event: {} | Acquiring: {}/{} | e: change event ",
             if self.daq_running { "RUNNING" } else { "STOPPED" },
             view_mode_str,
+            event_status,
             daq_running_count,
             available_count
         );
@@ -2178,22 +2193,68 @@ impl App {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(MATRIX_GREEN)),
             );
-
         frame.render_widget(status, chunks[0]);
 
-        // Render based on display mode
+        // ── Live data panel ─────────────────────────────────────────────────────
+        let cycle_ms = active_event.map(|e| e.cycle_time_ms()).unwrap_or(0.0);
         match self.daq_display_mode {
             DaqDisplayMode::Text => {
-                self.render_daq_text_view(frame, chunks[1], &selected_names, daq_running_count);
+                self.render_daq_text_view(frame, chunks[1], &selected_names, daq_running_count, cycle_ms);
             }
             DaqDisplayMode::Chart => {
                 self.render_daq_chart_view(frame, chunks[1], &selected_names);
             }
         }
 
-        // Measurement selection panel - show only selected measurements
+        // ── Bottom: optionally split event list | measurements ───────────────────
+        let has_events = !self.daq_events.is_empty();
+        let (event_panel_area, meas_area) = if has_events {
+            let h = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(28), Constraint::Percentage(72)])
+                .split(chunks[2]);
+            (Some(h[0]), h[1])
+        } else {
+            (None, chunks[2])
+        };
+
+        // Event list panel
+        if let Some(ev_area) = event_panel_area {
+            let ev_items: Vec<ListItem> = self.daq_events.iter().map(|ev| {
+                let is_active = ev.channel == event_channel;
+                let label = if ev.time_cycle > 0 {
+                    format!(
+                        "{} {} ({:.0}ms)",
+                        if is_active { "▶" } else { " " },
+                        ev.short_name.chars().take(12).collect::<String>(),
+                        ev.cycle_time_ms()
+                    )
+                } else {
+                    format!(
+                        "{} {}",
+                        if is_active { "▶" } else { " " },
+                        ev.short_name.chars().take(12).collect::<String>()
+                    )
+                };
+                let style = if is_active {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(MATRIX_GREEN)
+                };
+                ListItem::new(label).style(style)
+            }).collect();
+
+            let ev_list = List::new(ev_items)
+                .block(Block::default()
+                    .title(" Events (e: select) ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(MATRIX_GREEN)));
+            frame.render_widget(ev_list, ev_area);
+        }
+
+        // Measurement selection panel
         let indices = &self.selected_daq_meas;
-        let items: Vec<ListItem> = if indices.is_empty() {
+        let meas_items: Vec<ListItem> = if indices.is_empty() {
             vec![ListItem::new(
                 "  Press '/' to search and add measurements"
             ).style(Style::default().fg(Color::Gray))]
@@ -2227,12 +2288,20 @@ impl App {
             Style::default().fg(MATRIX_GREEN)
         };
 
+        // Show cycle time in measurements panel title when an event is active
+        let cycle_hint = if cycle_ms > 0.0 {
+            format!(" [{:.0}ms] ", cycle_ms)
+        } else {
+            " ".to_string()
+        };
         let title = format!(
-            " Measurements (Tab: switch, /: add, j/k: nav, Space: toggle, d: del) - {} selected ",
-            indices.len()
+            " Measurements{}| {}/{} | Tab: nav, /: add, j/k, d: del ",
+            cycle_hint,
+            indices.len(),
+            available_count
         );
 
-        let list = List::new(items)
+        let list = List::new(meas_items)
             .block(
                 Block::default()
                     .title(title)
@@ -2240,10 +2309,10 @@ impl App {
                     .border_style(border_style),
             );
 
-        frame.render_widget(list, chunks[2]);
+        frame.render_widget(list, meas_area);
     }
 
-    fn render_daq_text_view(&self, frame: &mut Frame, area: Rect, selected_names: &[String], selected_count: usize) {
+    fn render_daq_text_view(&self, frame: &mut Frame, area: Rect, selected_names: &[String], selected_count: usize, cycle_ms: f64) {
         let mut data_lines: Vec<Line> = vec![];
 
         // Show latest values for each selected measurement
@@ -2279,9 +2348,14 @@ impl App {
             }
         }
 
+        let live_title = if cycle_ms > 0.0 {
+            format!(" Live Data @ {:.0}ms (s: start/stop, c: clear, t: chart) ", cycle_ms)
+        } else {
+            " Live Data (s: start/stop, c: clear, t: chart) ".to_string()
+        };
         let data = Paragraph::new(data_lines).block(
             Block::default()
-                .title(" Live Data (s: start/stop, c: clear, t: chart) ")
+                .title(live_title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(MATRIX_GREEN)),
         );
