@@ -21,11 +21,6 @@
             <p style="color: #666; text-align: center;">No data (DAQ not running)</p>
         </div>
         <br>
-        <div id="eventSelector" style="margin-bottom: 1rem; display: none;">
-            <label style="color: #aaa; font-size: 0.85rem;">Event Channel:</label>
-            <select id="eventSelect" onchange="setEventChannel(this.value)" style="margin-left: 0.5rem; background: #2a2a2a; color: #fff; border: 1px solid #555; padding: 0.3rem 0.5rem; border-radius: 4px;">
-            </select>
-        </div>
         <div class="btn-group">
             <button id="startBtn" onclick="startDaq()">Start</button>
             <button id="stopBtn" onclick="stopDaq()" class="danger" style="display: none;">Stop</button>
@@ -135,6 +130,19 @@
 }
 .daq-item .name { color: #fff; }
 .daq-item .value { color: #00ff88; font-family: monospace; }
+.event-select {
+    background: #2a2a2a;
+    color: #fff;
+    border: 1px solid #555;
+    padding: 0.15rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+    max-width: 160px;
+}
+.event-select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
 </style>
 
 <script>
@@ -453,18 +461,42 @@ function renderSelectedVars() {
 
 function renderSelectedList(selectedVars) {
     const list = document.getElementById('selectedList');
-    list.innerHTML = selectedVars.map(v => {
+    const hasEvents = availableEvents.length > 0;
+
+    // Add "Set All Events" header if events are available and not running
+    let headerHtml = '';
+    if (hasEvents && !daqRunning && selectedVars.length > 0) {
+        headerHtml = `
+            <div style="display: flex; justify-content: flex-end; padding: 0.3rem 0.5rem; border-bottom: 1px solid #444; background: #1a1a1a;">
+                <label style="color: #aaa; font-size: 0.8rem; margin-right: 0.3rem;">Set all events:</label>
+                <select class="event-select" onchange="setAllMeasurementEvents(this.value)">
+                    ${buildEventOptions(-1)}
+                </select>
+            </div>
+        `;
+    }
+
+    list.innerHTML = headerHtml + selectedVars.map(v => {
         const key = `${v.device_id}:${v.name}`;
         const removeBtn = daqRunning
             ? ''
             : `<button class="secondary" onclick="removeVar('${key}')" title="Remove" style="padding: 0.2rem 0.5rem;">&times;</button>`;
+        const currentEvent = measurementEvents[v.idx.toString()] !== undefined
+            ? measurementEvents[v.idx.toString()]
+            : selectedEventChannel;
+        const eventSelect = hasEvents
+            ? `<select class="event-select" onchange="setMeasurementEvent(${v.idx}, this.value)" ${daqRunning ? 'disabled' : ''}>
+                   ${buildEventOptions(currentEvent)}
+               </select>`
+            : '';
         return `
             <div class="daq-item">
-                <span class="name">
+                <span class="name" style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                     <span style="color: #888; font-size: 0.85em;">[${escapeHtml(v.device_name)}]</span>
                     ${escapeHtml(v.name)}
                 </span>
-                <div class="btn-group">
+                <div class="btn-group" style="display: flex; align-items: center; gap: 0.3rem; flex-shrink: 0;">
+                    ${eventSelect}
                     <button onclick="openInfoModal('${v.device_id}', ${v.idx}, '${escapeHtml(v.name)}')" title="Info" style="padding: 0.2rem 0.5rem;">ℹ️</button>
                     ${removeBtn}
                 </div>
@@ -731,6 +763,7 @@ document.addEventListener('keydown', (e) => {
 
 let availableEvents = [];
 let selectedEventChannel = 0;
+let measurementEvents = {}; // { measurement_idx: event_channel }
 
 async function loadEvents() {
     try {
@@ -739,40 +772,59 @@ async function loadEvents() {
         if (data.success && data.events && data.events.length > 0) {
             availableEvents = data.events;
             selectedEventChannel = data.selected_channel;
-            renderEventSelector();
+            if (data.measurement_events) {
+                measurementEvents = data.measurement_events;
+            }
         }
     } catch (e) {
         console.error('Failed to load DAQ events:', e);
     }
 }
 
-function renderEventSelector() {
-    const selector = document.getElementById('eventSelector');
-    const select = document.getElementById('eventSelect');
-    if (availableEvents.length === 0) {
-        selector.style.display = 'none';
-        return;
-    }
-    selector.style.display = 'block';
-    select.innerHTML = availableEvents.map(e => {
-        const selected = e.channel === selectedEventChannel ? 'selected' : '';
+function buildEventOptions(selectedChannel) {
+    if (availableEvents.length === 0) return '';
+    return availableEvents.map(e => {
+        const selected = e.channel === selectedChannel ? 'selected' : '';
         return `<option value="${e.channel}" ${selected}>${escapeHtml(e.display_label)}</option>`;
     }).join('');
 }
 
-async function setEventChannel(channel) {
+async function setMeasurementEvent(measurementIdx, channel) {
+    channel = parseInt(channel);
+    measurementEvents[measurementIdx.toString()] = channel;
     try {
-        const response = await fetch('/api/daq/event', {
+        await fetch('/api/daq/measurement-events', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ channel: parseInt(channel) })
+            body: JSON.stringify({ assignments: [{ measurement_idx: measurementIdx, channel: channel }] })
         });
-        const data = await response.json();
-        if (data.success) {
-            selectedEventChannel = parseInt(channel);
-        }
     } catch (e) {
-        console.error('Failed to set event channel:', e);
+        console.error('Failed to set measurement event:', e);
     }
+}
+
+async function setAllMeasurementEvents(channel) {
+    channel = parseInt(channel);
+    const selectedVars = allVariables.filter(v =>
+        selectedKeys.has(`${v.device_id}:${v.name}`)
+    );
+    const assignments = selectedVars.map(v => ({
+        measurement_idx: v.idx,
+        channel: channel
+    }));
+    // Update local state
+    assignments.forEach(a => {
+        measurementEvents[a.measurement_idx.toString()] = channel;
+    });
+    try {
+        await fetch('/api/daq/measurement-events', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ assignments })
+        });
+    } catch (e) {
+        console.error('Failed to set all measurement events:', e);
+    }
+    renderSelectedVars();
 }
 </script>

@@ -51,6 +51,8 @@ pub struct DaqAllocation {
     pub odt_count_per_list: Vec<u8>,
     /// DAQ list allocations
     pub daq_lists: Vec<DaqListAllocation>,
+    /// Event channel assigned to each DAQ list
+    pub event_channel_per_list: Vec<u16>,
 }
 
 
@@ -341,8 +343,10 @@ pub struct DaqManager {
     /// Number of DAQ lists configured
     #[allow(dead_code)]
     daq_list_count: u16,
-    /// Event channel for DAQ trigger
+    /// Default event channel (used when no per-measurement event is set)
     event_channel: u16,
+    /// Per-measurement event channel assignment (measurement index -> event channel)
+    measurement_events: HashMap<usize, u16>,
     /// Available DAQ events (from A2L or slave query)
     available_events: Vec<crate::a2l::DaqEvent>,
     /// Latest DAQ sample (for UI display)
@@ -379,6 +383,7 @@ impl DaqManager {
             slave_addr: "127.0.0.1:5555".to_string(),
             daq_list_count: 1,
             event_channel: 0,
+            measurement_events: HashMap::new(),
             available_events: Vec::new(),
             latest_sample: Arc::new(RwLock::new(None)),
             timestamp_fixed: false,
@@ -415,6 +420,7 @@ impl DaqManager {
             slave_addr: "127.0.0.1:5555".to_string(),
             daq_list_count: 1,
             event_channel: 0,
+            measurement_events: HashMap::new(),
             available_events: Vec::new(),
             latest_sample: Arc::new(RwLock::new(None)),
             timestamp_fixed: false,
@@ -465,6 +471,42 @@ impl DaqManager {
 
     pub fn get_event_channel(&self) -> u16 {
         self.event_channel
+    }
+
+    /// Set event channel for a specific measurement (by index)
+    pub fn set_measurement_event(&mut self, measurement_idx: usize, channel: u16) {
+        if measurement_idx < self.all_measurements.len() {
+            self.measurement_events.insert(measurement_idx, channel);
+            if self.running.load(Ordering::SeqCst) {
+                self.selection_changed.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Get event channel for a specific measurement (falls back to default)
+    pub fn get_measurement_event(&self, measurement_idx: usize) -> u16 {
+        self.measurement_events
+            .get(&measurement_idx)
+            .copied()
+            .unwrap_or(self.event_channel)
+    }
+
+    /// Get all per-measurement event assignments
+    pub fn get_measurement_events(&self) -> &HashMap<usize, u16> {
+        &self.measurement_events
+    }
+
+    /// Set event channel for multiple measurements at once
+    pub fn set_measurement_events_batch(&mut self, assignments: &[(usize, u16)]) {
+        let was_running = self.running.load(Ordering::SeqCst);
+        for &(idx, channel) in assignments {
+            if idx < self.all_measurements.len() {
+                self.measurement_events.insert(idx, channel);
+            }
+        }
+        if was_running {
+            self.selection_changed.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Check if DAQ needs restart due to selection changes
@@ -530,6 +572,7 @@ impl DaqManager {
     /// - Each DAQ list: max 252 ODTs
     /// - DAQ lists: max 0xFFFF (65535)
     /// - Each entry: max max_odt_entry_size bytes (checked individually)
+    /// Measurements are grouped by event channel: each event gets its own DAQ list(s).
     fn calculate_odt_allocation(&self, max_odt_entry_size: u8) -> Result<DaqAllocation, String> {
         const MAX_ODT_ENTRIES: usize = 255;
         const MAX_ODTS_PER_LIST: usize = 252;
@@ -541,6 +584,7 @@ impl DaqManager {
                 daq_list_count: 0,
                 odt_count_per_list: Vec::new(),
                 daq_lists: Vec::new(),
+                event_channel_per_list: Vec::new(),
             });
         }
 
@@ -554,47 +598,59 @@ impl DaqManager {
             }
         }
 
-        // Group measurements into ODTs
-        // Each ODT can hold up to MAX_ODT_ENTRIES entries
-        let mut daq_lists: Vec<DaqListAllocation> = Vec::new();
-        let mut current_list: Vec<OdtAllocation> = Vec::new();
-        let mut current_odt: Vec<OdtEntryAllocation> = Vec::new();
+        // Group selected measurement indices by event channel
+        let mut event_groups: std::collections::BTreeMap<u16, Vec<usize>> = std::collections::BTreeMap::new();
+        for (sel_idx, &meas_idx) in self.selected_indices.iter().enumerate() {
+            let event_ch = self.get_measurement_event(meas_idx);
+            event_groups.entry(event_ch).or_default().push(sel_idx);
+        }
 
-        for (idx, _meas) in selected.iter().enumerate() {
-            // Check if current ODT is full (255 entries max)
-            if current_odt.len() >= MAX_ODT_ENTRIES && !current_odt.is_empty() {
+        let mut daq_lists: Vec<DaqListAllocation> = Vec::new();
+        let mut event_channel_per_list: Vec<u16> = Vec::new();
+
+        // For each event group, create separate DAQ list(s)
+        for (event_ch, measurement_indices) in &event_groups {
+            let mut current_list: Vec<OdtAllocation> = Vec::new();
+            let mut current_odt: Vec<OdtEntryAllocation> = Vec::new();
+
+            for &idx in measurement_indices {
+                // Check if current ODT is full (255 entries max)
+                if current_odt.len() >= MAX_ODT_ENTRIES && !current_odt.is_empty() {
+                    current_list.push(OdtAllocation {
+                        entries: current_odt,
+                    });
+                    current_odt = Vec::new();
+                }
+
+                // Check if we need a new DAQ list for this event group (252 ODTs max per list)
+                if current_list.len() >= MAX_ODTS_PER_LIST {
+                    daq_lists.push(DaqListAllocation { odts: current_list });
+                    event_channel_per_list.push(*event_ch);
+                    current_list = Vec::new();
+                }
+
+                // Check DAQ list limit
+                if daq_lists.len() >= MAX_DAQ_LISTS {
+                    return Err(format!(
+                        "DAQ configuration exceeds maximum number of DAQ lists ({}). Please select fewer measurements.",
+                        MAX_DAQ_LISTS
+                    ));
+                }
+
+                // Add measurement to current ODT
+                current_odt.push(OdtEntryAllocation { measurement_idx: idx });
+            }
+
+            // Flush remaining ODT/list for this event group
+            if !current_odt.is_empty() {
                 current_list.push(OdtAllocation {
                     entries: current_odt,
                 });
-                current_odt = Vec::new();
             }
-
-            // Check if we need a new DAQ list (252 ODTs max per list)
-            if current_list.len() >= MAX_ODTS_PER_LIST {
+            if !current_list.is_empty() {
                 daq_lists.push(DaqListAllocation { odts: current_list });
-                current_list = Vec::new();
+                event_channel_per_list.push(*event_ch);
             }
-
-            // Check DAQ list limit
-            if daq_lists.len() >= MAX_DAQ_LISTS {
-                return Err(format!(
-                    "DAQ configuration exceeds maximum number of DAQ lists ({}). Please select fewer measurements.",
-                    MAX_DAQ_LISTS
-                ));
-            }
-
-            // Add measurement to current ODT
-            current_odt.push(OdtEntryAllocation { measurement_idx: idx });
-        }
-
-        // Don't forget the last ODT
-        if !current_odt.is_empty() {
-            current_list.push(OdtAllocation {
-                entries: current_odt,
-            });
-        }
-        if !current_list.is_empty() {
-            daq_lists.push(DaqListAllocation { odts: current_list });
         }
 
         // Final validation
@@ -613,6 +669,7 @@ impl DaqManager {
             daq_list_count,
             odt_count_per_list,
             daq_lists,
+            event_channel_per_list,
         })
     }
 
@@ -800,7 +857,8 @@ impl DaqManager {
 
         tracing::info!("ODT allocation: {} DAQ lists", allocation.daq_list_count);
         for (list_idx, odt_count) in allocation.odt_count_per_list.iter().enumerate() {
-            tracing::info!("  DAQ list {}: {} ODTs", list_idx, odt_count);
+            let event_ch = allocation.event_channel_per_list[list_idx];
+            tracing::info!("  DAQ list {}: {} ODTs, event_channel={}", list_idx, odt_count, event_ch);
         }
 
         // 1. FREE_DAQ - Release any existing DAQ configuration
@@ -905,13 +963,14 @@ impl DaqManager {
 
             // SET_DAQ_LIST_MODE - Configure DAQ list mode
             // Mode: 0x10 = selected + DAQ (send on event)
-            // Event channel: determines trigger source
+            // Event channel: per-list event from allocation (grouped by measurement event assignments)
+            let list_event_channel = allocation.event_channel_per_list[daq_list_idx];
             tracing::trace!(
                 "SET_DAQ_LIST_MODE: mode=0x10, daq_list={}, event_channel={}, prescaler=1",
-                daq_list, self.event_channel
+                daq_list, list_event_channel
             );
             slave
-                .set_daq_list_mode(0x10, daq_list, self.event_channel, 1, 0)
+                .set_daq_list_mode(0x10, daq_list, list_event_channel, 1, 0)
                 .await
                 .map_err(|e| format!("SET_DAQ_LIST_MODE failed: {}", e))?;
         }
@@ -945,14 +1004,20 @@ impl DaqManager {
         // Get DTO receiver for DAQ reception (must be done before starting DAQ)
         let dto_rx = slave.get_dto_receiver();
 
-        // Start DAQ list 0
-        tracing::info!("Selecte DAQ list 0");
-        slave
-            .start_stop_daq_list(2, 0)  // mode=2 (select DAQ list)
-            .await
-            .map_err(|e| format!("START_STOP_DAQ_LIST failed: {}", e))?;
+        // Select all configured DAQ lists (one per event group)
+        let daq_list_count = {
+            let config = self.daq_config.read().await;
+            config.daq_list_count
+        };
+        for daq_list in 0..daq_list_count {
+            tracing::info!("Selecting DAQ list {}", daq_list);
+            slave
+                .start_stop_daq_list(2, daq_list)  // mode=2 (select DAQ list)
+                .await
+                .map_err(|e| format!("START_STOP_DAQ_LIST failed for list {}: {}", daq_list, e))?;
+        }
 
-        tracing::info!("DAQ selected, starting DAQ...");
+        tracing::info!("All {} DAQ lists selected, starting DAQ...", daq_list_count);
 
         // Get base timestamp from slave if timestamp mode is enabled
         // This is used for relative timestamp calculation in DTO packets
@@ -1100,10 +1165,23 @@ impl DaqManager {
                             };
                             record.timestamp = timestamp;
 
-                            // Update latest sample for UI
+                            // Update latest sample for UI (merge with existing to preserve values from other event groups)
                             {
                                 let mut latest = latest_sample.write().await;
-                                *latest = Some(record.clone());
+                                match latest.as_mut() {
+                                    Some(existing) => {
+                                        existing.timestamp = record.timestamp;
+                                        for (name, value) in &record.values {
+                                            existing.values.insert(name.clone(), *value);
+                                        }
+                                        for (name, raw) in &record.raw_values {
+                                            existing.raw_values.insert(name.clone(), raw.clone());
+                                        }
+                                    }
+                                    None => {
+                                        *latest = Some(record.clone());
+                                    }
+                                }
                             }
 
                             // Write CSV line with values in correct order (by entry order)

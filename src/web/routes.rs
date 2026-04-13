@@ -2077,7 +2077,7 @@ pub async fn a2l_load(
 
 /// Get available DAQ events (GET /api/daq/events)
 pub async fn daq_events(State(state): State<AppState>) -> impl IntoResponse {
-    let get_events_from_daq = |daq: &DaqManager| -> (Vec<serde_json::Value>, u16) {
+    let get_events_from_daq = |daq: &DaqManager| -> (Vec<serde_json::Value>, u16, serde_json::Value) {
         let events = daq.get_available_events().iter().map(|e| {
             json!({
                 "channel": e.channel,
@@ -2091,23 +2091,28 @@ pub async fn daq_events(State(state): State<AppState>) -> impl IntoResponse {
                 "cycle_time_ms": e.cycle_time_ms(),
             })
         }).collect();
-        (events, daq.get_event_channel())
+        // Build per-measurement event map: { "measurement_idx": event_channel, ... }
+        let meas_events: serde_json::Map<String, serde_json::Value> = daq.get_measurement_events()
+            .iter()
+            .map(|(idx, ch)| (idx.to_string(), json!(*ch)))
+            .collect();
+        (events, daq.get_event_channel(), json!(meas_events))
     };
 
     if let Some(slave) = state.current_slave().await {
         let daq = slave.daq_manager.read().await;
-        let (events, selected) = get_events_from_daq(&daq);
-        return Json(json!({ "success": true, "events": events, "selected_channel": selected }));
+        let (events, selected, meas_events) = get_events_from_daq(&daq);
+        return Json(json!({ "success": true, "events": events, "selected_channel": selected, "measurement_events": meas_events }));
     }
     if let Some(device) = state.current_device().await {
         let daq = device.daq_manager.read().await;
-        let (events, selected) = get_events_from_daq(&daq);
-        return Json(json!({ "success": true, "events": events, "selected_channel": selected }));
+        let (events, selected, meas_events) = get_events_from_daq(&daq);
+        return Json(json!({ "success": true, "events": events, "selected_channel": selected, "measurement_events": meas_events }));
     }
-    Json(json!({ "success": true, "events": [], "selected_channel": 0u16 }))
+    Json(json!({ "success": true, "events": [], "selected_channel": 0u16, "measurement_events": {} }))
 }
 
-/// Set selected DAQ event channel (POST /api/daq/event)
+/// Set default DAQ event channel (POST /api/daq/event)
 pub async fn daq_set_event(
     State(state): State<AppState>,
     Json(payload): Json<serde_json::Value>,
@@ -2128,6 +2133,47 @@ pub async fn daq_set_event(
         return Json(json!({ "success": true, "channel": channel }));
     }
     Json(json!({ "success": false, "error": "No device connected" }))
+}
+
+/// Set per-measurement event channels (POST /api/daq/measurement-events)
+/// Body: { "assignments": [ { "measurement_idx": 0, "channel": 2 }, ... ] }
+pub async fn daq_set_measurement_events(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let assignments: Vec<(usize, u16)> = payload
+        .get("assignments")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let idx = v.get("measurement_idx").and_then(|i| i.as_u64())? as usize;
+                    let channel = v.get("channel").and_then(|c| c.as_u64())? as u16;
+                    Some((idx, channel))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if assignments.is_empty() {
+        return Json(json!({ "success": false, "error": "No valid assignments provided" }));
+    }
+
+    let apply = |daq: &mut DaqManager| {
+        daq.set_measurement_events_batch(&assignments);
+    };
+
+    if let Some(slave) = state.current_slave().await {
+        let mut daq = slave.daq_manager.write().await;
+        apply(&mut daq);
+        return Json(json!({ "success": true }));
+    }
+    if let Some(device) = state.current_device().await {
+        let mut daq = device.daq_manager.write().await;
+        apply(&mut daq);
+        return Json(json!({ "success": true }));
+    }
+    Json(json!({ "success": false, "error": "No device selected" }))
 }
 
 /// Convert A2L characteristic to calibration parameter
