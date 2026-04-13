@@ -1571,6 +1571,192 @@ mod tests {
         assert_eq!(entries_ev2, vec![2, 3]);
     }
 
+    // ── ODT overflow / boundary tests ─────────────────────────
+
+    #[test]
+    fn test_allocation_exactly_255_entries_one_odt() {
+        let mgr = make_daq_manager(255);
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.daq_list_count, 1);
+        assert_eq!(alloc.daq_lists[0].odts.len(), 1);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 255);
+    }
+
+    #[test]
+    fn test_allocation_256_entries_spills_to_second_odt() {
+        let mgr = make_daq_manager(256);
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.daq_list_count, 1);
+        assert_eq!(alloc.daq_lists[0].odts.len(), 2);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 255);
+        assert_eq!(alloc.daq_lists[0].odts[1].entries.len(), 1);
+    }
+
+    #[test]
+    fn test_allocation_510_entries_two_full_odts() {
+        let mgr = make_daq_manager(510);
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.daq_list_count, 1);
+        assert_eq!(alloc.daq_lists[0].odts.len(), 2);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 255);
+        assert_eq!(alloc.daq_lists[0].odts[1].entries.len(), 255);
+    }
+
+    #[test]
+    fn test_allocation_single_measurement() {
+        let mgr = make_daq_manager(1);
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.daq_list_count, 1);
+        assert_eq!(alloc.daq_lists[0].odts.len(), 1);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 1);
+        assert_eq!(alloc.event_channel_per_list, vec![0]);
+    }
+
+    #[test]
+    fn test_allocation_odt_overflow_per_event_group() {
+        // 256 signals on event 1, 2 signals on event 2
+        // Event 1 should get 2 ODTs (255+1), event 2 gets 1 ODT (2)
+        let mut mgr = make_daq_manager(258);
+        for i in 0..256 {
+            mgr.set_measurement_event(i, 1);
+        }
+        mgr.set_measurement_event(256, 2);
+        mgr.set_measurement_event(257, 2);
+
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.daq_list_count, 2);
+        assert_eq!(alloc.event_channel_per_list, vec![1, 2]);
+        // Event 1 list: 2 ODTs
+        assert_eq!(alloc.daq_lists[0].odts.len(), 2);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 255);
+        assert_eq!(alloc.daq_lists[0].odts[1].entries.len(), 1);
+        // Event 2 list: 1 ODT
+        assert_eq!(alloc.daq_lists[1].odts.len(), 1);
+        assert_eq!(alloc.daq_lists[1].odts[0].entries.len(), 2);
+    }
+
+    #[test]
+    fn test_allocation_odt_count_per_list_accurate() {
+        // 300 signals on event 0 → 1 list, 2 ODTs (255 + 45)
+        let mgr = make_daq_manager(300);
+        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc.odt_count_per_list, vec![2]);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 255);
+        assert_eq!(alloc.daq_lists[0].odts[1].entries.len(), 45);
+    }
+
+    #[test]
+    fn test_allocation_mixed_sizes_same_event() {
+        let mut mgr = DaqManager::new();
+        // Mix of U8 (1 byte), U16 (2 bytes), U32 (4 bytes)
+        mgr.all_measurements = vec![
+            Measurement {
+                name: "byte_sig".into(), address: 0x1000, address_ext: 0,
+                size: 1, data_type: A2lDataType::U8,
+                unit: None, compu_method: CompuMethod::Identical,
+            },
+            Measurement {
+                name: "word_sig".into(), address: 0x1001, address_ext: 0,
+                size: 2, data_type: A2lDataType::U16,
+                unit: None, compu_method: CompuMethod::Identical,
+            },
+            Measurement {
+                name: "dword_sig".into(), address: 0x1003, address_ext: 0,
+                size: 4, data_type: A2lDataType::U32,
+                unit: None, compu_method: CompuMethod::Identical,
+            },
+        ];
+        mgr.selected_indices = vec![0, 1, 2];
+
+        let alloc = mgr.calculate_odt_allocation(4).unwrap();
+        assert_eq!(alloc.daq_list_count, 1);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 3);
+    }
+
+    #[test]
+    fn test_allocation_mixed_sizes_one_too_large() {
+        let mut mgr = DaqManager::new();
+        mgr.all_measurements = vec![
+            Measurement {
+                name: "ok_sig".into(), address: 0x1000, address_ext: 0,
+                size: 4, data_type: A2lDataType::U32,
+                unit: None, compu_method: CompuMethod::Identical,
+            },
+            Measurement {
+                name: "big_sig".into(), address: 0x1004, address_ext: 0,
+                size: 8, data_type: A2lDataType::F64,
+                unit: None, compu_method: CompuMethod::Identical,
+            },
+        ];
+        mgr.selected_indices = vec![0, 1];
+        // max_odt_entry_size = 4, F64 is 8 → error
+        let result = mgr.calculate_odt_allocation(4);
+        assert!(result.is_err());
+    }
+
+    // ── DaqRecord merging tests ───────────────────────────────
+
+    #[test]
+    fn test_daq_record_value_storage() {
+        let mut record = DaqRecord::new(0);
+        record.add_value("temp", 25.5);
+        record.add_value("rpm", 1500.0);
+        assert_eq!(record.get_value("temp"), Some(25.5));
+        assert_eq!(record.get_value("rpm"), Some(1500.0));
+        assert_eq!(record.get_value("unknown"), None);
+    }
+
+    #[test]
+    fn test_daq_record_overwrite_value() {
+        let mut record = DaqRecord::new(0);
+        record.add_value("temp", 20.0);
+        record.add_value("temp", 30.0);
+        assert_eq!(record.get_value("temp"), Some(30.0));
+    }
+
+    // ── Selection / restart flag tests ────────────────────────
+
+    #[test]
+    fn test_toggle_measurement_restart_flag() {
+        let mut mgr = make_daq_manager(4);
+        mgr.running.store(true, Ordering::SeqCst);
+        mgr.toggle_measurement(0); // deselect while running
+        assert!(mgr.needs_restart());
+        mgr.clear_restart_flag();
+        assert!(!mgr.needs_restart());
+    }
+
+    #[test]
+    fn test_set_measurement_event_while_running() {
+        let mut mgr = make_daq_manager(4);
+        mgr.running.store(true, Ordering::SeqCst);
+        mgr.set_measurement_event(0, 5);
+        assert!(mgr.needs_restart());
+    }
+
+    #[test]
+    fn test_batch_event_while_running() {
+        let mut mgr = make_daq_manager(4);
+        mgr.running.store(true, Ordering::SeqCst);
+        mgr.set_measurement_events_batch(&[(0, 1), (1, 2)]);
+        assert!(mgr.needs_restart());
+    }
+
+    #[test]
+    fn test_event_reassignment_changes_allocation() {
+        let mut mgr = make_daq_manager(4);
+        // Initially all on default event 0 → 1 list
+        let alloc1 = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc1.daq_list_count, 1);
+
+        // Reassign half to event 5 → 2 lists
+        mgr.set_measurement_event(0, 5);
+        mgr.set_measurement_event(1, 5);
+        let alloc2 = mgr.calculate_odt_allocation(255).unwrap();
+        assert_eq!(alloc2.daq_list_count, 2);
+        assert_eq!(alloc2.event_channel_per_list, vec![0, 5]);
+    }
+
     #[test]
     fn test_parse_dto_packet() {
         // Valid DTO packet: header + ODT (0x00) + data (AbosulteODT mode)
