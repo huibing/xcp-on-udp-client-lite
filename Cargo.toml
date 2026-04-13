@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "XCP Master client for calibration and DAQ"
 
+[features]
+default = ["mf4-native"]
+mf4-native = ["dep:mf4_parse"]
+mf4-rs-backend = ["dep:mdf4-rs"]
+
 [dependencies]
 tokio = { version = "=1.43.0", features = ["full"] }
 bytes = "=1.9.0"
@@ -21,7 +26,8 @@ tokio-util = "=0.7.13"
 bitflags = "=2.6.0"
 regex = "=1.10.6"
 a2lfile = "=2.3.0"
-mdf4-rs = { version = "0.2", default-features = false, features = ["std"] }
+mf4_parse = { git = "https://github.com/huibing/mf4_rust.git", features = ["streaming", "compression"], optional = true }
+mdf4-rs = { version = "0.2", default-features = false, features = ["std"], optional = true }
 
 # Web UI dependencies
 axum = { version = "=0.7.5", features = ["ws", "multipart"] }

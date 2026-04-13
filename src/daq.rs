@@ -4,12 +4,21 @@
 //! 1. Configure DAQ lists, ODTs, and ODT entries
 //! 2. Start DAQ list - slave sends DTO packets automatically
 //! 3. Receive and parse DTO packets from slave
+//!
+//! MDF4 backend selection: use feature `mf4-native` (default, mf4_parse/SimpleWriter)
+//! or `mf4-rs-backend` (mdf4-rs crate). Only one may be active at a time.
+
+#[cfg(all(feature = "mf4-native", feature = "mf4-rs-backend"))]
+compile_error!("Features `mf4-native` and `mf4-rs-backend` are mutually exclusive. Enable only one.");
 
 use crate::a2l::{A2lDataType, A2lMeasurement, A2lReader, CompuMethod};
 use crate::client::DAQResolutionInfo;
 use crate::protocol::Mta;
 use crate::slave::XcpSlave;
 // Note: chrono not used - timestamps are raw slave clock values, not UTC time
+#[cfg(feature = "mf4-native")]
+use mf4_parse::writer::SimpleWriter;
+#[cfg(feature = "mf4-rs-backend")]
 use mdf4_rs::{DataType as MdfDataType, DecodedValue, FlushPolicy, MdfWriter};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -1149,8 +1158,8 @@ impl DaqManager {
         let selection_changed = self.selection_changed.clone();
 
         // Prepare measurement metadata for MDF4 channel setup (name, unit)
-        let mdf4_path = self.mdf4_path.clone();
-        let mdf4_measurement_info: Vec<(String, Option<String>)> = selected_measurements
+        let _mdf4_path = self.mdf4_path.clone();
+        let _mdf4_measurement_info: Vec<(String, Option<String>)> = selected_measurements
             .iter()
             .map(|m| (m.name.clone(), m.unit.clone()))
             .collect();
@@ -1179,16 +1188,35 @@ impl DaqManager {
                 .expect("Failed to open CSV for appending");
 
             // Initialize MDF4 writer with channels matching selected measurements
-            let mut mdf_writer = match MdfWriter::new(mdf4_path.to_str().unwrap_or("daq_data.mf4")) {
+            #[cfg(feature = "mf4-native")]
+            let mut mdf_writer: Option<mf4_parse::writer::simple_writer::SimpleWriter> = {
+                let mut builder = SimpleWriter::new(_mdf4_path.to_str().unwrap_or("daq_data.mf4"))
+                    .time_channel("time_s", "s");
+                for (name, unit) in &_mdf4_measurement_info {
+                    builder = builder.f64_channel(name, unit.as_deref().unwrap_or(""));
+                }
+                match builder.stream_mode().build() {
+                    Ok(w) => Some(w),
+                    Err(e) => {
+                        tracing::warn!("Failed to create MDF4 file (mf4_parse): {}", e);
+                        None
+                    }
+                }
+            };
+
+            #[cfg(feature = "mf4-rs-backend")]
+            let mut mdf_writer = match MdfWriter::new(_mdf4_path.to_str().unwrap_or("daq_data.mf4")) {
                 Ok(w) => Some(w.with_flush_policy(FlushPolicy::EveryNRecords(1000))),
                 Err(e) => {
-                    tracing::warn!("Failed to create MDF4 file: {}", e);
+                    tracing::warn!("Failed to create MDF4 file (mdf4-rs): {}", e);
                     None
                 }
             };
+            #[cfg(feature = "mf4-rs-backend")]
             let mut mdf_cg_id: Option<String> = None;
+            #[cfg(feature = "mf4-rs-backend")]
             if let Some(ref mut writer) = mdf_writer {
-                match Self::init_mdf4_channels(writer, &mdf4_measurement_info) {
+                match Self::init_mdf4_channels(writer, &_mdf4_measurement_info) {
                     Ok(cg_id) => { mdf_cg_id = Some(cg_id); }
                     Err(e) => {
                         tracing::warn!("Failed to init MDF4 channels: {}", e);
@@ -1323,10 +1351,23 @@ impl DaqManager {
                             }
 
                             // Write MDF4 record (same values in measurement order)
+                            #[cfg(feature = "mf4-native")]
+                            if let Some(ref mut writer) = mdf_writer {
+                                let mut values = Vec::with_capacity(_mdf4_measurement_info.len() + 1);
+                                values.push(record.timestamp_s);
+                                for (name, _) in &_mdf4_measurement_info {
+                                    values.push(record.get_value(name).unwrap_or(0.0));
+                                }
+                                if let Err(e) = writer.write_record(&values) {
+                                    tracing::error!("Failed to write MDF4 record: {}", e);
+                                }
+                            }
+
+                            #[cfg(feature = "mf4-rs-backend")]
                             if let (Some(ref mut writer), Some(ref cg_id)) = (&mut mdf_writer, &mdf_cg_id) {
-                                let mut mdf_values = Vec::with_capacity(mdf4_measurement_info.len() + 1);
+                                let mut mdf_values = Vec::with_capacity(_mdf4_measurement_info.len() + 1);
                                 mdf_values.push(DecodedValue::Float(record.timestamp_s));
-                                for (name, _) in &mdf4_measurement_info {
+                                for (name, _) in &_mdf4_measurement_info {
                                     let v = record.get_value(name).unwrap_or(0.0);
                                     mdf_values.push(DecodedValue::Float(v));
                                 }
@@ -1348,6 +1389,16 @@ impl DaqManager {
             }
 
             // Finalize MDF4 file
+            #[cfg(feature = "mf4-native")]
+            if let Some(writer) = mdf_writer {
+                if let Err(e) = writer.finalize() {
+                    tracing::warn!("Failed to finalize MDF4 file: {}", e);
+                } else {
+                    tracing::info!("MDF4 file finalized successfully (mf4_parse)");
+                }
+            }
+
+            #[cfg(feature = "mf4-rs-backend")]
             if let (Some(ref mut writer), Some(ref cg_id)) = (&mut mdf_writer, &mdf_cg_id) {
                 if let Err(e) = writer.finish_data_block(cg_id) {
                     tracing::warn!("Failed to finish MDF4 data block: {}", e);
@@ -1355,7 +1406,7 @@ impl DaqManager {
                 if let Err(e) = writer.finalize() {
                     tracing::warn!("Failed to finalize MDF4 file: {}", e);
                 } else {
-                    tracing::info!("MDF4 file finalized successfully");
+                    tracing::info!("MDF4 file finalized successfully (mdf4-rs)");
                 }
             }
 
@@ -1401,8 +1452,9 @@ impl DaqManager {
         Ok(())
     }
 
-    /// Initialize MDF4 file structure with time channel and measurement channels.
+    /// Initialize MDF4 file structure with time channel and measurement channels (mdf4-rs backend).
     /// Returns the channel group ID for use in `write_record`.
+    #[cfg(feature = "mf4-rs-backend")]
     fn init_mdf4_channels(
         writer: &mut MdfWriter<mdf4_rs::writer::FileWriter>,
         measurements: &[(String, Option<String>)],
