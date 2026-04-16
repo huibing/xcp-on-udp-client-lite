@@ -320,6 +320,7 @@ impl VerificationReport {
 ///
 /// If a segment has multiple pages, each page is verified separately using
 /// SET_CAL_PAGE before the slave BUILD_CHECKSUM.
+/// After verification, pages are restored to their original state.
 pub async fn verify_segments(
     slave: &mut XcpSlave,
     hex_image: &HexImage,
@@ -327,6 +328,27 @@ pub async fn verify_segments(
     max_block_size_override: Option<u32>,
 ) -> Result<VerificationReport, ChecksumError> {
     let mut results = Vec::new();
+
+    // Save current page state before verification so we can restore afterward
+    let saved_pages: Vec<(u8, u8)> = {
+        let mut pages = Vec::new();
+        for segment in segments {
+            if let Some(xcp_info) = &segment.xcp_info {
+                if xcp_info.num_pages > 1 {
+                    match slave.get_cal_page(xcp_info.segment_number, 0x02).await {
+                        Ok(page) => pages.push((xcp_info.segment_number, page)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to save page state for segment {}: {:?}",
+                                xcp_info.segment_number, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        pages
+    };
 
     for segment in segments {
         let xcp_info = match &segment.xcp_info {
@@ -443,6 +465,21 @@ pub async fn verify_segments(
             )
             .await;
             results.push(result);
+        }
+    }
+
+    // Restore original page state
+    for (seg_num, original_page) in &saved_pages {
+        if let Err(e) = slave.set_cal_page(*seg_num, *original_page, 0x03).await {
+            tracing::warn!(
+                "Failed to restore page {} for segment {}: {:?}",
+                original_page, seg_num, e
+            );
+        } else {
+            tracing::info!(
+                "Restored segment {} to original page {}",
+                seg_num, original_page
+            );
         }
     }
 
