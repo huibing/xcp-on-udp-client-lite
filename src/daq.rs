@@ -17,7 +17,11 @@ use crate::protocol::Mta;
 use crate::slave::XcpSlave;
 // Note: chrono not used - timestamps are raw slave clock values, not UTC time
 #[cfg(feature = "mf4-native")]
-use mf4_parse::writer::SimpleWriter;
+use mf4_parse::writer::stream_writer::{
+    ChannelGroupDefBuilder, Mf4StreamWriter, StreamingDataGroup,
+};
+#[cfg(feature = "mf4-native")]
+use mf4_parse::writer::builder::Mf4Metadata;
 #[cfg(feature = "mf4-rs-backend")]
 use mdf4_rs::{DataType as MdfDataType, DecodedValue, FlushPolicy, MdfWriter};
 use serde::Serialize;
@@ -63,6 +67,17 @@ pub struct DaqAllocation {
     pub daq_lists: Vec<DaqListAllocation>,
     /// Event channel assigned to each DAQ list
     pub event_channel_per_list: Vec<u16>,
+}
+
+/// MF4 event group mapping — links a DAQ list to its DG in the MF4 file
+#[derive(Debug, Clone)]
+struct Mf4EventGroup {
+    /// DAQ list index
+    daq_list: u16,
+    /// Data Group index in MF4 file
+    dg_index: usize,
+    /// Channel names in this group (time_s first, then signals)
+    channel_names: Vec<String>,
 }
 
 
@@ -447,9 +462,12 @@ pub struct DaqManager {
     recording: Arc<AtomicBool>,
     /// Shared CSV writer for background task (created on start_recording, taken on stop_recording)
     csv_writer: Arc<TokioMutex<Option<std::io::BufWriter<std::fs::File>>>>,
-    /// Shared MF4 writer (mf4-native) for background task
+    /// Shared MF4 writer (mf4-native) for background task — multi-DG support
     #[cfg(feature = "mf4-native")]
-    mf4_writer: Arc<TokioMutex<Option<mf4_parse::writer::simple_writer::SimpleWriter>>>,
+    mf4_writer: Arc<TokioMutex<Option<Mf4StreamWriter<std::io::BufWriter<std::fs::File>>>>>,
+    /// MF4 event group mapping: DAQ list → DG index + channel names
+    #[cfg(feature = "mf4-native")]
+    mf4_event_groups: Arc<RwLock<Vec<Mf4EventGroup>>>,
     /// Shared MF4 writer (mdf4-rs) for background task
     #[cfg(feature = "mf4-rs-backend")]
     mf4_writer: Arc<TokioMutex<Option<MdfWriter<mdf4_rs::writer::FileWriter>>>>,
@@ -496,6 +514,8 @@ impl DaqManager {
             csv_writer: Arc::new(TokioMutex::new(None)),
             #[cfg(feature = "mf4-native")]
             mf4_writer: Arc::new(TokioMutex::new(None)),
+            #[cfg(feature = "mf4-native")]
+            mf4_event_groups: Arc::new(RwLock::new(Vec::new())),
             #[cfg(feature = "mf4-rs-backend")]
             mf4_writer: Arc::new(TokioMutex::new(None)),
             #[cfg(feature = "mf4-rs-backend")]
@@ -545,6 +565,8 @@ impl DaqManager {
             csv_writer: Arc::new(TokioMutex::new(None)),
             #[cfg(feature = "mf4-native")]
             mf4_writer: Arc::new(TokioMutex::new(None)),
+            #[cfg(feature = "mf4-native")]
+            mf4_event_groups: Arc::new(RwLock::new(Vec::new())),
             #[cfg(feature = "mf4-rs-backend")]
             mf4_writer: Arc::new(TokioMutex::new(None)),
             #[cfg(feature = "mf4-rs-backend")]
@@ -1190,10 +1212,13 @@ impl DaqManager {
 
         #[cfg(feature = "mf4-native")]
         let mf4_writer = self.mf4_writer.clone();
+        #[cfg(feature = "mf4-native")]
+        let mf4_event_groups = self.mf4_event_groups.clone();
         #[cfg(feature = "mf4-rs-backend")]
         let mf4_writer = self.mf4_writer.clone();
         #[cfg(feature = "mf4-rs-backend")]
         let mf4_cg_id = self.mf4_cg_id.clone();
+        #[cfg(feature = "mf4-rs-backend")]
         let recording_meas_info = self.recording_measurement_info.clone();
 
         // Build TimestampTracker for live display using local clock
@@ -1341,19 +1366,32 @@ impl DaqManager {
                                     }
                                 }
 
-                                // Write MDF4 record
+                                // Write MDF4 record to the correct DG for this event
                                 #[cfg(feature = "mf4-native")]
                                 {
-                                    let mut mf4_guard = mf4_writer.lock().await;
-                                    if let Some(ref mut writer) = *mf4_guard {
-                                        let meas_info = recording_meas_info.read().await;
-                                        let mut values = Vec::with_capacity(meas_info.len() + 1);
-                                        values.push(rec_ts);
-                                        for (name, _) in meas_info.iter() {
-                                            values.push(record.get_value(name).unwrap_or(0.0));
-                                        }
-                                        if let Err(e) = writer.write_record(&values) {
-                                            tracing::error!("Failed to write MDF4 record: {}", e);
+                                    let daq_list_idx = data.daq_list.unwrap_or(0);
+                                    let event_groups = mf4_event_groups.read().await;
+                                    if let Some(eg) = event_groups.iter().find(|g| g.daq_list == daq_list_idx) {
+                                        let mut mf4_guard = mf4_writer.lock().await;
+                                        if let Some(ref mut writer) = *mf4_guard {
+                                            if let Err(e) = writer.start_record(eg.dg_index, 0) {
+                                                tracing::error!("MF4 start_record failed: {}", e);
+                                            } else {
+                                                // Set time channel
+                                                if let Err(e) = writer.set_channel_value("time_s", rec_ts) {
+                                                    tracing::error!("MF4 set time failed: {}", e);
+                                                }
+                                                // Set signal channels (skip time_s at index 0)
+                                                for ch_name in eg.channel_names.iter().skip(1) {
+                                                    let v = record.get_value(ch_name).unwrap_or(0.0);
+                                                    if let Err(e) = writer.set_channel_value(ch_name, v) {
+                                                        tracing::error!("MF4 set {} failed: {}", ch_name, e);
+                                                    }
+                                                }
+                                                if let Err(e) = writer.flush_record() {
+                                                    tracing::error!("MF4 flush_record failed: {}", e);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1405,8 +1443,8 @@ impl DaqManager {
                 #[cfg(feature = "mf4-native")]
                 {
                     let mut mf4_guard = mf4_writer.lock().await;
-                    if let Some(writer) = mf4_guard.take() {
-                        if let Err(e) = writer.finalize() {
+                    if let Some(mut writer) = mf4_guard.take() {
+                        if let Err(e) = writer.finalize_with_compact(false) {
                             tracing::warn!("Failed to finalize MDF4 file: {}", e);
                         } else {
                             tracing::info!("MDF4 file finalized successfully (mf4_parse)");
@@ -1514,20 +1552,71 @@ impl DaqManager {
         *self.csv_writer.lock().await = Some(std::io::BufWriter::new(csv_file));
 
         // Create MDF4 writer
-        let mf4_measurement_info = self.recording_measurement_info.read().await.clone();
 
         #[cfg(feature = "mf4-native")]
         {
             let mf4_path = self.mdf4_path.clone();
-            let mut builder = SimpleWriter::new(mf4_path.to_str().unwrap_or("daq_data.mf4"))
-                .time_channel("time_s", "s");
-            for (name, unit) in &mf4_measurement_info {
-                builder = builder.f64_channel(name, unit.as_deref().unwrap_or(""));
+            let config = self.daq_config.read().await;
+
+            // Group OdtEntryConfig by daq_list to build per-event DGs
+            let mut event_map: std::collections::BTreeMap<u16, Vec<&OdtEntryConfig>> =
+                std::collections::BTreeMap::new();
+            for entry in &config.odt_entries {
+                event_map.entry(entry.daq_list).or_default().push(entry);
             }
-            match builder.stream_mode().build() {
-                Ok(w) => {
-                    *self.mf4_writer.lock().await = Some(w);
-                    tracing::info!("MDF4 recording started (mf4_parse)");
+
+            let metadata = Mf4Metadata::default();
+            match Mf4StreamWriter::new(mf4_path.clone(), metadata) {
+                Ok(mut writer) => {
+                    let mut event_groups = Vec::new();
+
+                    for (dg_index, (&daq_list, entries)) in event_map.iter().enumerate() {
+                        let group_name = format!("event_{}", daq_list);
+                        let mut cg_builder = ChannelGroupDefBuilder::new()
+                            .name(&group_name)
+                            .with_time_channel("time_s");
+
+                        let mut channel_names = vec!["time_s".to_string()];
+                        // Deduplicate signal names within same DAQ list
+                        let mut seen = std::collections::HashSet::new();
+                        for entry in entries {
+                            if seen.insert(&entry.name) {
+                                let unit = entry.unit.as_deref().unwrap_or("");
+                                cg_builder = cg_builder.add_f64_channel(&entry.name, unit);
+                                channel_names.push(entry.name.clone());
+                            }
+                        }
+
+                        match cg_builder.build() {
+                            Ok(cg) => match StreamingDataGroup::new(cg) {
+                                Ok(dg) => {
+                                    if let Err(e) = writer.add_data_group(dg) {
+                                        tracing::warn!("Failed to add DG for event {}: {}", daq_list, e);
+                                        continue;
+                                    }
+                                    event_groups.push(Mf4EventGroup {
+                                        daq_list,
+                                        dg_index,
+                                        channel_names,
+                                    });
+                                    tracing::info!("MF4: DG {} for event {} with {} channels",
+                                        dg_index, daq_list, entries.len());
+                                }
+                                Err(e) => tracing::warn!("Failed to create DG for event {}: {}", daq_list, e),
+                            },
+                            Err(e) => tracing::warn!("Failed to build CG for event {}: {}", daq_list, e),
+                        }
+                    }
+
+                    if !event_groups.is_empty() {
+                        if let Err(e) = writer.finalize_structure() {
+                            tracing::warn!("Failed to finalize MF4 structure: {}", e);
+                        } else {
+                            *self.mf4_writer.lock().await = Some(writer);
+                            *self.mf4_event_groups.write().await = event_groups;
+                            tracing::info!("MDF4 recording started with multi-DG (mf4_parse)");
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to create MDF4 file: {}", e);
@@ -1538,6 +1627,7 @@ impl DaqManager {
         #[cfg(feature = "mf4-rs-backend")]
         {
             let mf4_path = self.mdf4_path.clone();
+            let mf4_measurement_info = self.recording_measurement_info.read().await.clone();
             match MdfWriter::new(mf4_path.to_str().unwrap_or("daq_data.mf4")) {
                 Ok(w) => {
                     let mut writer = w.with_flush_policy(FlushPolicy::EveryNRecords(1000));
@@ -1589,13 +1679,14 @@ impl DaqManager {
         #[cfg(feature = "mf4-native")]
         {
             let mut mf4_guard = self.mf4_writer.lock().await;
-            if let Some(writer) = mf4_guard.take() {
-                if let Err(e) = writer.finalize() {
+            if let Some(mut writer) = mf4_guard.take() {
+                if let Err(e) = writer.finalize_with_compact(false) {
                     tracing::warn!("Failed to finalize MDF4 file: {}", e);
                 } else {
                     tracing::info!("MDF4 file finalized successfully (mf4_parse)");
                 }
             }
+            self.mf4_event_groups.write().await.clear();
         }
 
         #[cfg(feature = "mf4-rs-backend")]
