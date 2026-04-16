@@ -10,6 +10,11 @@ use crate::protocol::Mta;
 use crate::slave::{SlaveError, XcpSlave};
 use thiserror::Error;
 
+/// Default max block size (0x4000 = 16 KiB) for BUILD_CHECKSUM when no A2L
+/// override is provided. Using a smaller block size improves robustness by
+/// avoiding ERR_OUT_OF_RANGE on ECUs with limited checksum buffer.
+pub const DEFAULT_MAX_BLOCK_SIZE: u32 = 0x4000;
+
 /// Errors from checksum operations
 #[derive(Debug, Error)]
 pub enum ChecksumError {
@@ -403,7 +408,7 @@ pub async fn verify_segments(
         let master_checksum = compute_checksum(algorithm, &hex_data)?;
 
         // Determine max block size
-        let max_block = max_block_size_override.unwrap_or(segment.size);
+        let max_block = max_block_size_override.unwrap_or(DEFAULT_MAX_BLOCK_SIZE);
 
         // If segment has multiple pages, verify each page
         if xcp_info.num_pages > 1 {
