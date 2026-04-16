@@ -272,8 +272,10 @@ pub fn set_cal_page(mode: u8, segment: u8, page: u8) -> Vec<u8> {
 
 /// Build BUILD_CHECKSUM command
 pub fn build_checksum(block_size: u32) -> Vec<u8> {
-    let mut cmd = Vec::with_capacity(5);
+    let mut cmd = Vec::with_capacity(8);
     cmd.push(CommandCode::BuildChecksum as u8);
+    cmd.push(0x00); // reserved
+    cmd.push(0x00); // reserved
     cmd.push(0x00); // reserved
     cmd.extend_from_slice(&block_size.to_le_bytes());
     cmd
@@ -530,14 +532,16 @@ mod tests {
     #[test]
     fn test_build_checksum_command() {
         let cmd = build_checksum(0x1000);
-        assert_eq!(cmd.len(), 6);
+        assert_eq!(cmd.len(), 8);
         assert_eq!(cmd[0], CommandCode::BuildChecksum as u8);
-        assert_eq!(cmd[1], 0x00);
-        // Block size in little-endian
-        assert_eq!(cmd[2], 0x00);
-        assert_eq!(cmd[3], 0x10);
+        assert_eq!(cmd[1], 0x00); // reserved
+        assert_eq!(cmd[2], 0x00); // reserved
+        assert_eq!(cmd[3], 0x00); // reserved
+        // Block size in little-endian at bytes 4-7
         assert_eq!(cmd[4], 0x00);
-        assert_eq!(cmd[5], 0x00);
+        assert_eq!(cmd[5], 0x10);
+        assert_eq!(cmd[6], 0x00);
+        assert_eq!(cmd[7], 0x00);
     }
 
     #[test]
