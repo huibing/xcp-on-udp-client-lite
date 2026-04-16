@@ -3,6 +3,7 @@
 //! Provides structures for managing multiple XCP slave connections.
 //! Each slave has its own transport, calibration manager, and DAQ manager.
 
+use crate::a2l::A2lMemorySegment;
 use crate::calibration::CalibrationManager;
 use crate::daq::DaqManager;
 use crate::protocol::{
@@ -1509,6 +1510,15 @@ impl XcpSlave {
         );
 
         Ok(())
+    }
+
+    /// Set memory segments without re-parsing the A2L file.
+    /// Use when segments are already pre-parsed (e.g. from DeviceState).
+    pub fn set_memory_segments(&mut self, segments: Vec<A2lMemorySegment>, a2l_path: Option<PathBuf>) {
+        self.cal_manager.set_memory_segments(segments);
+        if let Some(path) = a2l_path {
+            self.a2l_path = Some(path);
+        }
     }
 
     /// Get DTO receiver for DAQ

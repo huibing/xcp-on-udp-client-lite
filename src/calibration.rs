@@ -1401,6 +1401,11 @@ impl CalibrationManager {
         &self.memory_segments
     }
 
+    /// Set memory segments directly (avoids re-parsing A2L)
+    pub fn set_memory_segments(&mut self, segments: Vec<A2lMemorySegment>) {
+        self.memory_segments = segments;
+    }
+
     /// Check if SHORT_DOWNLOAD command is supported
     ///
     /// If false, must use DOWNLOAD command instead (which is mandatory in XCP).
