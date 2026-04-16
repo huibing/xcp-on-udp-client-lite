@@ -275,6 +275,8 @@ async function switchPageMode(deviceId, mode) {
                 device.page_mode_description = data.page_mode_description;
             }
             renderPageModeSection();
+            // Re-render selected vars to update cell editability
+            renderSelectedVars();
         } else {
             alert('Failed to switch page mode: ' + data.error);
             // Re-render to reset the toggle
@@ -510,7 +512,8 @@ function renderSelectedVars() {
         const isComplex = isComplexType(v.type);
         // Check if device is in working page mode
         const devicePageMode = pageModeData.find(d => d.device_id === v.device_id);
-        const isWorking = devicePageMode && devicePageMode.page_mode === 'working';
+        // Default to editable when no page mode info available (assumes working page)
+        const isWorking = !devicePageMode || devicePageMode.page_mode === 'working';
         const editableAttr = (!isComplex && isWorking) ? `data-editable="true" data-device-id="${v.device_id}" data-idx="${v.idx}" style="cursor: pointer;" title="Click to edit"` : '';
         return `
             <tr>
