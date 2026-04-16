@@ -279,6 +279,23 @@ impl DaqConfiguration {
         self.odt_entries.iter().map(|e| e.size).sum()
     }
 
+    /// Resolve an absolute ODT number to (daq_list, relative_odt).
+    ///
+    /// In AbsoluteODT identification mode the PID carries a global ODT index
+    /// that spans all DAQ lists sequentially.  For example, if DAQ list 0 has
+    /// 2 ODTs and DAQ list 1 has 1 ODT, then absolute ODT 0→(0,0), 1→(0,1),
+    /// 2→(1,0).
+    pub fn resolve_absolute_odt(&self, abs_odt: u8) -> Option<(u16, u8)> {
+        let mut remaining = abs_odt as u16;
+        for (list_idx, &odt_count) in self.odt_count_per_list.iter().enumerate() {
+            if remaining < odt_count as u16 {
+                return Some((list_idx as u16, remaining as u8));
+            }
+            remaining -= odt_count as u16;
+        }
+        None
+    }
+
     /// Clear all entries
     pub fn clear(&mut self) {
         self.odt_entries.clear();
@@ -1256,25 +1273,38 @@ impl DaqManager {
                             // Get configuration for this DAQ list and ODT
                             let config = daq_config.read().await;
 
+                            // Resolve (daq_list, odt) — for AbsoluteODT mode,
+                            // the PID is a global ODT index that we must map to
+                            // the concrete DAQ list + relative ODT.
+                            let (resolved_daq_list, resolved_odt) = match data.daq_list {
+                                Some(dl) => (dl, data.odt),
+                                None => {
+                                    match config.resolve_absolute_odt(data.odt) {
+                                        Some((dl, odt)) => (dl, odt),
+                                        None => {
+                                            tracing::warn!(
+                                                "Cannot resolve absolute ODT {} (odt_count_per_list={:?})",
+                                                data.odt, config.odt_count_per_list
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                            };
+
                             // Find entries for this ODT
                             let entries: Vec<&OdtEntryConfig> = config.odt_entries.iter()
-                                .filter(|e| {
-                                    let daq_list_match = match data.daq_list {
-                                        Some(dl) => e.daq_list == dl,
-                                        None => e.daq_list == 0,
-                                    };
-                                    daq_list_match && e.odt == data.odt
-                                })
+                                .filter(|e| e.daq_list == resolved_daq_list && e.odt == resolved_odt)
                                 .collect();
 
                             if entries.is_empty() {
-                                tracing::warn!("No configuration found for DAQ list {:?}, ODT {}",
-                                    data.daq_list, data.odt);
+                                tracing::warn!("No configuration found for DAQ list {}, ODT {} (raw daq_list={:?}, odt={})",
+                                    resolved_daq_list, resolved_odt, data.daq_list, data.odt);
                                 continue;
                             }
 
-                            tracing::trace!("Received DTO: daq_list={:?}, odt={}, data_len={}, entries={}",
-                                data.daq_list, data.odt, data.data.len(), entries.len());
+                            tracing::trace!("Received DTO: daq_list={}, odt={}, data_len={}, entries={}",
+                                resolved_daq_list, resolved_odt, data.data.len(), entries.len());
 
                             // Parse measurement data using configuration
                             let mut record = DaqRecord::new(0.0, 0);
@@ -1348,11 +1378,10 @@ impl DaqManager {
 
                                 // Write CSV line to the correct event file
                                 {
-                                    let daq_list_idx = data.daq_list.unwrap_or(0);
                                     let signals = csv_event_signals.read().await;
-                                    if let Some(signal_names) = signals.get(&daq_list_idx) {
+                                    if let Some(signal_names) = signals.get(&resolved_daq_list) {
                                         let mut csv_guard = csv_writers.lock().await;
-                                        if let Some(writer) = csv_guard.get_mut(&daq_list_idx) {
+                                        if let Some(writer) = csv_guard.get_mut(&resolved_daq_list) {
                                             let mut csv_line = format!("{:.6}", rec_ts);
                                             for name in signal_names {
                                                 csv_line.push(',');
@@ -1379,9 +1408,8 @@ impl DaqManager {
                                 // Write MDF4 record to the correct DG for this event
                                 #[cfg(feature = "mf4-native")]
                                 {
-                                    let daq_list_idx = data.daq_list.unwrap_or(0);
                                     let event_groups = mf4_event_groups.read().await;
-                                    if let Some(eg) = event_groups.iter().find(|g| g.daq_list == daq_list_idx) {
+                                    if let Some(eg) = event_groups.iter().find(|g| g.daq_list == resolved_daq_list) {
                                         let mut mf4_guard = mf4_writer.lock().await;
                                         if let Some(ref mut writer) = *mf4_guard {
                                             if let Err(e) = writer.start_record(eg.dg_index, 0) {
@@ -2465,5 +2493,25 @@ mod tests {
         let packet = [0x01, 0x00, 0x01, 0x00];
         let result = parse_dto_packet(&packet, 0, &IdentificationFieldType::AbosulteODT);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_absolute_odt() {
+        let mut config = DaqConfiguration::new();
+        // DAQ list 0 has 2 ODTs, DAQ list 1 has 1 ODT, DAQ list 2 has 3 ODTs
+        config.odt_count_per_list = vec![2, 1, 3];
+
+        // Absolute ODT 0 → DAQ 0, ODT 0
+        assert_eq!(config.resolve_absolute_odt(0), Some((0, 0)));
+        // Absolute ODT 1 → DAQ 0, ODT 1
+        assert_eq!(config.resolve_absolute_odt(1), Some((0, 1)));
+        // Absolute ODT 2 → DAQ 1, ODT 0
+        assert_eq!(config.resolve_absolute_odt(2), Some((1, 0)));
+        // Absolute ODT 3 → DAQ 2, ODT 0
+        assert_eq!(config.resolve_absolute_odt(3), Some((2, 0)));
+        // Absolute ODT 5 → DAQ 2, ODT 2
+        assert_eq!(config.resolve_absolute_odt(5), Some((2, 2)));
+        // Absolute ODT 6 → out of range
+        assert_eq!(config.resolve_absolute_odt(6), None);
     }
 }
