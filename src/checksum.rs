@@ -499,7 +499,7 @@ async fn verify_segment_on_slave(
                 );
             }
 
-            let passed = master_checksum == slave_result.combined_slave_checksum
+            let passed = slave_result.combined_master_checksum == slave_result.combined_slave_checksum
                 && slave_result.all_chunks_passed;
             SegmentResult {
                 name: name.to_string(),
