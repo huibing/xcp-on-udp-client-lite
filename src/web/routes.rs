@@ -2140,6 +2140,10 @@ pub async fn a2l_load(
             }
         }
 
+        // Copy memory segments from A2L reader (needed for page switching)
+        let memory_segments = reader.get_memory_segments();
+        cal_manager.set_memory_segments(memory_segments);
+
         let mut daq_manager = DaqManager::new();
         for m in measurements {
             if let Some(meas) = convert_measurement(m) {
