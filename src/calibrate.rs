@@ -267,6 +267,40 @@ async fn write_to_slave(
         (CalibrationValue::F64Array(arr), CalibrationType::F64Array(_)) => {
             arr.iter().flat_map(|v| v.to_le_bytes()).collect()
         }
+        // Matrices — flatten row-by-row (row-major) into bytes
+        (CalibrationValue::U8Matrix(mat), CalibrationType::U8Matrix(_, _)) => {
+            mat.iter().flatten().copied().collect()
+        }
+        (CalibrationValue::U16Matrix(mat), CalibrationType::U16Matrix(_, _)) => {
+            mat.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::U32Matrix(mat), CalibrationType::U32Matrix(_, _)) => {
+            mat.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::U64Matrix(mat), CalibrationType::U64Matrix(_, _)) => {
+            mat.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I8Matrix(mat), CalibrationType::I8Matrix(_, _)) => {
+            mat.iter().flatten().map(|v| *v as u8).collect()
+        }
+        (CalibrationValue::I16Matrix(mat), CalibrationType::I16Matrix(_, _)) => {
+            mat.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I32Matrix(mat), CalibrationType::I32Matrix(_, _)) => {
+            mat.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I64Matrix(mat), CalibrationType::I64Matrix(_, _)) => {
+            mat.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::F32Matrix(mat), CalibrationType::F32Matrix(_, _)) => {
+            mat.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::F64Matrix(mat), CalibrationType::F64Matrix(_, _)) => {
+            mat.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::BoolMatrix(mat), CalibrationType::BoolMatrix(_, _)) => {
+            mat.iter().flatten().map(|v| if *v { 1u8 } else { 0u8 }).collect()
+        }
         _ => return Err(format!("Unsupported type combination: {:?}", param.data_type)),
     };
 
