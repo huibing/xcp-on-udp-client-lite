@@ -460,8 +460,10 @@ pub struct DaqManager {
     selection_changed: Arc<AtomicBool>,
     /// Recording flag (file writing active)
     recording: Arc<AtomicBool>,
-    /// Shared CSV writer for background task (created on start_recording, taken on stop_recording)
-    csv_writer: Arc<TokioMutex<Option<std::io::BufWriter<std::fs::File>>>>,
+    /// Shared CSV writers for background task — one per event (daq_list → writer)
+    csv_writers: Arc<TokioMutex<HashMap<u16, std::io::BufWriter<std::fs::File>>>>,
+    /// CSV event mapping: daq_list → signal names (for writing correct columns)
+    csv_event_signals: Arc<RwLock<HashMap<u16, Vec<String>>>>,
     /// Shared MF4 writer (mf4-native) for background task — multi-DG support
     #[cfg(feature = "mf4-native")]
     mf4_writer: Arc<TokioMutex<Option<Mf4StreamWriter<std::io::BufWriter<std::fs::File>>>>>,
@@ -511,7 +513,8 @@ impl DaqManager {
             daq_config: Arc::new(RwLock::new(DaqConfiguration::new())),
             selection_changed: Arc::new(AtomicBool::new(false)),
             recording: Arc::new(AtomicBool::new(false)),
-            csv_writer: Arc::new(TokioMutex::new(None)),
+            csv_writers: Arc::new(TokioMutex::new(HashMap::new())),
+            csv_event_signals: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "mf4-native")]
             mf4_writer: Arc::new(TokioMutex::new(None)),
             #[cfg(feature = "mf4-native")]
@@ -562,7 +565,8 @@ impl DaqManager {
             daq_config: Arc::new(RwLock::new(DaqConfiguration::new())),
             selection_changed: Arc::new(AtomicBool::new(false)),
             recording: Arc::new(AtomicBool::new(false)),
-            csv_writer: Arc::new(TokioMutex::new(None)),
+            csv_writers: Arc::new(TokioMutex::new(HashMap::new())),
+            csv_event_signals: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "mf4-native")]
             mf4_writer: Arc::new(TokioMutex::new(None)),
             #[cfg(feature = "mf4-native")]
@@ -1206,7 +1210,8 @@ impl DaqManager {
         let timestamp_size = self.timestamp_size.unwrap_or(0);
         let iden_field_type = self.indentification_field_type.clone();
         let selection_changed = self.selection_changed.clone();
-        let csv_writer = self.csv_writer.clone();
+        let csv_writers = self.csv_writers.clone();
+        let csv_event_signals = self.csv_event_signals.clone();
         let recording_ts_tracker = self.recording_ts_tracker.clone();
         let recording_start_instant = self.recording_start_instant.clone();
 
@@ -1341,27 +1346,32 @@ impl DaqManager {
                                     }
                                 };
 
-                                // Write CSV line (empty cell for non-updated signals from other event groups)
+                                // Write CSV line to the correct event file
                                 {
-                                    let mut csv_guard = csv_writer.lock().await;
-                                    if let Some(ref mut writer) = *csv_guard {
-                                        let mut csv_line = format!("{:.6}", rec_ts);
-                                        for entry in &config.odt_entries {
-                                            csv_line.push(',');
-                                            if let Some(value) = record.get_value(&entry.name) {
-                                                match entry.data_type {
-                                                    A2lDataType::F32 | A2lDataType::F64 => {
+                                    let daq_list_idx = data.daq_list.unwrap_or(0);
+                                    let signals = csv_event_signals.read().await;
+                                    if let Some(signal_names) = signals.get(&daq_list_idx) {
+                                        let mut csv_guard = csv_writers.lock().await;
+                                        if let Some(writer) = csv_guard.get_mut(&daq_list_idx) {
+                                            let mut csv_line = format!("{:.6}", rec_ts);
+                                            for name in signal_names {
+                                                csv_line.push(',');
+                                                if let Some(value) = record.get_value(name) {
+                                                    // Find data type from config entries
+                                                    let is_float = config.odt_entries.iter()
+                                                        .find(|e| &e.name == name)
+                                                        .map(|e| e.data_type.is_float())
+                                                        .unwrap_or(false);
+                                                    if is_float {
                                                         csv_line.push_str(&format!("{:.6}", value));
-                                                    }
-                                                    _ => {
+                                                    } else {
                                                         csv_line.push_str(&format!("{:.0}", value));
                                                     }
                                                 }
                                             }
-                                            // Non-updated signals: leave cell empty
-                                        }
-                                        if let Err(e) = writeln!(writer, "{}", csv_line) {
-                                            tracing::error!("Failed to write CSV: {}", e);
+                                            if let Err(e) = writeln!(writer, "{}", csv_line) {
+                                                tracing::error!("Failed to write CSV: {}", e);
+                                            }
                                         }
                                     }
                                 }
@@ -1431,12 +1441,10 @@ impl DaqManager {
             if recording.load(Ordering::SeqCst) {
                 recording.store(false, Ordering::SeqCst);
 
-                // Flush CSV
+                // Flush all CSV writers
                 {
-                    let mut csv_guard = csv_writer.lock().await;
-                    if let Some(writer) = csv_guard.take() {
-                        drop(writer);
-                    }
+                    let mut csv_guard = csv_writers.lock().await;
+                    csv_guard.clear();
                 }
 
                 // Finalize MDF4
@@ -1525,31 +1533,60 @@ impl DaqManager {
             return Err("No measurements selected for recording".to_string());
         }
 
-        // Create CSV file with header
-        let csv_path = self.csv_path.clone();
+        // Create per-event CSV files
         {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&csv_path)
-                .map_err(|e| format!("Failed to create CSV: {}", e))?;
-
-            let mut header = String::from("time_s");
-            for meas in &selected_measurements {
-                header.push(',');
-                header.push_str(&meas.name);
+            let config = self.daq_config.read().await;
+            let mut event_map: std::collections::BTreeMap<u16, Vec<String>> =
+                std::collections::BTreeMap::new();
+            let mut seen_per_list: std::collections::HashMap<u16, std::collections::HashSet<String>> =
+                std::collections::HashMap::new();
+            for entry in &config.odt_entries {
+                let seen = seen_per_list.entry(entry.daq_list).or_default();
+                if seen.insert(entry.name.clone()) {
+                    event_map.entry(entry.daq_list).or_default().push(entry.name.clone());
+                }
             }
-            writeln!(file, "{}", header)
-                .map_err(|e| format!("Failed to write CSV header: {}", e))?;
-        }
 
-        // Open CSV for appending and store in shared writer
-        let csv_file = OpenOptions::new()
-            .append(true)
-            .open(&csv_path)
-            .map_err(|e| format!("Failed to open CSV for appending: {}", e))?;
-        *self.csv_writer.lock().await = Some(std::io::BufWriter::new(csv_file));
+            let csv_base = self.csv_path.with_extension("");
+            let csv_ext = self.csv_path.extension().and_then(|e| e.to_str()).unwrap_or("csv");
+            let mut writers = self.csv_writers.lock().await;
+            let mut signals = self.csv_event_signals.write().await;
+            writers.clear();
+            signals.clear();
+
+            for (&daq_list, signal_names) in &event_map {
+                let csv_path = if event_map.len() == 1 {
+                    self.csv_path.clone()
+                } else {
+                    PathBuf::from(format!("{}_event{}.{}", csv_base.display(), daq_list, csv_ext))
+                };
+
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&csv_path)
+                    .map_err(|e| format!("Failed to create CSV for event {}: {}", daq_list, e))?;
+
+                let mut header = String::from("time_s");
+                for name in signal_names {
+                    header.push(',');
+                    header.push_str(name);
+                }
+                writeln!(file, "{}", header)
+                    .map_err(|e| format!("Failed to write CSV header: {}", e))?;
+
+                let csv_file = OpenOptions::new()
+                    .append(true)
+                    .open(&csv_path)
+                    .map_err(|e| format!("Failed to open CSV for appending: {}", e))?;
+                writers.insert(daq_list, std::io::BufWriter::new(csv_file));
+                signals.insert(daq_list, signal_names.clone());
+
+                tracing::info!("CSV: {} for event {} with {} signals",
+                    csv_path.display(), daq_list, signal_names.len());
+            }
+        }
 
         // Create MDF4 writer
 
@@ -1667,13 +1704,12 @@ impl DaqManager {
         // Small delay to let any in-flight writes complete
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Take and close CSV writer
+        // Close all CSV writers
         {
-            let mut csv_guard = self.csv_writer.lock().await;
-            if let Some(writer) = csv_guard.take() {
-                drop(writer); // flush & close
-            }
+            let mut csv_guard = self.csv_writers.lock().await;
+            csv_guard.clear(); // flush & close all
         }
+        self.csv_event_signals.write().await.clear();
 
         // Finalize MDF4
         #[cfg(feature = "mf4-native")]
