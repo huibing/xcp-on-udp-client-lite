@@ -244,6 +244,8 @@ pub struct DaqConfiguration {
     pub daq_list_count: u16,
     /// Number of ODTs per DAQ list
     pub odt_count_per_list: Vec<u8>,
+    /// Event channel assigned to each DAQ list (index = daq_list)
+    pub event_channel_per_list: Vec<u16>,
 }
 
 impl DaqConfiguration {
@@ -258,6 +260,7 @@ impl DaqConfiguration {
             odt_entry_granularity: 1,
             daq_list_count: 0,
             odt_count_per_list: Vec::new(),
+            event_channel_per_list: Vec::new(),
         }
     }
 
@@ -300,6 +303,7 @@ impl DaqConfiguration {
     pub fn clear(&mut self) {
         self.odt_entries.clear();
         self.odt_count_per_list.clear();
+        self.event_channel_per_list.clear();
     }
 }
 
@@ -1045,6 +1049,7 @@ impl DaqManager {
             config.timestamp_unit = self.timestamp_unit;
             config.daq_list_count = allocation.daq_list_count;
             config.odt_count_per_list = allocation.odt_count_per_list.clone();
+            config.event_channel_per_list = allocation.event_channel_per_list.clone();
         }
 
         // 2. ALLOC_DAQ - Allocate DAQ lists
@@ -1636,7 +1641,15 @@ impl DaqManager {
                     let mut event_groups = Vec::new();
 
                     for (dg_index, (&daq_list, entries)) in event_map.iter().enumerate() {
-                        let group_name = format!("event_{}", daq_list);
+                        // Look up the real event name from available_events
+                        let event_channel = config.event_channel_per_list
+                            .get(daq_list as usize)
+                            .copied()
+                            .unwrap_or(daq_list);
+                        let group_name = self.available_events.iter()
+                            .find(|ev| ev.channel == event_channel)
+                            .map(|ev| ev.name.clone())
+                            .unwrap_or_else(|| format!("event_{}", daq_list));
                         let mut cg_builder = ChannelGroupDefBuilder::new()
                             .name(&group_name)
                             .with_time_channel("time_s");
