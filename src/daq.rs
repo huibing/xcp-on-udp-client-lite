@@ -1011,36 +1011,41 @@ impl DaqManager {
             .await
             .map_err(|e| format!("ALLOC_DAQ failed: {}", e))?;
 
-        // 3-7. For each DAQ list, allocate ODTs and configure entries
-        let mut global_entry_idx: usize = 0;
-
+        // 3. For each DAQ list, ALLOC_ODT
         for (daq_list_idx, odt_count) in allocation.odt_count_per_list.iter().enumerate() {
             let daq_list = daq_list_idx as u16;
-
-            // ALLOC_ODT - Allocate ODTs for this DAQ list
             tracing::trace!("ALLOC_ODT: DAQ list {}, {} ODTs", daq_list, odt_count);
             slave
                 .alloc_odt(daq_list, *odt_count)
                 .await
                 .map_err(|e| format!("ALLOC_ODT failed for list {}: {}", daq_list, e))?;
+        }
 
-            // Get the allocation for this DAQ list
+        // 4. For each ODT in each list, ALLOC_ODT_ENTRY
+        for (daq_list_idx, _) in allocation.odt_count_per_list.iter().enumerate() {
+            let daq_list = daq_list_idx as u16;
             let list_allocation = &allocation.daq_lists[daq_list_idx];
-
-            // For each ODT in this DAQ list
             for (odt_idx, odt_allocation) in list_allocation.odts.iter().enumerate() {
                 let odt = odt_idx as u8;
                 let entry_count = odt_allocation.entries.len() as u8;
-
-                // ALLOC_ODT_ENTRY - Allocate entries in this ODT
                 tracing::trace!("ALLOC_ODT_ENTRY: DAQ list {}, ODT {}, {} entries",
                     daq_list, odt, entry_count);
                 slave
                     .alloc_odt_entry(daq_list, odt, entry_count)
                     .await
                     .map_err(|e| format!("ALLOC_ODT_ENTRY failed: {}", e))?;
+            }
+        }
 
-                // SET_DAQ_PTR + WRITE_DAQ - Configure each entry
+        // 5. After all resources are allocated, SET_DAQ_PTR + WRITE_DAQ for each entry
+        let mut global_entry_idx: usize = 0;
+
+        for (daq_list_idx, _) in allocation.odt_count_per_list.iter().enumerate() {
+            let daq_list = daq_list_idx as u16;
+            let list_allocation = &allocation.daq_lists[daq_list_idx];
+
+            for (odt_idx, odt_allocation) in list_allocation.odts.iter().enumerate() {
+                let odt = odt_idx as u8;
                 let mut byte_offset: usize = 0;
 
                 for (entry_idx, entry_allocation) in odt_allocation.entries.iter().enumerate() {
@@ -1052,21 +1057,17 @@ impl DaqManager {
                         daq_list, odt, entry_idx, meas.address, meas.size
                     );
 
-                    // Set DAQ pointer to this entry
                     slave
                         .set_daq_ptr(daq_list, odt, entry_idx as u8)
                         .await
                         .map_err(|e| format!("SET_DAQ_PTR failed: {}", e))?;
 
-                    // Write DAQ entry configuration
-                    // Ensure size is aligned to granularity
                     let aligned_size = meas.size.div_ceil(odt_granularity as usize) * odt_granularity as usize;
                     slave
                         .write_daq(0, meas.mta(), aligned_size as u8)
                         .await
                         .map_err(|e| format!("WRITE_DAQ failed: {}", e))?;
 
-                    // Add to configuration for decoding
                     {
                         let mut config = self.daq_config.write().await;
                         config.odt_entries.push(OdtEntryConfig {
@@ -1086,10 +1087,11 @@ impl DaqManager {
                     global_entry_idx += 1;
                 }
             }
+        }
 
-            // SET_DAQ_LIST_MODE - Configure DAQ list mode
-            // Mode: 0x10 = selected + DAQ (send on event)
-            // Event channel: per-list event from allocation (grouped by measurement event assignments)
+        // 6. SET_DAQ_LIST_MODE for each DAQ list
+        for (daq_list_idx, _) in allocation.odt_count_per_list.iter().enumerate() {
+            let daq_list = daq_list_idx as u16;
             let list_event_channel = allocation.event_channel_per_list[daq_list_idx];
             tracing::trace!(
                 "SET_DAQ_LIST_MODE: mode=0x10, daq_list={}, event_channel={}, prescaler=1",
@@ -1122,11 +1124,14 @@ impl DaqManager {
     /// Data is only streamed for live display — no files are created.
     /// Call `start_recording()` to begin file recording.
     pub async fn start(&mut self, slave: &XcpSlave, _interval_ms: u64) -> Result<(), String> {
+        // If DAQ is already running, stop it first to do a clean restart
         if self.running.load(Ordering::SeqCst) {
-            return Err("DAQ already running".to_string());
+            tracing::info!("DAQ already running, stopping first for clean restart...");
+            self.stop(slave).await.ok();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        // Configure DAQ first
+        // Configure DAQ (always clears via FREE_DAQ and rebuilds from scratch)
         self.configure(slave).await?;
 
         // Get DTO receiver for DAQ reception (must be done before starting DAQ)
