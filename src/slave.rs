@@ -245,11 +245,6 @@ impl XcpSlave {
         slave.info.connected = true;
         slave.info.connect_info = Some(connect_info);
 
-        // Try to get slave ID
-        if let Ok(slave_id) = slave.get_id(0).await {
-            slave.info.slave_id_string = Some(slave_id);
-        }
-
         tracing::info!(
             "Connected to slave '{}' (ID: {:?}) - Resource: {:?}",
             slave.info.name,
