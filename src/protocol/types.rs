@@ -53,13 +53,13 @@ pub enum CommandCode {
     /// MODIFY_BITS - Modify bits in memory
     ModifyBits = 0xEC,
 
-    // ============ Calibration Commands (0xEB - 0xE9) ============
+    // ============ Calibration Commands (0xEB - 0xE4) ============
     /// SET_CAL_PAGE - Set calibration page
     SetCalPage = 0xEB,
     /// GET_CAL_PAGE - Get calibration page
     GetCalPage = 0xEA,
     /// COPY_CAL_PAGE - Copy calibration page
-    CopyCalPage = 0xE9,
+    CopyCalPage = 0xE4,
 
     // ============ DAQ Commands ============
     /// FREE_DAQ - Free DAQ lists
@@ -93,7 +93,7 @@ pub enum CommandCode {
     /// GET_DAQ_LIST_INFO - Get DAQ list info
     GetDaqListInfo = 0xD8,
     /// GET_DAQ_EVENT_INFO - Get DAQ event info
-    GetDaqEventInfo = 0xE4,
+    GetDaqEventInfo = 0xD7,
 
     // ============ PGM Commands (0xD2 - 0xCE) ============
     /// PROGRAM_START - Start programming session
