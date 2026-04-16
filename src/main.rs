@@ -1,6 +1,8 @@
 //! XCP Client - Terminal UI / Web UI Application
 
 mod tui;
+mod calibrate;
+mod verify;
 
 use std::fs::{self, OpenOptions};
 use std::path::Path;
@@ -34,6 +36,39 @@ enum Mode {
         /// Port to listen on
         #[arg(short, long, default_value = "8080")]
         port: u16,
+    },
+    /// Calibrate ECU parameters non-interactively
+    Calibrate {
+        /// Path to A2L description file
+        #[arg(long)]
+        a2l: String,
+        /// Variable name to write (single-var mode)
+        #[arg(long)]
+        var: Option<String>,
+        /// Value to write (single-var mode)
+        #[arg(long)]
+        value: Option<String>,
+        /// Path to DCM file with calibration values (DCM mode)
+        #[arg(long)]
+        dcm: Option<String>,
+        /// Slave address override (default: from A2L)
+        #[arg(long)]
+        addr: Option<String>,
+    },
+    /// Verify ECU flash memory via BUILD_CHECKSUM
+    Verify {
+        /// Path to A2L description file
+        #[arg(long)]
+        a2l: String,
+        /// Path to Intel HEX file
+        #[arg(long)]
+        hex: String,
+        /// Slave address override (default: from A2L)
+        #[arg(long)]
+        addr: Option<String>,
+        /// Max block size for BUILD_CHECKSUM (default: 16 KiB)
+        #[arg(long)]
+        max_block_size: Option<u32>,
     },
 }
 
@@ -83,6 +118,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.mode {
         Some(Mode::Web { host, port }) => {
             run_web_ui(&host, port).await?;
+        }
+        Some(Mode::Calibrate { a2l, var, value, dcm, addr }) => {
+            calibrate::run_calibrate(&a2l, var, value, dcm, addr).await?;
+        }
+        Some(Mode::Verify { a2l, hex, addr, max_block_size }) => {
+            verify::run_verify(&a2l, &hex, addr, max_block_size).await?;
         }
         _ => {
             run_tui().await?;
