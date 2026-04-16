@@ -1,0 +1,268 @@
+<div class="card">
+    <h2>Checksum Verification</h2>
+
+    {{#if devices}}
+    <div class="form-group" style="margin-bottom: 1.5rem;">
+        <label>Select Device</label>
+        <select id="device-select" onchange="selectDevice(this.value)" style="max-width: 400px;">
+            {{#each devices}}
+            <option value="{{this.id}}" {{#if this.selected}}selected{{/if}}>
+                {{this.name}} {{#if this.connected}}(Connected){{else}}(Disconnected){{/if}}
+            </option>
+            {{/each}}
+        </select>
+    </div>
+    {{else}}
+    <div class="status error">No devices loaded. Please load an A2L file first.</div>
+    {{/if}}
+</div>
+
+{{#if selected_device}}
+<div class="grid" style="grid-template-columns: 1fr 1fr;">
+    <!-- HEX File Upload -->
+    <div class="card">
+        <h2>HEX File</h2>
+        {{#if hex_filename}}
+        <div class="form-group" style="background: #0f3d0f; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem;">
+            <label style="color: #00ff88; margin-bottom: 0.25rem;">Loaded HEX File</label>
+            <div style="font-family: monospace;">{{hex_filename}}</div>
+        </div>
+        {{else}}
+        <div class="form-group" style="background: #3d3d0f; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem;">
+            <label style="color: #ffaa00;">No HEX file loaded</label>
+            <div style="font-size: 0.9em;">Upload an Intel HEX file to verify checksums.</div>
+        </div>
+        {{/if}}
+
+        <form id="hex-form" method="POST" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="hex_file">Upload Intel HEX File</label>
+                <input type="file" name="hex_file" id="hex_file" accept=".hex,.ihex,.h86" required
+                       style="padding: 0.5rem; background: #1a1a2e; border: 1px solid #0f3460; border-radius: 4px; color: #eee; width: 100%;">
+            </div>
+            <button type="submit" id="hex-load-btn">Upload HEX</button>
+        </form>
+    </div>
+
+    <!-- Verification Controls -->
+    <div class="card">
+        <h2>Verification</h2>
+        {{#unless selected_device.connected}}
+        <div class="status error" style="margin-bottom: 1rem;">Device must be connected to verify checksums.</div>
+        {{/unless}}
+
+        <div class="form-group" style="background: #0f3460; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem;">
+            <div style="display: flex; gap: 1rem; justify-content: space-around;">
+                <div><span style="color: #00ff88; font-size: 1.3em; font-weight: bold;">{{segment_count}}</span> <span style="color: #888;">Segments</span></div>
+                <div><span style="color: #00ff88; font-size: 1.3em; font-weight: bold;">{{selected_device.name}}</span></div>
+            </div>
+        </div>
+
+        <div class="btn-group">
+            <button id="verify-btn" onclick="runVerification()"
+                {{#unless hex_filename}}disabled title="Load a HEX file first"{{/unless}}
+                {{#unless selected_device.connected}}disabled title="Device must be connected"{{/unless}}>
+                Run Verification
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Results -->
+{{#if report}}
+<div class="card" style="margin-top: 1rem;">
+    <h2>Verification Results</h2>
+
+    <!-- Summary -->
+    <div style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
+        <div style="background: #0f3460; padding: 0.75rem 1.5rem; border-radius: 4px; text-align: center;">
+            <div style="font-size: 1.5em; font-weight: bold; color: #eee;">{{report.total}}</div>
+            <div style="color: #888; font-size: 0.85em;">Total</div>
+        </div>
+        <div style="background: #0f3d0f; padding: 0.75rem 1.5rem; border-radius: 4px; text-align: center;">
+            <div style="font-size: 1.5em; font-weight: bold; color: #00ff88;">{{report.passed}}</div>
+            <div style="color: #888; font-size: 0.85em;">Passed</div>
+        </div>
+        {{#if report.failed_count}}
+        <div style="background: #3d0f0f; padding: 0.75rem 1.5rem; border-radius: 4px; text-align: center;">
+            <div style="font-size: 1.5em; font-weight: bold; color: #ff4444;">{{report.failed_count}}</div>
+            <div style="color: #888; font-size: 0.85em;">Failed</div>
+        </div>
+        {{/if}}
+        {{#if report.skipped_count}}
+        <div style="background: #3d3d0f; padding: 0.75rem 1.5rem; border-radius: 4px; text-align: center;">
+            <div style="font-size: 1.5em; font-weight: bold; color: #ffaa00;">{{report.skipped_count}}</div>
+            <div style="color: #888; font-size: 0.85em;">Skipped</div>
+        </div>
+        {{/if}}
+        {{#if report.error_count}}
+        <div style="background: #3d0f0f; padding: 0.75rem 1.5rem; border-radius: 4px; text-align: center;">
+            <div style="font-size: 1.5em; font-weight: bold; color: #ff4444;">{{report.error_count}}</div>
+            <div style="color: #888; font-size: 0.85em;">Errors</div>
+        </div>
+        {{/if}}
+    </div>
+
+    <!-- Overall Status -->
+    {{#if report.all_passed}}
+    <div class="status success" style="margin-bottom: 1rem; font-size: 1.1em; text-align: center;">
+        ✅ All segments PASSED
+    </div>
+    {{else}}
+    <div class="status error" style="margin-bottom: 1rem; font-size: 1.1em; text-align: center;">
+        ❌ Verification FAILED
+    </div>
+    {{/if}}
+
+    <!-- Detailed Results Table -->
+    <table>
+        <thead>
+            <tr>
+                <th>Segment</th>
+                <th>Address</th>
+                <th>Size</th>
+                <th>Algorithm</th>
+                <th>Page</th>
+                <th>Master</th>
+                <th>Slave</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{#each report.results}}
+            <tr>
+                <td>{{this.name}}</td>
+                <td style="font-family: monospace;">0x{{this.address_hex}}</td>
+                <td style="font-family: monospace;">{{this.size}}</td>
+                <td>{{this.algorithm}}</td>
+                <td>{{#if this.page}}{{this.page}}{{else}}-{{/if}}</td>
+                <td style="font-family: monospace;">0x{{this.master_hex}}</td>
+                <td style="font-family: monospace;">0x{{this.slave_hex}}</td>
+                <td>
+                    {{#if this.is_pass}}<span class="tag connected">PASS</span>{{/if}}
+                    {{#if this.is_fail}}<span class="tag disconnected">FAIL</span>{{/if}}
+                    {{#if this.is_skipped}}<span class="tag stopped">SKIP</span>{{/if}}
+                    {{#if this.is_error}}<span class="tag disconnected">ERROR</span>{{/if}}
+                    {{#if this.status_detail}}<br><small style="color: #888;">{{this.status_detail}}</small>{{/if}}
+                    {{#if this.has_chunks}}<br><button class="btn-sm" onclick="toggleChunks('chunks-{{@index}}')">{{this.chunk_count}} chunks</button>{{/if}}
+                </td>
+            </tr>
+            {{#if this.has_chunks}}
+            <tr id="chunks-{{@index}}" style="display: none;">
+                <td colspan="8" style="padding: 0.5rem 1rem; background: #0a0a1a;">
+                    <table style="width: 100%; margin: 0;">
+                        <thead>
+                            <tr>
+                                <th style="font-size: 0.85em;">Offset</th>
+                                <th style="font-size: 0.85em;">Size</th>
+                                <th style="font-size: 0.85em;">Master CRC</th>
+                                <th style="font-size: 0.85em;">Slave CRC</th>
+                                <th style="font-size: 0.85em;">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{#each this.chunks}}
+                            <tr>
+                                <td style="font-family: monospace; font-size: 0.85em;">0x{{this.offset_hex}}</td>
+                                <td style="font-family: monospace; font-size: 0.85em;">{{this.size}}</td>
+                                <td style="font-family: monospace; font-size: 0.85em;">0x{{this.master_hex}}</td>
+                                <td style="font-family: monospace; font-size: 0.85em;">0x{{this.slave_hex}}</td>
+                                <td>
+                                    {{#if this.passed}}<span class="tag connected" style="font-size: 0.8em;">PASS</span>{{else}}<span class="tag disconnected" style="font-size: 0.8em;">FAIL</span>{{/if}}
+                                </td>
+                            </tr>
+                            {{/each}}
+                        </tbody>
+                    </table>
+                </td>
+            </tr>
+            {{/if}}
+            {{/each}}
+        </tbody>
+    </table>
+</div>
+{{/if}}
+{{/if}}
+
+<script>
+function selectDevice(deviceId) {
+    window.location.href = '/checksum?device=' + encodeURIComponent(deviceId);
+}
+
+function toggleChunks(rowId) {
+    const row = document.getElementById(rowId);
+    if (row) {
+        row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+    }
+}
+
+document.getElementById('hex-form')?.addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    const btn = document.getElementById('hex-load-btn');
+    btn.disabled = true;
+    btn.textContent = 'Uploading...';
+
+    const deviceId = document.getElementById('device-select')?.value;
+    if (!deviceId) {
+        alert('No device selected');
+        btn.disabled = false;
+        btn.textContent = 'Upload HEX';
+        return;
+    }
+
+    const formData = new FormData(this);
+
+    try {
+        const response = await fetch('/api/hex/load/' + encodeURIComponent(deviceId), {
+            method: 'POST',
+            body: formData
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            alert('HEX file loaded: ' + result.message);
+            window.location.reload();
+        } else {
+            alert('Failed: ' + (result.error || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Upload HEX';
+    }
+});
+
+async function runVerification() {
+    const btn = document.getElementById('verify-btn');
+    const deviceId = document.getElementById('device-select')?.value;
+    if (!deviceId) {
+        alert('No device selected');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Verifying...';
+
+    try {
+        const response = await fetch('/api/checksum/verify/' + encodeURIComponent(deviceId), {
+            method: 'POST'
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            window.location.reload();
+        } else {
+            alert('Verification failed: ' + (result.error || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Run Verification';
+    }
+}
+</script>

@@ -13,6 +13,6 @@ pub mod types;
 pub use compute_method::{CompuMethod, CompuVtabEntry, CompuMethodFactory};
 pub use reader::{
     A2lReader, A2lCharacteristic, A2lMeasurement, A2lMemorySegment,
-    AxisInfo, AxisPointSource,
+    AxisInfo, AxisPointSource, XcpChecksum, XcpSegmentInfo, XcpPage,
 };
 pub use types::{A2lDataType, CharacteristicType, StorageOrder, DaqEvent};

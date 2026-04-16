@@ -8,10 +8,12 @@ pub mod client;
 pub mod calibration;
 pub mod daq;
 pub mod a2l;  // A2L module with COMPU_METHOD support
-pub mod a2l_reader;  // DEPRECATED: Will be removed, use `a2l` module instead
+// pub mod a2l_reader;  // DEPRECATED: Will be removed, use `a2l` module instead
 pub mod web;
 pub mod slave;
 pub mod variable;
+pub mod hex;
+pub mod checksum;
 
 pub use client::XcpClient;
 pub use calibration::{CalibrationParam, CalibrationValue, CalibrationType, CalibrationManager};
@@ -22,6 +24,7 @@ pub use a2l::{
     A2lReader, A2lMeasurement, A2lCharacteristic, A2lDataType,
     A2lMemorySegment, AxisInfo, AxisPointSource,
     CharacteristicType, StorageOrder, DaqEvent,
+    XcpChecksum, XcpSegmentInfo, XcpPage,
 };
 pub use slave::{XcpSlave, SlaveId, SlaveInfo, SlaveEvent, SlaveError, SegmentPageState, CalibrationWriteError, PageMode};
 pub use variable::{DeviceVariable, VariableType, VariableFilter, VariableSearchManager, VariableSummary};

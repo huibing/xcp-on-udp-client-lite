@@ -6,7 +6,8 @@
 use crate::calibration::CalibrationManager;
 use crate::daq::DaqManager;
 use crate::protocol::{
-    commands, parse_connect_response, parse_get_id_response, parse_response, ConnectInfo, ErrorCode,
+    commands, parse_connect_response, parse_get_id_response, parse_response, parse_checksum,
+    ConnectInfo, ErrorCode,
     Mta, Response,
 };
 use crate::client::{DAQResolutionInfo, DAQProcessorInfo};
@@ -1142,6 +1143,129 @@ impl XcpSlave {
             Response::Err(err) => Err(SlaveError::Protocol(err)),
             _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
         }
+    }
+
+    /// Build checksum over a memory block on the slave.
+    ///
+    /// Sends SET_MTA to set the start address, then BUILD_CHECKSUM to compute
+    /// the checksum over `block_size` bytes. Returns `(checksum_type, checksum_value)`.
+    ///
+    /// If the slave returns ERR_OUT_OF_RANGE with a corrected max_block_size,
+    /// the method automatically retries with the slave-reported block size,
+    /// splitting into multiple chunks and combining results as needed.
+    pub async fn build_checksum(
+        &self,
+        mta: Mta,
+        block_size: u32,
+    ) -> Result<(u8, u32), SlaveError> {
+        self.set_mta(mta).await?;
+
+        let response = self
+            .send_command_and_wait(&commands::build_checksum(block_size))
+            .await?;
+
+        // Check for ERR_OUT_OF_RANGE with max_block_size before normal parsing.
+        // Raw response format: [TL header (4)] [PID (1)] [error_code (1)] [params...]
+        // For BUILD_CHECKSUM error: params = [alignment (2)] [max_block_size (4)]
+        if response.len() >= 6 && response[4] == 0xFE {
+            let err_code = response[5];
+            if err_code == 0x22 && response.len() >= 12 {
+                let _alignment = u16::from_le_bytes([response[6], response[7]]);
+                let slave_max_block = u32::from_le_bytes([
+                    response[8], response[9], response[10], response[11],
+                ]);
+
+                if slave_max_block > 0 && slave_max_block < block_size {
+                    tracing::info!(
+                        "BUILD_CHECKSUM: slave returned max_block_size=0x{:X} (requested 0x{:X}), retrying with chunks",
+                        slave_max_block,
+                        block_size
+                    );
+                    return self
+                        .build_checksum_chunked(mta, block_size, slave_max_block)
+                        .await;
+                }
+            }
+        }
+
+        let parsed =
+            parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+
+        match parsed {
+            Response::Res(data) => {
+                let (ctype, cvalue) = parse_checksum(&data)
+                    .map_err(|e| SlaveError::ParseError(e.to_string()))?;
+                tracing::debug!(
+                    "BUILD_CHECKSUM: addr=0x{:08X}, size=0x{:X}, type={}, value=0x{:08X}",
+                    mta.address,
+                    block_size,
+                    ctype,
+                    cvalue
+                );
+                Ok((ctype, cvalue))
+            }
+            Response::Err(err) => Err(SlaveError::Protocol(err)),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type for BUILD_CHECKSUM".to_string(),
+            )),
+        }
+    }
+
+    /// Build checksum over a large memory block by splitting into chunks.
+    /// Each chunk is checksummed individually, then partial results are combined.
+    async fn build_checksum_chunked(
+        &self,
+        mta: Mta,
+        total_size: u32,
+        max_block_size: u32,
+    ) -> Result<(u8, u32), SlaveError> {
+        let mut offset: u32 = 0;
+        let mut combined: u32 = 0;
+        let mut checksum_type: u8 = 0;
+
+        while offset < total_size {
+            let chunk_size = std::cmp::min(max_block_size, total_size - offset);
+            let chunk_addr = mta.address.wrapping_add(offset);
+
+            self.set_mta(Mta::new(chunk_addr, mta.extension)).await?;
+
+            let response = self
+                .send_command_and_wait(&commands::build_checksum(chunk_size))
+                .await?;
+            let parsed =
+                parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+
+            match parsed {
+                Response::Res(data) => {
+                    let (ctype, cvalue) = parse_checksum(&data)
+                        .map_err(|e| SlaveError::ParseError(e.to_string()))?;
+                    checksum_type = ctype;
+                    combined = combined.wrapping_add(cvalue);
+                    tracing::debug!(
+                        "BUILD_CHECKSUM chunk: addr=0x{:08X}, size=0x{:X}, partial=0x{:08X}",
+                        chunk_addr,
+                        chunk_size,
+                        cvalue
+                    );
+                }
+                Response::Err(err) => return Err(SlaveError::Protocol(err)),
+                _ => {
+                    return Err(SlaveError::InvalidResponse(
+                        "Unexpected response type for BUILD_CHECKSUM".to_string(),
+                    ))
+                }
+            }
+
+            offset += chunk_size;
+        }
+
+        tracing::info!(
+            "BUILD_CHECKSUM combined: addr=0x{:08X}, total_size=0x{:X}, result=0x{:08X}",
+            mta.address,
+            total_size,
+            combined
+        );
+        Ok((checksum_type, combined))
     }
 
     /// Upload (read) data using current MTA

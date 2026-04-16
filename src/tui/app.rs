@@ -50,6 +50,8 @@ pub enum AppMode {
     SearchDialog,
     /// Event channel selection dialog
     EventSelect,
+    /// Checksum verification results
+    ChecksumResult,
 }
 
 /// Menu items
@@ -60,6 +62,8 @@ pub enum MenuItem {
     ListParams,
     CombinedView,
     LoadA2L,
+    LoadHex,
+    VerifyChecksum,
     Exit,
 }
 
@@ -71,12 +75,15 @@ impl MenuItem {
                 (MenuItem::CombinedView, "Calibration + DAQ View"),
                 (MenuItem::ListParams, "Calibration Parameters"),
                 (MenuItem::LoadA2L, "Load A2L File"),
+                (MenuItem::LoadHex, "Load HEX File"),
+                (MenuItem::VerifyChecksum, "Verify Checksum"),
                 (MenuItem::Exit, "Exit"),
             ]
         } else {
             vec![
                 (MenuItem::Connect, "Connect to XCP Slave"),
                 (MenuItem::LoadA2L, "Load A2L File"),
+                (MenuItem::LoadHex, "Load HEX File"),
                 (MenuItem::Exit, "Exit"),
             ]
         }
@@ -181,6 +188,15 @@ pub struct App {
     search_dialog_focus: SearchDialogFocus,
     /// Temporarily selected indices in search dialog (before confirming)
     search_dialog_selected: Vec<usize>,
+
+    /// HEX file path for checksum verification
+    hex_path: String,
+    /// Loaded HEX image
+    hex_image: Option<xcp_client::hex::HexImage>,
+    /// Checksum verification report
+    checksum_report: Option<xcp_client::checksum::VerificationReport>,
+    /// Checksum result scroll position
+    checksum_scroll: usize,
 }
 
 /// Search dialog focus area
@@ -215,6 +231,7 @@ pub enum DaqDisplayMode {
 pub enum InputAction {
     ParamValue(usize),
     A2LPath,
+    HexPath,
     None,
 }
 
@@ -259,6 +276,10 @@ impl App {
             event_select_cursor: 0,
             search_dialog_focus: SearchDialogFocus::Input,
             search_dialog_selected: Vec::new(),
+            hex_path: String::new(),
+            hex_image: None,
+            checksum_report: None,
+            checksum_scroll: 0,
         }
     }
 
@@ -315,6 +336,7 @@ impl App {
             AppMode::SelectA2L => self.handle_select_a2l_key(key).await,
             AppMode::SearchDialog => self.handle_search_dialog_key(key).await,
             AppMode::EventSelect => self.handle_event_select_key(key).await,
+            AppMode::ChecksumResult => self.handle_checksum_result_key(key).await,
         };
 
         // Catch errors and display them instead of propagating
@@ -359,6 +381,16 @@ impl App {
                             self.input = Input::new(self.a2l_path.clone());
                             self.input_prompt = "A2L File Path".to_string();
                             self.input_action = InputAction::A2LPath;
+                        }
+                        MenuItem::LoadHex => {
+                            self.mode = AppMode::Input;
+                            self.prev_mode = Some(AppMode::Menu);
+                            self.input = Input::new(self.hex_path.clone());
+                            self.input_prompt = "HEX File Path".to_string();
+                            self.input_action = InputAction::HexPath;
+                        }
+                        MenuItem::VerifyChecksum => {
+                            self.run_checksum_verification().await?;
                         }
                         MenuItem::CombinedView => {
                             self.mode = AppMode::CombinedView;
@@ -994,6 +1026,10 @@ impl App {
                         self.load_a2l_file(&value).await?;
                         self.mode = AppMode::Menu;
                     }
+                    InputAction::HexPath => {
+                        self.load_hex_file(&value)?;
+                        self.mode = AppMode::Menu;
+                    }
                     InputAction::None => {}
                 }
                 self.prev_mode = None;
@@ -1240,6 +1276,136 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn load_hex_file(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use xcp_client::hex::HexImage;
+
+        if path.is_empty() {
+            self.error = Some("HEX file path cannot be empty".to_string());
+            return Ok(());
+        }
+
+        match HexImage::from_file(path) {
+            Ok(image) => {
+                let total_bytes = image.total_bytes();
+                let range_info = image.address_range().map(|(lo, hi)| {
+                    format!(" [0x{:08X}..0x{:08X}]", lo, hi)
+                }).unwrap_or_default();
+
+                self.hex_image = Some(image);
+                self.hex_path = path.to_string();
+                self.checksum_report = None; // Clear old report
+                self.status = Some(format!(
+                    "HEX loaded: {} bytes{}", total_bytes, range_info
+                ));
+            }
+            Err(e) => {
+                self.error = Some(format!("Failed to load HEX: {}", e));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn run_checksum_verification(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        use xcp_client::A2lReader;
+        use xcp_client::checksum::verify_segments;
+
+        if !self.connected {
+            self.error = Some("Not connected to slave".to_string());
+            return Ok(());
+        }
+
+        let hex_image = match &self.hex_image {
+            Some(img) => img.clone(),
+            None => {
+                self.error = Some("No HEX file loaded. Load a HEX file first.".to_string());
+                return Ok(());
+            }
+        };
+
+        if self.a2l_path.is_empty() {
+            self.error = Some("No A2L file loaded".to_string());
+            return Ok(());
+        }
+
+        // Load segments from A2L
+        let a2l_path = self.a2l_path.clone();
+        let segments = match tokio::task::spawn_blocking(move || {
+            A2lReader::load(&a2l_path).map(|r| r.get_memory_segments())
+        }).await? {
+            Ok(segs) => segs,
+            Err(e) => {
+                self.error = Some(format!("Failed to load A2L: {}", e));
+                return Ok(());
+            }
+        };
+
+        if segments.is_empty() {
+            self.error = Some("No memory segments found in A2L".to_string());
+            return Ok(());
+        }
+
+        self.loading = true;
+        self.loading_msg = format!("Verifying {} segments...", segments.len());
+
+        let client = self.client.lock().await;
+        let slave_arc = match client.current_slave() {
+            Some(s) => s,
+            None => {
+                self.loading = false;
+                self.error = Some("No slave selected".to_string());
+                return Ok(());
+            }
+        };
+        drop(client);
+
+        let mut slave = slave_arc.lock().await;
+        match verify_segments(&mut slave, &hex_image, &segments, None).await {
+            Ok(report) => {
+                let summary = report.summary();
+                self.checksum_report = Some(report);
+                self.checksum_scroll = 0;
+                self.status = Some(summary);
+                self.mode = AppMode::ChecksumResult;
+            }
+            Err(e) => {
+                self.error = Some(format!("Verification error: {}", e));
+            }
+        }
+
+        self.loading = false;
+        Ok(())
+    }
+
+    async fn handle_checksum_result_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = AppMode::Menu;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.checksum_scroll > 0 {
+                    self.checksum_scroll -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(ref report) = self.checksum_report {
+                    // Total lines = segments + chunk sub-rows
+                    let total_lines: usize = report.results.iter().map(|r| {
+                        1 + r.chunks.as_ref().map_or(0, |c| c.len())
+                    }).sum();
+                    if self.checksum_scroll < total_lines.saturating_sub(1) {
+                        self.checksum_scroll += 1;
+                    }
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Ok(false);
+            }
+            _ => {}
+        }
+        Ok(true)
     }
 
     fn convert_characteristic(ch: xcp_client::A2lCharacteristic) -> Option<xcp_client::CalibrationParam> {
@@ -1528,6 +1694,7 @@ impl App {
             AppMode::Input => self.render_input(frame, chunks[1]),
             AppMode::SelectA2L => self.render_select_a2l(frame, chunks[1]),
             AppMode::SearchDialog => self.render_search_dialog(frame, chunks[1]),
+            AppMode::ChecksumResult => self.render_checksum_result(frame, chunks[1]),
             AppMode::EventSelect => {
                 self.render_combined_view(frame, chunks[1]);
                 self.render_event_select(frame, chunks[1]);
@@ -2554,5 +2721,159 @@ impl App {
 
         frame.render_widget(Clear, area);
         frame.render_widget(loading, area);
+    }
+
+    fn render_checksum_result(&self, frame: &mut Frame, area: Rect) {
+        use xcp_client::checksum::SegmentStatus;
+
+        let report = match &self.checksum_report {
+            Some(r) => r,
+            None => {
+                let msg = Paragraph::new("\n  No checksum report available.  \n")
+                    .style(Style::default().fg(Color::Yellow))
+                    .block(
+                        Block::default()
+                            .title(" Checksum Verification ")
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(MATRIX_GREEN)),
+                    );
+                frame.render_widget(msg, area);
+                return;
+            }
+        };
+
+        // Split into summary (top) and results list (bottom)
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(5), Constraint::Min(0)])
+            .split(area);
+
+        // Summary panel
+        let all_ok = report.all_passed();
+        let summary_color = if all_ok { Color::Green } else { Color::Red };
+        let summary_text = vec![
+            Line::from(vec![
+                Span::styled("Total: ", Style::default().fg(MATRIX_GREEN)),
+                Span::styled(format!("{}", report.total_segments()), Style::default().fg(Color::White)),
+                Span::raw("  "),
+                Span::styled("Pass: ", Style::default().fg(Color::Green)),
+                Span::styled(format!("{}", report.passed()), Style::default().fg(Color::Green)),
+                Span::raw("  "),
+                Span::styled("Fail: ", Style::default().fg(Color::Red)),
+                Span::styled(format!("{}", report.failed()), Style::default().fg(if report.failed() > 0 { Color::Red } else { Color::White })),
+                Span::raw("  "),
+                Span::styled("Skip: ", Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{}", report.skipped()), Style::default().fg(Color::Yellow)),
+                Span::raw("  "),
+                Span::styled("Error: ", Style::default().fg(Color::Magenta)),
+                Span::styled(format!("{}", report.errors()), Style::default().fg(if report.errors() > 0 { Color::Magenta } else { Color::White })),
+            ]),
+            Line::from(Span::styled(
+                if all_ok { "✓ All segments verified OK" } else { "✗ Verification issues detected" },
+                Style::default().fg(summary_color).add_modifier(Modifier::BOLD),
+            )),
+        ];
+
+        let summary = Paragraph::new(summary_text)
+            .block(
+                Block::default()
+                    .title(" Verification Summary ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(summary_color)),
+            );
+        frame.render_widget(summary, chunks[0]);
+
+        // Results list — build lines including chunk sub-rows for chunked segments
+        let mut items: Vec<ListItem> = Vec::new();
+        let mut line_idx = 0;
+
+        for (_i, r) in report.results.iter().enumerate() {
+            let (status_str, status_color) = match &r.status {
+                SegmentStatus::Pass => ("PASS", Color::Green),
+                SegmentStatus::Fail => ("FAIL", Color::Red),
+                SegmentStatus::Skipped(_) => ("SKIP", Color::Yellow),
+                SegmentStatus::Error(_) => ("ERR ", Color::Magenta),
+            };
+
+            let detail = match &r.status {
+                SegmentStatus::Skipped(reason) => format!(" ({})", reason),
+                SegmentStatus::Error(msg) => format!(" ({})", msg),
+                _ => String::new(),
+            };
+
+            let chunk_info = if let Some(ref cks) = r.chunks {
+                format!(" [{} chunks]", cks.len())
+            } else {
+                String::new()
+            };
+
+            let style = if line_idx == self.checksum_scroll {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MATRIX_GREEN)
+            };
+
+            let line = Line::from(vec![
+                Span::styled(format!(" [{status_str}] "), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:<20} ", r.name), style),
+                Span::styled(format!("0x{:08X} ", r.address), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{:>8} B ", r.size), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<12} ", r.algorithm), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("M:0x{:08X} S:0x{:08X}", r.master_checksum, r.slave_checksum),
+                    if r.passed { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) },
+                ),
+                Span::styled(chunk_info, Style::default().fg(Color::Cyan)),
+                Span::styled(detail, Style::default().fg(status_color)),
+            ]);
+
+            items.push(ListItem::new(line));
+            line_idx += 1;
+
+            // Show chunk sub-rows if this segment has chunks
+            if let Some(ref cks) = r.chunks {
+                for c in cks {
+                    let chunk_style = if line_idx == self.checksum_scroll {
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+
+                    let chunk_status_color = if c.passed { Color::Green } else { Color::Red };
+                    let chunk_status_str = if c.passed { "  OK" } else { "FAIL" };
+
+                    let chunk_line = Line::from(vec![
+                        Span::styled("   ", Style::default()),
+                        Span::styled(format!(" [{chunk_status_str}] "), Style::default().fg(chunk_status_color)),
+                        Span::styled(format!("chunk +0x{:08X} ", c.offset), chunk_style),
+                        Span::styled(format!("{:>8} B ", c.size), chunk_style),
+                        Span::styled("             ", Style::default()),
+                        Span::styled(
+                            format!("M:0x{:08X} S:0x{:08X}", c.master_checksum, c.slave_checksum),
+                            Style::default().fg(chunk_status_color),
+                        ),
+                    ]);
+
+                    items.push(ListItem::new(chunk_line));
+                    line_idx += 1;
+                }
+            }
+        }
+
+        let total_lines = line_idx;
+        let title = format!(
+            " Segments ({}/{}) — j/k: scroll, Esc: back ",
+            self.checksum_scroll + 1,
+            total_lines
+        );
+
+        let list = List::new(items).block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(MATRIX_GREEN)),
+        );
+
+        frame.render_widget(list, chunks[1]);
     }
 }

@@ -2166,6 +2166,9 @@ pub async fn a2l_load(
             cal_values: Arc::new(RwLock::new(HashMap::new())),
             daq_running: Arc::new(RwLock::new(false)),
             page_mode: Arc::new(RwLock::new(crate::slave::PageMode::Reference)),
+            hex_image: Arc::new(RwLock::new(None)),
+            hex_filename: Arc::new(RwLock::new(None)),
+            checksum_report: Arc::new(RwLock::new(None)),
         };
 
         state.add_device(device).await;
@@ -3286,5 +3289,364 @@ pub async fn daq_detail_api(
     Json(json!({
         "success": false,
         "error": "Measurement not found"
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Checksum verification routes
+// ---------------------------------------------------------------------------
+
+/// Checksum page (GET /checksum)
+pub async fn checksum_page(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Html<String> {
+    let devices = state.all_devices().await;
+
+    // Determine selected device
+    let selected_device_id = params
+        .get("device")
+        .cloned()
+        .or_else(|| {
+            // Try current device, then first device
+            None
+        });
+
+    let selected_device_id = if let Some(id) = selected_device_id {
+        Some(id)
+    } else if let Some(current) = state.current_device().await {
+        Some(current.id.clone())
+    } else {
+        devices.first().map(|d| d.id.clone())
+    };
+
+    let devices_data: Vec<serde_json::Value> = devices
+        .iter()
+        .map(|d| {
+            json!({
+                "id": d.id,
+                "name": d.name,
+                "connected": d.connected,
+                "selected": selected_device_id.as_deref() == Some(&d.id),
+            })
+        })
+        .collect();
+
+    let mut data = json!({
+        "devices": devices_data,
+    });
+
+    // If a device is selected, add its details
+    if let Some(ref sel_id) = selected_device_id {
+        if let Some(device) = state.get_device(sel_id).await {
+            let hex_filename = device.hex_filename.read().await.clone();
+            let report = device.checksum_report.read().await.clone();
+
+            // Count segments from A2L
+            let segment_count = {
+                let a2l_path = device.a2l_path.clone();
+                if !a2l_path.is_empty() {
+                    use crate::A2lReader;
+                    match A2lReader::load(&a2l_path) {
+                        Ok(reader) => reader.get_memory_segments().len(),
+                        Err(_) => 0,
+                    }
+                } else {
+                    0
+                }
+            };
+
+            data["selected_device"] = json!({
+                "id": device.id,
+                "name": device.name,
+                "connected": device.connected,
+            });
+            data["hex_filename"] = json!(hex_filename);
+            data["segment_count"] = json!(segment_count);
+
+            // Add report data if available
+            if let Some(ref report) = report {
+                let results_data: Vec<serde_json::Value> = report
+                    .results
+                    .iter()
+                    .map(|r| {
+                        let (is_pass, is_fail, is_skipped, is_error, status_detail) = match &r.status {
+                            crate::checksum::SegmentStatus::Pass => (true, false, false, false, None),
+                            crate::checksum::SegmentStatus::Fail => (false, true, false, false, None),
+                            crate::checksum::SegmentStatus::Skipped(reason) => {
+                                (false, false, true, false, Some(reason.clone()))
+                            }
+                            crate::checksum::SegmentStatus::Error(msg) => {
+                                (false, false, false, true, Some(msg.clone()))
+                            }
+                        };
+
+                        let (has_chunks, chunk_count, chunks_data) = if let Some(ref chunks) = r.chunks {
+                            let cd: Vec<serde_json::Value> = chunks.iter().map(|c| {
+                                json!({
+                                    "offset_hex": format!("{:08X}", c.offset),
+                                    "size": c.size,
+                                    "master_hex": format!("{:08X}", c.master_checksum),
+                                    "slave_hex": format!("{:08X}", c.slave_checksum),
+                                    "passed": c.passed,
+                                })
+                            }).collect();
+                            (true, chunks.len(), Some(cd))
+                        } else {
+                            (false, 0, None)
+                        };
+
+                        json!({
+                            "name": r.name,
+                            "address_hex": format!("{:08X}", r.address),
+                            "size": r.size,
+                            "algorithm": r.algorithm,
+                            "page": r.page,
+                            "master_hex": format!("{:08X}", r.master_checksum),
+                            "slave_hex": format!("{:08X}", r.slave_checksum),
+                            "is_pass": is_pass,
+                            "is_fail": is_fail,
+                            "is_skipped": is_skipped,
+                            "is_error": is_error,
+                            "status_detail": status_detail,
+                            "has_chunks": has_chunks,
+                            "chunk_count": chunk_count,
+                            "chunks": chunks_data,
+                        })
+                    })
+                    .collect();
+
+                data["report"] = json!({
+                    "total": report.total_segments(),
+                    "passed": report.passed(),
+                    "failed_count": report.failed(),
+                    "skipped_count": report.skipped(),
+                    "error_count": report.errors(),
+                    "all_passed": report.all_passed(),
+                    "results": results_data,
+                });
+            }
+        }
+    }
+
+    let status = state.take_status().await;
+    let error = state.take_error().await;
+
+    let content = state.templates.checksum_page(&data);
+    Html(templates::page("Checksum", &content, status.as_deref(), error.as_deref()))
+}
+
+/// HEX file upload API (POST /api/hex/load/:device_id)
+pub async fn hex_load(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let mut file_data = None;
+    let mut file_name = None;
+
+    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
+        let name = field.name().unwrap_or("").to_string();
+
+        if name == "hex_file" {
+            if let Some(filename) = field.file_name() {
+                file_name = Some(filename.to_string());
+                match field.bytes().await {
+                    Ok(bytes) => {
+                        file_data = Some(bytes);
+                    }
+                    Err(e) => {
+                        return Json(json!({
+                            "success": false,
+                            "error": format!("Failed to read file: {}", e)
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    let (fname, fdata) = match (file_name, file_data) {
+        (Some(n), Some(d)) => (n, d),
+        _ => {
+            return Json(json!({
+                "success": false,
+                "error": "No HEX file uploaded"
+            }));
+        }
+    };
+
+    // Parse the HEX data
+    let hex_str = match std::str::from_utf8(&fdata) {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            return Json(json!({
+                "success": false,
+                "error": format!("Invalid UTF-8 in HEX file: {}", e)
+            }));
+        }
+    };
+
+    let hex_image = match tokio::task::spawn_blocking(move || {
+        crate::hex::HexImage::from_str(&hex_str)
+    })
+    .await
+    {
+        Ok(Ok(image)) => image,
+        Ok(Err(e)) => {
+            return Json(json!({
+                "success": false,
+                "error": format!("HEX parse error: {}", e)
+            }));
+        }
+        Err(e) => {
+            return Json(json!({
+                "success": false,
+                "error": format!("Task error: {}", e)
+            }));
+        }
+    };
+
+    let byte_count = hex_image.total_bytes();
+
+    // Store in device state
+    if let Some(device) = state.get_device(&device_id).await {
+        *device.hex_image.write().await = Some(hex_image);
+        *device.hex_filename.write().await = Some(fname.clone());
+        // Clear previous report when new HEX is loaded
+        *device.checksum_report.write().await = None;
+    } else {
+        return Json(json!({
+            "success": false,
+            "error": "Device not found"
+        }));
+    }
+
+    Json(json!({
+        "success": true,
+        "message": format!("{} loaded ({} bytes of data)", fname, byte_count)
+    }))
+}
+
+/// Checksum verification API (POST /api/checksum/verify/:device_id)
+pub async fn checksum_verify(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+) -> impl IntoResponse {
+    // Get device
+    let device = match state.get_device(&device_id).await {
+        Some(d) => d,
+        None => {
+            return Json(json!({
+                "success": false,
+                "error": "Device not found"
+            }));
+        }
+    };
+
+    // Check connected
+    if !device.connected {
+        return Json(json!({
+            "success": false,
+            "error": "Device is not connected"
+        }));
+    }
+
+    // Check HEX image loaded
+    let hex_image = device.hex_image.read().await.clone();
+    let hex_image = match hex_image {
+        Some(img) => img,
+        None => {
+            return Json(json!({
+                "success": false,
+                "error": "No HEX file loaded for this device"
+            }));
+        }
+    };
+
+    // Get memory segments from A2L
+    let segments = {
+        let a2l_path = device.a2l_path.clone();
+        if a2l_path.is_empty() {
+            return Json(json!({
+                "success": false,
+                "error": "No A2L file loaded for this device"
+            }));
+        }
+
+        use crate::A2lReader;
+        match A2lReader::load(&a2l_path) {
+            Ok(reader) => reader.get_memory_segments(),
+            Err(e) => {
+                return Json(json!({
+                    "success": false,
+                    "error": format!("Failed to load A2L: {:?}", e)
+                }));
+            }
+        }
+    };
+
+    if segments.is_empty() {
+        return Json(json!({
+            "success": false,
+            "error": "No memory segments found in A2L file"
+        }));
+    }
+
+    // Get slave ID and run verification
+    let slave_id = match device.slave_id {
+        Some(id) => id,
+        None => {
+            return Json(json!({
+                "success": false,
+                "error": "Device has no slave ID"
+            }));
+        }
+    };
+
+    let report = {
+        let client = state.client.lock().await;
+        let slave_arc = match client.get_slave(slave_id) {
+            Some(s) => s,
+            None => {
+                return Json(json!({
+                    "success": false,
+                    "error": "Slave not found in client"
+                }));
+            }
+        };
+        drop(client); // Release client lock before locking slave
+
+        let mut slave = slave_arc.lock().await;
+        match crate::checksum::verify_segments(&mut slave, &hex_image, &segments, None).await {
+            Ok(report) => report,
+            Err(e) => {
+                return Json(json!({
+                    "success": false,
+                    "error": format!("Verification error: {}", e)
+                }));
+            }
+        }
+    };
+
+    // Store report
+    *device.checksum_report.write().await = Some(report.clone());
+
+    let summary = report.summary();
+    let all_passed = report.all_passed();
+
+    if all_passed {
+        state.set_status(summary).await;
+    } else {
+        state.set_error(summary).await;
+    }
+
+    Json(json!({
+        "success": true,
+        "all_passed": all_passed,
+        "summary": report.summary(),
+        "total": report.total_segments(),
+        "passed": report.passed(),
+        "failed": report.failed(),
     }))
 }

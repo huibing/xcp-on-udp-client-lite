@@ -177,6 +177,55 @@ impl XcpChecksum {
             _ => None,
         }
     }
+
+    /// Convert to XCP protocol byte code
+    pub fn to_code(&self) -> u8 {
+        match self {
+            Self::Add11 => 1,
+            Self::Add12 => 2,
+            Self::Add14 => 3,
+            Self::Add22 => 4,
+            Self::Add24 => 5,
+            Self::Add44 => 6,
+            Self::Crc16 => 7,
+            Self::Crc16Citt => 8,
+            Self::Crc32 => 9,
+            Self::UserDefined(code) => *code,
+        }
+    }
+
+    /// Parse from XCP protocol byte code
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Add11),
+            2 => Some(Self::Add12),
+            3 => Some(Self::Add14),
+            4 => Some(Self::Add22),
+            5 => Some(Self::Add24),
+            6 => Some(Self::Add44),
+            7 => Some(Self::Crc16),
+            8 => Some(Self::Crc16Citt),
+            9 => Some(Self::Crc32),
+            255 => Some(Self::UserDefined(255)),
+            _ => None,
+        }
+    }
+
+    /// Get human-readable name
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Add11 => "XCP_ADD_11",
+            Self::Add12 => "XCP_ADD_12",
+            Self::Add14 => "XCP_ADD_14",
+            Self::Add22 => "XCP_ADD_22",
+            Self::Add24 => "XCP_ADD_24",
+            Self::Add44 => "XCP_ADD_44",
+            Self::Crc16 => "XCP_CRC_16",
+            Self::Crc16Citt => "XCP_CRC_16_CITT",
+            Self::Crc32 => "XCP_CRC_32",
+            Self::UserDefined(_) => "XCP_USER_DEFINED",
+        }
+    }
 }
 
 /// XCP write access permission for a page

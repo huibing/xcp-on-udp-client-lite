@@ -45,6 +45,10 @@ async-trait = "=0.1"
 uuid = { version = "=1.6", features = ["v4", "serde"] }
 rust-embed = { version = "8.11.0", features = ["include-exclude", "debug-embed"] }
 
+# Checksum computation
+crc = "=3.2.1"
+ihex = "=3.0.0"
+
 [profile.release]
 opt-level = 3
 lto = true

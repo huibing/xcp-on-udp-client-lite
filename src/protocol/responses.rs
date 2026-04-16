@@ -204,15 +204,35 @@ pub fn parse_daq_clock(data: &[u8]) -> Result<u64, String> {
 }
 
 /// Parse BUILD_CHECKSUM response
+/// Response format (after RES byte):
+/// BYTE 0: checksum_type (u8) — algorithm used by slave
+/// BYTE 1-2: reserved (u16) — skip
+/// BYTE 3-6: checksum_value (u32, little-endian)
 pub fn parse_checksum(data: &[u8]) -> Result<(u8, u32), String> {
-    if data.len() < 5 {
+    if data.len() < 7 {
         return Err("Checksum response too short".to_string());
     }
 
     let checksum_type = data[0];
-    let checksum_value = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+    // data[1], data[2] are reserved
+    let checksum_value = u32::from_le_bytes([data[3], data[4], data[5], data[6]]);
 
     Ok((checksum_type, checksum_value))
+}
+
+/// Parse BUILD_CHECKSUM error response
+/// Error format (after ERR byte + error_code):
+/// BYTE 0-1: MTA_BLOCK_SIZE_ALIGN (u16, little-endian)
+/// BYTE 2-5: maximum block size (u32, little-endian)
+pub fn parse_checksum_error(data: &[u8]) -> Result<(u16, u32), String> {
+    if data.len() < 6 {
+        return Err("Checksum error response too short".to_string());
+    }
+
+    let alignment = u16::from_le_bytes([data[0], data[1]]);
+    let max_block_size = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
+
+    Ok((alignment, max_block_size))
 }
 
 /// Parse GET_CAL_PAGE response
@@ -439,8 +459,8 @@ mod tests {
 
     #[test]
     fn test_parse_checksum_valid() {
-        // [type=0x01, value=0x12345678]
-        let data = vec![0x01, 0x78, 0x56, 0x34, 0x12];
+        // [type=0x01, reserved, reserved, value=0x12345678 LE]
+        let data = vec![0x01, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12];
         let (checksum_type, checksum_value) = parse_checksum(&data).unwrap();
         assert_eq!(checksum_type, 0x01);
         assert_eq!(checksum_value, 0x12345678);
@@ -448,7 +468,7 @@ mod tests {
 
     #[test]
     fn test_parse_checksum_too_short() {
-        let data = vec![0x01, 0x78, 0x56, 0x34];
+        let data = vec![0x01, 0x00, 0x00, 0x78, 0x56, 0x34];
         assert!(parse_checksum(&data).is_err());
     }
 

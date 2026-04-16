@@ -388,6 +388,11 @@ impl TemplateEngine {
         // The caller (routes.rs) will wrap it with templates::page()
         self.render("slaves", &data)
     }
+
+    /// Render checksum verification page
+    pub fn checksum_page(&self, data: &serde_json::Value) -> String {
+        self.render("checksum", data)
+    }
 }
 
 impl Default for TemplateEngine {
@@ -408,6 +413,7 @@ pub fn page(title: &str, content: &str, status: Option<&str>, error: Option<&str
         "active_calibration": title == "Calibration",
         "active_daq": title == "DAQ",
         "active_a2l": title == "A2L",
+        "active_checksum": title == "Checksum",
     });
     engine.render("base", &data)
 }

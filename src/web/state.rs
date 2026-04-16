@@ -5,7 +5,9 @@
 //! Multi-slave support: tracks multiple slaves with their own A2L data.
 
 use crate::calibration::{CalibrationManager, CalibrationValue};
+use crate::checksum::VerificationReport;
 use crate::daq::DaqManager;
+use crate::hex::HexImage;
 use crate::slave::{PageMode, SlaveId, SlaveInfo};
 use crate::variable::{DeviceVariable, VariableSearchManager};
 use crate::web::templates::TemplateEngine;
@@ -43,6 +45,12 @@ pub struct DeviceState {
     pub daq_running: Arc<RwLock<bool>>,
     /// Current page mode (Working or Reference)
     pub page_mode: Arc<RwLock<PageMode>>,
+    /// Loaded HEX image for checksum verification
+    pub hex_image: Arc<RwLock<Option<HexImage>>>,
+    /// HEX file name (original uploaded filename)
+    pub hex_filename: Arc<RwLock<Option<String>>>,
+    /// Last checksum verification report
+    pub checksum_report: Arc<RwLock<Option<VerificationReport>>>,
 }
 
 impl DeviceState {
@@ -61,7 +69,10 @@ impl DeviceState {
             daq_manager: Arc::new(RwLock::new(DaqManager::new())),
             cal_values: Arc::new(RwLock::new(HashMap::new())),
             daq_running: Arc::new(RwLock::new(false)),
-            page_mode: Arc::new(RwLock::new(PageMode::Reference)), // Default to Reference (read-only)
+            page_mode: Arc::new(RwLock::new(PageMode::Reference)),
+            hex_image: Arc::new(RwLock::new(None)),
+            hex_filename: Arc::new(RwLock::new(None)),
+            checksum_report: Arc::new(RwLock::new(None)),
         }
     }
 

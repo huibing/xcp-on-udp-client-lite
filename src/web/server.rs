@@ -105,6 +105,10 @@ impl WebServer {
             // A2L
             .route("/a2l", get(routes::a2l_page))
             .route("/api/a2l/load", post(routes::a2l_load))
+            // Checksum verification
+            .route("/checksum", get(routes::checksum_page))
+            .route("/api/hex/load/:device_id", post(routes::hex_load))
+            .route("/api/checksum/verify/:device_id", post(routes::checksum_verify))
             // State and middleware
             .layer(axum::middleware::from_fn(auth_middleware))
             .layer(TraceLayer::new_for_http())
