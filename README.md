@@ -9,8 +9,12 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 - **Memory Access**: UPLOAD, DOWNLOAD, SHORT_UPLOAD, SHORT_DOWNLOAD
 - **Calibration**: Read/write calibration parameters with device association
 - **DAQ (Data Acquisition)**: Configure and run DAQ lists per slave
+- **Checksum Verification**: BUILD_CHECKSUM with 9 XCP algorithms (ADD, CRC)
 - **A2L Integration**: Each slave has independent A2L calibration/measurement data
+- **HEX File Support**: Intel HEX parser for firmware reference images
+- **CLI Subcommands**: Non-interactive `calibrate` and `verify` for CI/automation
 - **Web UI**: Browser-based interface with multi-slave management
+- **TUI**: Interactive terminal UI for single-device debugging
 - **Transport Abstraction**: UDP support with CAN reserved for future extension
 
 ## Supported Data Types
@@ -43,9 +47,21 @@ lib.rs → client.rs (XcpClient - Multi-Slave Manager)
     ├── slave.rs           # XcpSlave - Individual slave context
     ├── calibration.rs     # Calibration parameter management
     ├── daq.rs             # DAQ management
+    ├── checksum.rs        # BUILD_CHECKSUM algorithms & verification
+    ├── hex.rs             # Intel HEX file parser
     ├── variable.rs        # Device-associated variables
+    ├── calibrate.rs       # CLI calibrate subcommand
+    ├── verify.rs          # CLI verify subcommand
     │
-    └── web/               # Web UI Module
+    ├── a2l/               # A2L description file support
+    │   ├── reader.rs      # A2L file parser
+    │   ├── types.rs       # A2L data types
+    │   └── compute_method.rs  # COMPU_METHOD conversion
+    │
+    ├── tui/               # Terminal UI (single-device mode)
+    │   └── app.rs         # Ratatui-based interactive CLI
+    │
+    └── web/               # Web UI (multi-device mode)
         ├── server.rs      # Axum HTTP server
         ├── auth.rs        # Session authentication
         ├── routes.rs      # HTTP route handlers
@@ -132,6 +148,73 @@ Note: The Web UI supports only a single concurrent user. If a user is already lo
 8. **Disconnect Slaves**:
    - Click "Disconnect" to disconnect specific slave
    - Or use main Disconnect to disconnect current slave
+
+### Calibrate ECU Parameters (CLI)
+
+Write calibration parameters to an ECU non-interactively. Two modes are supported:
+
+#### Single Variable Mode
+
+Write one parameter at a time:
+
+```bash
+# Write a scalar value
+cargo run --release -- calibrate --a2l ecu.a2l --var my_params.delay --value 100
+
+# Write an array value (comma-separated)
+cargo run --release -- calibrate --a2l ecu.a2l --var my_params.array --value "1,2,3,4"
+
+# Override slave address (default is read from A2L)
+cargo run --release -- calibrate --a2l ecu.a2l --var my_params.delay --value 100 --addr 192.168.1.10:5555
+```
+
+#### DCM File Mode
+
+Write multiple parameters from a DCM (Data Conservation and Measurement) file:
+
+```bash
+# Apply all matching parameters from a DCM file
+cargo run --release -- calibrate --a2l ecu.a2l --dcm calibration.DCM
+
+# With address override
+cargo run --release -- calibrate --a2l ecu.a2l --dcm calibration.DCM --addr 192.168.1.10:5555
+```
+
+DCM files contain physical values (display units). The tool automatically converts physical values to raw ECU representation using the COMPU_METHOD defined in the A2L file before writing.
+
+Supported DCM parameter types: FESTWERT (scalar), FESTWERTEBLOCK (array), KENNLINIE (curve), GRUPPENKENNFELD (map).
+
+### Verify ECU Flash Checksums (CLI)
+
+Verify ECU flash memory integrity by comparing BUILD_CHECKSUM results against an Intel HEX reference file:
+
+```bash
+# Basic verification
+cargo run --release -- verify --a2l ecu.a2l --hex firmware.hex
+
+# With custom max block size (default: 16 KiB)
+cargo run --release -- verify --a2l ecu.a2l --hex firmware.hex --max-block-size 4096
+
+# With address override
+cargo run --release -- verify --a2l ecu.a2l --hex firmware.hex --addr 192.168.1.10:5555
+```
+
+The verify workflow:
+1. Loads A2L file to determine memory segments and checksum algorithm
+2. Loads Intel HEX file as the reference image
+3. Connects to the XCP slave
+4. For each memory segment, computes the reference checksum from the HEX data and requests the slave's BUILD_CHECKSUM
+5. Compares results and prints a per-segment pass/fail report
+
+Example output:
+```
+=== Checksum Verification Report ===
+Segment  Address Range              Size      Algorithm  Status
+──────────────────────────────────────────────────────────────────
+0        0x80000000..0x8001FFFF     128 KiB   CRC_32     ✓ PASS
+1        0x80020000..0x8003FFFF     128 KiB   CRC_32     ✗ FAIL
+  Reference: 0xA3B2C1D0  Slave: 0x12345678
+```
 
 ### Run Interactive CLI (TUI)
 
@@ -309,16 +392,21 @@ cargo test test_name -- --nocapture
 ├── CLAUDE.md            # Development guide
 ├── docs/                # Documentation
 │   ├── multi-slave-refactor-plan.md
+│   ├── build_checksum_design.md
 │   └── specs/
 ├── src/
-│   ├── main.rs          # Application entry
+│   ├── main.rs          # Application entry & CLI args
 │   ├── lib.rs           # Library exports
 │   ├── client.rs        # Multi-slave XcpClient
 │   ├── slave.rs         # Individual slave context
 │   ├── calibration.rs   # Calibration management
 │   ├── daq.rs           # DAQ management
+│   ├── checksum.rs      # BUILD_CHECKSUM algorithms
+│   ├── hex.rs           # Intel HEX file parser
 │   ├── variable.rs      # Device-associated variables
-│   ├── a2l_reader.rs    # A2L file parsing
+│   ├── calibrate.rs     # CLI calibrate subcommand
+│   ├── verify.rs        # CLI verify subcommand
+│   ├── a2l/             # A2L file support
 │   ├── protocol/        # XCP protocol implementation
 │   ├── transport/       # Transport abstraction
 │   ├── tui/             # Terminal UI (single-device)
@@ -335,6 +423,22 @@ This project is provided as-is for educational and development purposes.
 Contributions are welcome! Please feel free to submit pull requests.
 
 ## Recent Changes
+
+### v0.4.0 - CLI Subcommands & Checksum Verification
+
+- ✅ **Calibrate Subcommand**: Non-interactive ECU calibration from command line
+  - Single variable mode: `--var name --value val`
+  - DCM file mode: `--dcm calibration.DCM` for batch calibration
+  - Physical → raw value conversion using A2L COMPU_METHOD
+- ✅ **Verify Subcommand**: ECU flash memory checksum verification
+  - Compares BUILD_CHECKSUM results against Intel HEX reference
+  - Per-segment pass/fail report with checksum details
+  - Configurable max block size for large segments
+- ✅ **BUILD_CHECKSUM**: Full XCP checksum implementation
+  - 9 algorithms: ADD_11/12/14/22/24/44, CRC_16, CRC_16_CITT, CRC_32
+  - Multi-page segment verification with automatic page switching
+  - Block splitting with additive sum / CRC-of-CRCs composition
+- ✅ **Intel HEX Parser**: Sparse memory image from .hex files
 
 ### v0.3.0 - Matrix Editor & UI Improvements
 
