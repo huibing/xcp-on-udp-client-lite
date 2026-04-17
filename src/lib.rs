@@ -16,7 +16,7 @@ pub mod hex;
 pub mod checksum;
 
 pub use client::XcpClient;
-pub use calibration::{CalibrationParam, CalibrationValue, CalibrationType, CalibrationManager};
+pub use calibration::{CalibrationParam, CalibrationValue, CalibrationType, CalibrationManager, matrix_to_flat};
 pub use daq::{DaqManager, Measurement, DaqRecord, DaqConfiguration, OdtEntryConfig};
 // Use types from a2l module
 pub use a2l::{

@@ -235,7 +235,7 @@ fn flat_to_matrix<T: Clone>(flat: &[T], rows: usize, cols: usize, order: Storage
 ///
 /// For ROW_DIR: flat[r * cols + c] = matrix[r][c]
 /// For COLUMN_DIR: flat[c * rows + r] = matrix[r][c]
-fn matrix_to_flat<T: Clone>(matrix: &[Vec<T>], rows: usize, cols: usize, order: StorageOrder) -> Vec<T> {
+pub fn matrix_to_flat<T: Clone>(matrix: &[Vec<T>], rows: usize, cols: usize, order: StorageOrder) -> Vec<T> {
     let mut flat = Vec::with_capacity(rows * cols);
     match order {
         StorageOrder::RowDir => {
