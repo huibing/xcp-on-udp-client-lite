@@ -452,6 +452,10 @@ pub struct DaqManager {
     csv_path: PathBuf,
     /// MDF4 output path (derived from csv_path)
     mdf4_path: PathBuf,
+    /// Whether CSV recording is enabled
+    csv_enabled: bool,
+    /// Whether MF4 recording is enabled
+    mf4_enabled: bool,
     /// Slave address for DAQ connection
     slave_addr: String,
     /// Number of DAQ lists configured
@@ -519,6 +523,8 @@ impl DaqManager {
             task_handle: Arc::new(RwLock::new(None)),
             csv_path: PathBuf::from("daq_data.csv"),
             mdf4_path: PathBuf::from("daq_data.mf4"),
+            csv_enabled: true,
+            mf4_enabled: true,
             slave_addr: "127.0.0.1:5555".to_string(),
             daq_list_count: 1,
             event_channel: 0,
@@ -571,6 +577,8 @@ impl DaqManager {
             task_handle: Arc::new(RwLock::new(None)),
             csv_path: PathBuf::from("daq_data.csv"),
             mdf4_path: PathBuf::from("daq_data.mf4"),
+            csv_enabled: true,
+            mf4_enabled: true,
             slave_addr: "127.0.0.1:5555".to_string(),
             daq_list_count: 1,
             event_channel: 0,
@@ -628,6 +636,26 @@ impl DaqManager {
     /// Get the MDF4 output file path
     pub fn get_mdf4_path(&self) -> &Path {
         &self.mdf4_path
+    }
+
+    /// Set the CSV output file path
+    pub fn set_csv_path<P: Into<PathBuf>>(&mut self, path: P) {
+        self.csv_path = path.into();
+    }
+
+    /// Set the MDF4 output file path
+    pub fn set_mdf4_path<P: Into<PathBuf>>(&mut self, path: P) {
+        self.mdf4_path = path.into();
+    }
+
+    /// Enable or disable CSV recording
+    pub fn set_csv_enabled(&mut self, enabled: bool) {
+        self.csv_enabled = enabled;
+    }
+
+    /// Enable or disable MF4 recording
+    pub fn set_mf4_enabled(&mut self, enabled: bool) {
+        self.mf4_enabled = enabled;
     }
 
     pub fn set_available_events(&mut self, events: Vec<crate::a2l::DaqEvent>) {
@@ -1566,8 +1594,8 @@ impl DaqManager {
             return Err("No measurements selected for recording".to_string());
         }
 
-        // Create per-event CSV files
-        {
+        // Create per-event CSV files (only if CSV recording is enabled)
+        if self.csv_enabled {
             let config = self.daq_config.read().await;
             let mut event_map: std::collections::BTreeMap<u16, Vec<String>> =
                 std::collections::BTreeMap::new();
@@ -1621,10 +1649,10 @@ impl DaqManager {
             }
         }
 
-        // Create MDF4 writer
+        // Create MDF4 writer (only if MF4 recording is enabled)
 
         #[cfg(feature = "mf4-native")]
-        {
+        if self.mf4_enabled {
             let mf4_path = self.mdf4_path.clone();
             let config = self.daq_config.read().await;
 
@@ -1703,7 +1731,7 @@ impl DaqManager {
         }
 
         #[cfg(feature = "mf4-rs-backend")]
-        {
+        if self.mf4_enabled {
             let mf4_path = self.mdf4_path.clone();
             let mf4_measurement_info = self.recording_measurement_info.read().await.clone();
             match MdfWriter::new(mf4_path.to_str().unwrap_or("daq_data.mf4")) {
@@ -1727,7 +1755,9 @@ impl DaqManager {
         }
 
         self.recording.store(true, Ordering::SeqCst);
-        tracing::info!("Recording started — writing to {} and {}", self.csv_path.display(), self.mdf4_path.display());
+        let csv_info = if self.csv_enabled { self.csv_path.display().to_string() } else { "(disabled)".to_string() };
+        let mf4_info = if self.mf4_enabled { self.mdf4_path.display().to_string() } else { "(disabled)".to_string() };
+        tracing::info!("Recording started — CSV: {}, MF4: {}", csv_info, mf4_info);
         Ok(())
     }
 

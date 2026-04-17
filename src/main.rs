@@ -3,6 +3,7 @@
 mod tui;
 mod calibrate;
 mod verify;
+mod daq_record;
 
 use std::fs::{self, OpenOptions};
 use std::path::Path;
@@ -70,19 +71,64 @@ enum Mode {
         #[arg(long)]
         max_block_size: Option<u32>,
     },
+    /// Record DAQ measurements to MF4 and/or CSV files.
+    ///
+    /// Runs until CTRL+C, then gracefully stops DAQ and saves output files.
+    /// All settings (A2L path, output files, measurements) are in the config.
+    ///
+    /// Config file format (TOML):
+    ///
+    ///   a2l = "path/to/description.a2l"
+    ///
+    ///   [connection]
+    ///   addr = "192.168.1.100:5555"   # optional, falls back to A2L
+    ///
+    ///   [output]
+    ///   mf4 = "recording.mf4"        # optional (at least one required)
+    ///   csv = "recording.csv"         # optional (at least one required)
+    ///
+    ///   [daq]
+    ///   event_channel = 0             # default event channel
+    ///
+    ///   [[events]]
+    ///   channel = 0
+    ///   measurements = ["speed", "rpm", "accel"]
+    ///
+    ///   [[events]]
+    ///   channel = 1
+    ///   measurements = ["coolant_temp", "oil_temp"]
+    #[command(verbatim_doc_comment)]
+    DaqRecord {
+        /// Path to TOML config file
+        #[arg(long)]
+        config: String,
+    },
 }
 
-/// Setup logging to a file in the logs directory
-fn setup_logging() -> Result<std::fs::File, Box<dyn std::error::Error>> {
+/// Derive a short mode label from the CLI arguments for log naming.
+fn mode_label(mode: &Option<Mode>) -> &'static str {
+    match mode {
+        Some(Mode::Web { .. }) => "web",
+        Some(Mode::Calibrate { .. }) => "calibrate",
+        Some(Mode::Verify { .. }) => "verify",
+        Some(Mode::DaqRecord { .. }) => "daq_record",
+        Some(Mode::Tui) | None => "tui",
+    }
+}
+
+/// Setup logging to a file in the logs directory.
+/// The log filename includes the subcommand so users can identify which
+/// CLI mode produced each log file.
+fn setup_logging(mode: &str) -> Result<std::fs::File, Box<dyn std::error::Error>> {
     // Create logs directory if it doesn't exist
     let logs_dir = Path::new("logs");
     if !logs_dir.exists() {
         fs::create_dir_all(logs_dir)?;
     }
 
-    // Generate log filename with current date and time
+    // Generate log filename: xcp_client_<mode>_<timestamp>.log
     let now = Local::now();
-    let log_filename = format!("xcp_client_{}.log", now.format("%Y%m%d_%H%M%S"));
+    let log_filename = format!("xcp_client_{}_{}.log", mode, now.format("%Y%m%d_%H%M%S"));
     let log_path = logs_dir.join(log_filename);
 
     // Create log file
@@ -100,9 +146,10 @@ fn setup_logging() -> Result<std::fs::File, Box<dyn std::error::Error>> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let mode = mode_label(&cli.mode);
 
-    // Initialize logging to file
-    let log_file = setup_logging()?;
+    // Initialize logging to file (filename includes mode)
+    let log_file = setup_logging(mode)?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -115,6 +162,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init()
         .ok();
 
+    tracing::info!("XCP Client started — mode: {}, args: {:?}", mode, std::env::args().collect::<Vec<_>>());
+
     match cli.mode {
         Some(Mode::Web { host, port }) => {
             run_web_ui(&host, port).await?;
@@ -124,6 +173,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Mode::Verify { a2l, hex, addr, max_block_size }) => {
             verify::run_verify(&a2l, &hex, addr, max_block_size).await?;
+        }
+        Some(Mode::DaqRecord { config }) => {
+            daq_record::run_daq_record(&config).await?;
         }
         _ => {
             run_tui().await?;

@@ -12,7 +12,7 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 - **Checksum Verification**: BUILD_CHECKSUM with 9 XCP algorithms (ADD, CRC)
 - **A2L Integration**: Each slave has independent A2L calibration/measurement data
 - **HEX File Support**: Intel HEX parser for firmware reference images
-- **CLI Subcommands**: Non-interactive `calibrate` and `verify` for CI/automation
+- **CLI Subcommands**: Non-interactive `calibrate`, `verify`, and `daq-record` for CI/automation
 - **Web UI**: Browser-based interface with multi-slave management
 - **TUI**: Interactive terminal UI for single-device debugging
 - **Transport Abstraction**: UDP support with CAN reserved for future extension
@@ -52,6 +52,7 @@ lib.rs → client.rs (XcpClient - Multi-Slave Manager)
     ├── variable.rs        # Device-associated variables
     ├── calibrate.rs       # CLI calibrate subcommand
     ├── verify.rs          # CLI verify subcommand
+    ├── daq_record.rs      # CLI daq-record subcommand
     │
     ├── a2l/               # A2L description file support
     │   ├── reader.rs      # A2L file parser
@@ -183,6 +184,47 @@ cargo run --release -- calibrate --a2l ecu.a2l --dcm calibration.DCM --addr 192.
 DCM files contain physical values (display units). The tool automatically converts physical values to raw ECU representation using the COMPU_METHOD defined in the A2L file before writing.
 
 Supported DCM parameter types: FESTWERT (scalar), FESTWERTEBLOCK (array), KENNLINIE (curve), GRUPPENKENNFELD (map).
+
+### Record DAQ Measurements (CLI)
+
+Record XCP DAQ measurements to MF4 and/or CSV files non-interactively. Runs until CTRL+C, then gracefully stops DAQ and saves the output files.
+
+```bash
+cargo run --release -- daq-record --config daq_record.config.toml
+```
+
+#### Config File Format (TOML)
+
+Create a config file specifying the A2L, output files, connection, and measurements:
+
+```toml
+a2l = "ecu.a2l"                    # Path to A2L description file (required)
+
+[connection]
+addr = "192.168.1.100:5555"        # Optional: falls back to A2L slave address
+
+[output]
+mf4 = "recording.mf4"             # Optional (at least one of mf4/csv required)
+csv = "recording.csv"              # Optional (at least one of mf4/csv required)
+
+[daq]
+event_channel = 0                  # Default event channel
+
+# Group measurements by event channel (omit to record all from A2L)
+[[events]]
+channel = 0
+measurements = ["vehicle_speed", "engine_rpm", "accel_pedal"]
+
+[[events]]
+channel = 1
+measurements = ["coolant_temp", "oil_temp"]
+```
+
+- If `[connection].addr` is omitted, the slave address is read from the A2L file
+- If `[[events]]` is omitted, all measurements from the A2L file are selected
+- Both MF4 and CSV can be recorded simultaneously; at least one `[output]` path is required
+- Invalid measurement names are warned and skipped (recording continues with valid ones)
+- On CTRL+C: recording stops → DAQ stops → `FREE_DAQ` restores the slave → disconnect
 
 ### Verify ECU Flash Checksums (CLI)
 
@@ -358,6 +400,7 @@ Each slave maintains independent:
 | axum | 0.7 | Web framework |
 | tower-http | 0.5 | HTTP middleware |
 | clap | 4 | CLI argument parsing |
+| toml | 0.8 | TOML config file parsing |
 | uuid | 1.6 | Slave ID generation |
 | async-trait | 0.1 | Transport abstraction |
 
@@ -406,6 +449,7 @@ cargo test test_name -- --nocapture
 │   ├── variable.rs      # Device-associated variables
 │   ├── calibrate.rs     # CLI calibrate subcommand
 │   ├── verify.rs        # CLI verify subcommand
+│   ├── daq_record.rs    # CLI daq-record subcommand
 │   ├── a2l/             # A2L file support
 │   ├── protocol/        # XCP protocol implementation
 │   ├── transport/       # Transport abstraction

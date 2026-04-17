@@ -1,0 +1,36 @@
+# Sample DAQ Recording Configuration
+#
+# Usage: cargo run --release -- daq-record --config daq_record.config.toml
+#
+# Both MF4 and CSV output can be enabled simultaneously.
+# At least one output format must be specified.
+
+# Path to A2L description file (required)
+a2l = "abc.a2l"
+
+[connection]
+# Slave address (IP:port). If omitted, uses the address from the A2L file.
+addr = "192.168.1.100:5555"
+
+[output]
+# Output files — specify one or both (at least one is required)
+mf4 = "recording.mf4"
+csv = "recording.csv"
+
+[daq]
+# Default event channel for measurements that don't have an explicit [[events]] entry.
+# Event channels are defined in the A2L file (e.g., 0 = 5ms, 1 = 10ms, 2 = 20ms).
+event_channel = 0
+
+# Group measurements by event channel.
+# Each [[events]] entry assigns a list of measurement names to one event channel.
+# If this entire section is omitted, ALL measurements from the A2L file are recorded
+# on the default event_channel.
+
+[[events]]
+channel = 0
+measurements = ["g_ethxcp_tx_counter", "g_ethxcp_rx_counter"]
+
+[[events]]
+channel = 1
+measurements = ["g_xcp_recv_cmd"]
