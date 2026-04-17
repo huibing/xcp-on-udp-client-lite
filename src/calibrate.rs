@@ -7,7 +7,7 @@
 use std::path::Path;
 use xcp_client::{
     A2lReader, CalibrationManager, CalibrationParam, CalibrationValue, CalibrationType,
-    PageMode, XcpClient, matrix_to_flat,
+    PageMode, StorageOrder, XcpClient, matrix_to_flat,
 };
 use xcp_client::transport::TransportConfig;
 use dcm_utils::DcmData;
@@ -222,6 +222,81 @@ async fn write_single_value(
     write_to_slave(&guard, param, &value).await
 }
 
+/// Convert a CalibrationValue matrix to ECU byte representation.
+///
+/// The A2L reader maps axis_descr[0] (X-axis) → rows and axis_descr[1] (Y-axis) → cols,
+/// which is the opposite of the ASAM standard convention (rows=Y, cols=X). This means
+/// our `matrix_to_flat(RowDir)` produces [X][Y] byte order, but ASAM ROW_DIR expects
+/// [Y][X]. The `.invert()` on storage_order corrects this universal dimension swap.
+///
+/// The web UI avoids this issue because `flat_to_matrix(order)` + `matrix_to_flat(order)`
+/// is a round-trip identity — both sides share the same dimension convention.
+fn matrix_value_to_bytes(
+    value: &CalibrationValue,
+    rows: usize,
+    cols: usize,
+    storage_order: StorageOrder,
+) -> Option<Vec<u8>> {
+    let order = storage_order.invert();
+    match value {
+        CalibrationValue::U8Matrix(mat) => Some(matrix_to_flat(mat, rows, cols, order)),
+        CalibrationValue::U16Matrix(mat) => {
+            let flat: Vec<u16> = matrix_to_flat(mat, rows, cols, order);
+            Some(flat.iter().flat_map(|v| v.to_le_bytes()).collect())
+        }
+        CalibrationValue::U32Matrix(mat) => {
+            let flat: Vec<u32> = matrix_to_flat(mat, rows, cols, order);
+            Some(flat.iter().flat_map(|v| v.to_le_bytes()).collect())
+        }
+        CalibrationValue::U64Matrix(mat) => {
+            let flat: Vec<u64> = matrix_to_flat(mat, rows, cols, order);
+            Some(flat.iter().flat_map(|v| v.to_le_bytes()).collect())
+        }
+        CalibrationValue::I8Matrix(mat) => {
+            let flat: Vec<i8> = matrix_to_flat(mat, rows, cols, order);
+            Some(flat.iter().map(|v| *v as u8).collect())
+        }
+        CalibrationValue::I16Matrix(mat) => {
+            let flat: Vec<i16> = matrix_to_flat(mat, rows, cols, order);
+            Some(flat.iter().flat_map(|v| v.to_le_bytes()).collect())
+        }
+        CalibrationValue::I32Matrix(mat) => {
+            let flat: Vec<i32> = matrix_to_flat(mat, rows, cols, order);
+            Some(flat.iter().flat_map(|v| v.to_le_bytes()).collect())
+        }
+        CalibrationValue::I64Matrix(mat) => {
+            let flat: Vec<i64> = matrix_to_flat(mat, rows, cols, order);
+            Some(flat.iter().flat_map(|v| v.to_le_bytes()).collect())
+        }
+        CalibrationValue::F32Matrix(mat) => {
+            let flat: Vec<f32> = matrix_to_flat(mat, rows, cols, order);
+            Some(flat.iter().flat_map(|v| v.to_le_bytes()).collect())
+        }
+        CalibrationValue::F64Matrix(mat) => {
+            let flat: Vec<f64> = matrix_to_flat(mat, rows, cols, order);
+            Some(flat.iter().flat_map(|v| v.to_le_bytes()).collect())
+        }
+        CalibrationValue::BoolMatrix(mat) => {
+            let flat: Vec<bool> = matrix_to_flat(mat, rows, cols, order);
+            Some(flat.iter().map(|v| if *v { 1u8 } else { 0u8 }).collect())
+        }
+        _ => None,
+    }
+}
+
+/// Extract (rows, cols) from a matrix CalibrationType, or None for non-matrix types.
+fn matrix_dimensions(dt: &CalibrationType) -> Option<(usize, usize)> {
+    match dt {
+        CalibrationType::U8Matrix(r, c) | CalibrationType::U16Matrix(r, c)
+        | CalibrationType::U32Matrix(r, c) | CalibrationType::U64Matrix(r, c)
+        | CalibrationType::I8Matrix(r, c) | CalibrationType::I16Matrix(r, c)
+        | CalibrationType::I32Matrix(r, c) | CalibrationType::I64Matrix(r, c)
+        | CalibrationType::F32Matrix(r, c) | CalibrationType::F64Matrix(r, c)
+        | CalibrationType::BoolMatrix(r, c) => Some((*r, *c)),
+        _ => None,
+    }
+}
+
 /// Write calibration data to the slave via XCP DOWNLOAD
 async fn write_to_slave(
     slave: &xcp_client::XcpSlave,
@@ -231,6 +306,18 @@ async fn write_to_slave(
     use xcp_client::protocol::Mta;
 
     let mta = Mta::new(param.address, param.address_ext);
+
+    // For matrix types, use the dedicated helper that handles the dimension convention
+    if let Some((rows, cols)) = matrix_dimensions(&param.data_type) {
+        if let Some(data) = matrix_value_to_bytes(value, rows, cols, param.storage_order) {
+            return if data.len() <= 255 {
+                slave.write_memory_sequential(mta, &data).await.map_err(|e| e.to_string())
+            } else {
+                slave.write_u8_array_sequential(mta, &data).await.map_err(|e| e.to_string())
+            };
+        }
+        return Err(format!("Type mismatch for matrix parameter {}", param.name));
+    }
 
     let data: Vec<u8> = match (value, &param.data_type) {
         (CalibrationValue::U8(v), CalibrationType::U8) => vec![*v],
@@ -266,50 +353,6 @@ async fn write_to_slave(
         }
         (CalibrationValue::F64Array(arr), CalibrationType::F64Array(_)) => {
             arr.iter().flat_map(|v| v.to_le_bytes()).collect()
-        }
-        // Matrices — flatten using storage order from A2L
-        (CalibrationValue::U8Matrix(mat), CalibrationType::U8Matrix(r, c)) => {
-            matrix_to_flat(mat, *r, *c, param.storage_order)
-        }
-        (CalibrationValue::U16Matrix(mat), CalibrationType::U16Matrix(r, c)) => {
-            let flat: Vec<u16> = matrix_to_flat(mat, *r, *c, param.storage_order);
-            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
-        }
-        (CalibrationValue::U32Matrix(mat), CalibrationType::U32Matrix(r, c)) => {
-            let flat: Vec<u32> = matrix_to_flat(mat, *r, *c, param.storage_order);
-            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
-        }
-        (CalibrationValue::U64Matrix(mat), CalibrationType::U64Matrix(r, c)) => {
-            let flat: Vec<u64> = matrix_to_flat(mat, *r, *c, param.storage_order);
-            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
-        }
-        (CalibrationValue::I8Matrix(mat), CalibrationType::I8Matrix(r, c)) => {
-            let flat: Vec<i8> = matrix_to_flat(mat, *r, *c, param.storage_order);
-            flat.iter().map(|v| *v as u8).collect()
-        }
-        (CalibrationValue::I16Matrix(mat), CalibrationType::I16Matrix(r, c)) => {
-            let flat: Vec<i16> = matrix_to_flat(mat, *r, *c, param.storage_order);
-            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
-        }
-        (CalibrationValue::I32Matrix(mat), CalibrationType::I32Matrix(r, c)) => {
-            let flat: Vec<i32> = matrix_to_flat(mat, *r, *c, param.storage_order);
-            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
-        }
-        (CalibrationValue::I64Matrix(mat), CalibrationType::I64Matrix(r, c)) => {
-            let flat: Vec<i64> = matrix_to_flat(mat, *r, *c, param.storage_order);
-            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
-        }
-        (CalibrationValue::F32Matrix(mat), CalibrationType::F32Matrix(r, c)) => {
-            let flat: Vec<f32> = matrix_to_flat(mat, *r, *c, param.storage_order);
-            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
-        }
-        (CalibrationValue::F64Matrix(mat), CalibrationType::F64Matrix(r, c)) => {
-            let flat: Vec<f64> = matrix_to_flat(mat, *r, *c, param.storage_order);
-            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
-        }
-        (CalibrationValue::BoolMatrix(mat), CalibrationType::BoolMatrix(r, c)) => {
-            let flat: Vec<bool> = matrix_to_flat(mat, *r, *c, param.storage_order);
-            flat.iter().map(|v| if *v { 1u8 } else { 0u8 }).collect()
         }
         _ => return Err(format!("Unsupported type combination: {:?}", param.data_type)),
     };
@@ -431,22 +474,47 @@ fn dcm_array_to_raw_string(value: &DcmValue, param: &CalibrationParam) -> Result
     }
 }
 
-/// Convert a DCM 2D map to a comma-separated raw value string (flattened row by row)
+/// Convert a DCM 2D map to a comma-separated raw value string.
+///
+/// DCM stores MAP data as [Y-axis rows][X-axis cols], but the A2L reader
+/// maps axis_descr[0] (X) → rows and axis_descr[1] (Y) → cols.
+/// So we must transpose from DCM's [Y][X] to A2L's [X][Y] ordering.
 fn dcm_map_to_raw_string(
     map: &dcm_utils::blocks::GRUPPENKENNFELD,
     param: &CalibrationParam,
 ) -> Result<String, String> {
-    let mut all_raw: Vec<String> = Vec::new();
-    for row in &map.value {
+    let (dcm_ncol, dcm_nrow) = map.dim; // ncol = X-axis size, nrow = Y-axis size
+
+    // Collect DCM values into [nrow(Y)][ncol(X)] numeric matrix
+    let dcm_values: Vec<Vec<f64>> = map.value.iter().filter_map(|row| {
         match row {
-            DcmValue::WERT(values) => {
-                for v in values {
-                    all_raw.push(physical_to_raw_string(*v, param)?);
-                }
-            }
-            DcmValue::TEXT(texts) => {
+            DcmValue::WERT(values) => Some(values.clone()),
+            DcmValue::TEXT(_) => None,
+        }
+    }).collect();
+
+    // Handle TEXT maps (no transpose needed for enum lookups)
+    if dcm_values.is_empty() {
+        let mut all_raw: Vec<String> = Vec::new();
+        for row in &map.value {
+            if let DcmValue::TEXT(texts) = row {
                 all_raw.extend(texts.iter().cloned());
             }
+        }
+        return Ok(all_raw.join(", "));
+    }
+
+    // Transpose from [Y][X] → [X][Y] to match A2L's (rows=X, cols=Y) convention
+    let mut all_raw: Vec<String> = Vec::new();
+    for x in 0..dcm_ncol {
+        for y in 0..dcm_nrow {
+            if y >= dcm_values.len() || x >= dcm_values[y].len() {
+                return Err(format!(
+                    "DCM dimension mismatch: expected [{}][{}] but got insufficient data",
+                    dcm_nrow, dcm_ncol
+                ));
+            }
+            all_raw.push(physical_to_raw_string(dcm_values[y][x], param)?);
         }
     }
     Ok(all_raw.join(", "))
@@ -537,5 +605,159 @@ mod tests {
         let param = make_param("test", CalibrationType::F32Array(3), CompuMethod::Identical);
         let val = DcmValue::WERT(vec![1.0, 2.0, 3.0]);
         assert_eq!(dcm_array_to_raw_string(&val, &param).unwrap(), "1, 2, 3");
+    }
+
+    fn make_matrix_param(name: &str, dt: CalibrationType, order: StorageOrder) -> CalibrationParam {
+        let mut p = CalibrationParam::new(name, 0x1000, 0, dt);
+        p.compu_method = CompuMethod::Identical;
+        p.storage_order = order;
+        p
+    }
+
+    /// Build a mock DCM GRUPPENKENNFELD with known [Y-rows][X-cols] data.
+    ///
+    /// Example: 3 X breakpoints, 2 Y breakpoints → dim = (3, 2)
+    ///   Y=0 row: v(x=0,y=0)=1  v(x=1,y=0)=2  v(x=2,y=0)=3
+    ///   Y=1 row: v(x=0,y=1)=4  v(x=1,y=1)=5  v(x=2,y=1)=6
+    fn make_dcm_map(x_size: usize, y_size: usize) -> dcm_utils::blocks::GRUPPENKENNFELD {
+        let mut value = Vec::new();
+        let mut flat_vals = Vec::new();
+        for y in 0..y_size {
+            let row: Vec<f64> = (0..x_size)
+                .map(|x| (y * x_size + x + 1) as f64) // 1-based sequential
+                .collect();
+            flat_vals.extend(row.iter().copied());
+            value.push(DcmValue::WERT(row));
+        }
+        dcm_utils::blocks::GRUPPENKENNFELD {
+            name: "test_map".to_string(),
+            attrs: Vec::new(),
+            value,
+            value_flat: DcmValue::WERT(flat_vals),
+            x_axis_name: String::new(),
+            y_axis_name: String::new(),
+            dim: (x_size, y_size),
+            x_axis: Vec::new(),
+            y_axis: Vec::new(),
+        }
+    }
+
+    /// Simulate the full DCM→ECU pipeline for F32 matrices:
+    /// dcm_map_to_raw_string → parse_value → matrix_value_to_bytes
+    fn run_dcm_f32_pipeline(x_size: usize, y_size: usize, order: StorageOrder) -> Vec<f32> {
+        let map = make_dcm_map(x_size, y_size);
+        // A2L convention: rows = X-axis, cols = Y-axis
+        let param = make_matrix_param("test", CalibrationType::F32Matrix(x_size, y_size), order);
+        let cal = CalibrationManager::new();
+        let raw_str = dcm_map_to_raw_string(&map, &param).unwrap();
+        let value = cal.parse_value(&param, &raw_str).unwrap();
+        let bytes = matrix_value_to_bytes(&value, x_size, y_size, order).unwrap();
+        // Convert bytes back to f32 for readable assertions
+        bytes.chunks(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    #[test]
+    fn test_dcm_matrix_layout_rowdir_3x2() {
+        // 3 X breakpoints, 2 Y breakpoints, ROW_DIR storage
+        // DCM data (Y-rows, X-cols):
+        //   Y=0: 1 2 3
+        //   Y=1: 4 5 6
+        //
+        // ASAM ROW_DIR = Y-rows stored sequentially = [Y][X] in memory:
+        //   v(0,0), v(1,0), v(2,0), v(0,1), v(1,1), v(2,1)
+        //   = 1, 2, 3, 4, 5, 6 (Y=0 row then Y=1 row)
+        let flat = run_dcm_f32_pipeline(3, 2, StorageOrder::RowDir);
+        assert_eq!(flat, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_dcm_matrix_layout_columndir_3x2() {
+        // 3 X breakpoints, 2 Y breakpoints, COLUMN_DIR storage
+        // DCM data (Y-rows, X-cols):
+        //   Y=0: 1 2 3
+        //   Y=1: 4 5 6
+        //
+        // ASAM COLUMN_DIR = X-cols stored sequentially = [X][Y] in memory:
+        //   v(0,0), v(0,1), v(1,0), v(1,1), v(2,0), v(2,1)
+        //   = 1, 4, 2, 5, 3, 6 (X=0 col, X=1 col, X=2 col)
+        let flat = run_dcm_f32_pipeline(3, 2, StorageOrder::ColumnDir);
+        assert_eq!(flat, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn test_dcm_matrix_layout_rowdir_4x3() {
+        // 4 X breakpoints, 3 Y breakpoints, ROW_DIR
+        // DCM data (Y-rows, X-cols):
+        //   Y=0:  1  2  3  4
+        //   Y=1:  5  6  7  8
+        //   Y=2:  9 10 11 12
+        //
+        // ASAM ROW_DIR → Y-rows sequential:
+        //   1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
+        let flat = run_dcm_f32_pipeline(4, 3, StorageOrder::RowDir);
+        assert_eq!(
+            flat,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+        );
+    }
+
+    #[test]
+    fn test_dcm_matrix_layout_columndir_4x3() {
+        // 4 X breakpoints, 3 Y breakpoints, COLUMN_DIR
+        // DCM data (Y-rows, X-cols):
+        //   Y=0:  1  2  3  4
+        //   Y=1:  5  6  7  8
+        //   Y=2:  9 10 11 12
+        //
+        // ASAM COLUMN_DIR → X-cols sequential:
+        //   v(0,*): 1, 5, 9
+        //   v(1,*): 2, 6, 10
+        //   v(2,*): 3, 7, 11
+        //   v(3,*): 4, 8, 12
+        let flat = run_dcm_f32_pipeline(4, 3, StorageOrder::ColumnDir);
+        assert_eq!(
+            flat,
+            vec![1.0, 5.0, 9.0, 2.0, 6.0, 10.0, 3.0, 7.0, 11.0, 4.0, 8.0, 12.0]
+        );
+    }
+
+    #[test]
+    fn test_dcm_matrix_layout_square_2x2_rowdir() {
+        // Square matrix: 2x2, ROW_DIR
+        // DCM: Y=0: [1, 2], Y=1: [3, 4]
+        // ASAM ROW_DIR → [1, 2, 3, 4]
+        let flat = run_dcm_f32_pipeline(2, 2, StorageOrder::RowDir);
+        assert_eq!(flat, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_dcm_matrix_layout_square_2x2_columndir() {
+        // Square matrix: 2x2, COLUMN_DIR
+        // DCM: Y=0: [1, 2], Y=1: [3, 4]
+        // ASAM COLUMN_DIR → [1, 3, 2, 4]
+        let flat = run_dcm_f32_pipeline(2, 2, StorageOrder::ColumnDir);
+        assert_eq!(flat, vec![1.0, 3.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn test_matrix_value_to_bytes_u8() {
+        let mat = vec![vec![1u8, 2], vec![3, 4], vec![5, 6]];
+        // RowDir with invert → ColumnDir: columns first
+        let bytes = matrix_value_to_bytes(
+            &CalibrationValue::U8Matrix(mat),
+            3, 2, StorageOrder::RowDir,
+        ).unwrap();
+        // invert(RowDir) = ColumnDir → mat[*][0], mat[*][1] = 1,3,5,2,4,6
+        assert_eq!(bytes, vec![1, 3, 5, 2, 4, 6]);
+    }
+
+    #[test]
+    fn test_matrix_dimensions() {
+        assert_eq!(matrix_dimensions(&CalibrationType::F32Matrix(3, 9)), Some((3, 9)));
+        assert_eq!(matrix_dimensions(&CalibrationType::U8Matrix(2, 4)), Some((2, 4)));
+        assert_eq!(matrix_dimensions(&CalibrationType::F32), None);
+        assert_eq!(matrix_dimensions(&CalibrationType::F32Array(5)), None);
     }
 }

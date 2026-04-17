@@ -194,4 +194,11 @@ impl StorageOrder {
             Self::ColumnDir => "COLUMN_DIR",
         }
     }
+
+    pub fn invert(&self) -> Self {
+        match self {
+            Self::RowDir => Self::ColumnDir,
+            Self::ColumnDir => Self::RowDir,
+        }
+    }
 }
