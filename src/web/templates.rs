@@ -31,8 +31,8 @@ impl TemplateEngine {
             // Extract template name from filename (e.g., "base.hbs" -> "base")
             if let Some(name) = filename.strip_suffix(".hbs") {
                 if let Some(content) = Templates::get(filename) {
-                    let content_str = std::str::from_utf8(&content.data)
-                        .expect("Template is not valid UTF-8");
+                    let content_str =
+                        std::str::from_utf8(&content.data).expect("Template is not valid UTF-8");
                     hbs.register_template_string(name, content_str)
                         .unwrap_or_else(|e| panic!("Failed to register {} template: {}", name, e));
                     template_count += 1;
@@ -48,7 +48,10 @@ impl TemplateEngine {
         // Verify essential templates
         for essential in &["base", "login", "dashboard"] {
             if hbs.get_template(essential).is_none() {
-                panic!("Essential template '{}' not found! Template embedding may have failed.", essential);
+                panic!(
+                    "Essential template '{}' not found! Template embedding may have failed.",
+                    essential
+                );
             }
         }
 
@@ -143,7 +146,11 @@ impl TemplateEngine {
 
     /// Render connect page
     /// addresses: Vec of (address, Option<a2l_filename>)
-    pub fn connect_page(&self, addresses: &[(String, Option<String>)], default_name: &str) -> String {
+    pub fn connect_page(
+        &self,
+        addresses: &[(String, Option<String>)],
+        default_name: &str,
+    ) -> String {
         // Build address list with optional A2L suffix
         let addresses_data: Vec<serde_json::Value> = if addresses.is_empty() {
             vec![json!({"value": "127.0.0.1:5555", "label": "127.0.0.1:5555 (default)"})]
@@ -172,7 +179,11 @@ impl TemplateEngine {
     }
 
     /// Render connect page (device-based version)
-    pub fn connect_page_devices(&self, devices: &[serde_json::Value], default_name: &str) -> String {
+    pub fn connect_page_devices(
+        &self,
+        devices: &[serde_json::Value],
+        default_name: &str,
+    ) -> String {
         let data = json!({
             "devices": devices,
             "default_name": default_name,
@@ -191,17 +202,19 @@ impl TemplateEngine {
     ) -> String {
         let params_data: Vec<serde_json::Value> = params
             .iter()
-            .map(|(slave_id, slave_name, idx, name, type_name, address, value)| {
-                json!({
-                    "slave_id": escape_html(slave_id),
-                    "slave_name": escape_html(slave_name),
-                    "idx": idx,
-                    "name": escape_html(name),
-                    "type_name": type_name,
-                    "address_hex": format!("{:08X}", address),
-                    "value": value.as_ref().map(|v| escape_html(v)),
-                })
-            })
+            .map(
+                |(slave_id, slave_name, idx, name, type_name, address, value)| {
+                    json!({
+                        "slave_id": escape_html(slave_id),
+                        "slave_name": escape_html(slave_name),
+                        "idx": idx,
+                        "name": escape_html(name),
+                        "type_name": type_name,
+                        "address_hex": format!("{:08X}", address),
+                        "value": value.as_ref().map(|v| escape_html(v)),
+                    })
+                },
+            )
             .collect();
 
         let data = json!({
@@ -337,7 +350,7 @@ impl TemplateEngine {
         &self,
         current_path: &str,
         current_slave: Option<&(String, String)>,
-        slave_addresses: &[String],
+        transport_options: &[serde_json::Value],
         cal_count: usize,
         meas_count: usize,
     ) -> String {
@@ -347,7 +360,7 @@ impl TemplateEngine {
                 "id": id,
                 "name": name,
             })),
-            "slave_addresses": slave_addresses,
+            "transport_options": transport_options,
             "cal_count": cal_count,
             "meas_count": meas_count,
         });
@@ -429,7 +442,14 @@ pub fn dashboard_page(
     daq_running: bool,
 ) -> String {
     let engine = TemplateEngine::new();
-    engine.dashboard_page(slaves, current_slave, connected_count, total_cal, total_meas, daq_running)
+    engine.dashboard_page(
+        slaves,
+        current_slave,
+        connected_count,
+        total_cal,
+        total_meas,
+        daq_running,
+    )
 }
 
 /// Render connect page (new device-based version)
@@ -486,19 +506,32 @@ pub fn daq_page(
     current_slave_id: Option<&str>,
 ) -> String {
     let engine = TemplateEngine::new();
-    engine.daq_page(measurements, selected_indices, daq_running, latest_values, slaves, current_slave_id)
+    engine.daq_page(
+        measurements,
+        selected_indices,
+        daq_running,
+        latest_values,
+        slaves,
+        current_slave_id,
+    )
 }
 
 /// Render A2L page
 pub fn a2l_page(
     current_path: &str,
     current_slave: Option<&(String, String)>,
-    slave_addresses: &[String],
+    transport_options: &[serde_json::Value],
     cal_count: usize,
     meas_count: usize,
 ) -> String {
     let engine = TemplateEngine::new();
-    engine.a2l_page(current_path, current_slave, slave_addresses, cal_count, meas_count)
+    engine.a2l_page(
+        current_path,
+        current_slave,
+        transport_options,
+        cal_count,
+        meas_count,
+    )
 }
 
 /// Escape HTML special characters
@@ -539,13 +572,7 @@ mod tests {
     #[test]
     fn test_dashboard_page() {
         let engine = TemplateEngine::new();
-        let slaves = vec![(
-            "test-id-123".to_string(),
-            "ECU1".to_string(),
-            true,
-            5,
-            8,
-        )];
+        let slaves = vec![("test-id-123".to_string(), "ECU1".to_string(), true, 5, 8)];
         let html = engine.dashboard_page(&slaves, None, 1, 5, 8, false);
         assert!(html.contains("ECU1"));
         assert!(html.contains("Slaves (1)"));
@@ -573,8 +600,35 @@ mod tests {
     #[test]
     fn test_a2l_page() {
         let engine = TemplateEngine::new();
-        let html = engine.a2l_page("/path/to/file.a2l", None, &[], 0, 0);
+        let transport_options: Vec<serde_json::Value> = Vec::new();
+        let html = engine.a2l_page("/path/to/file.a2l", None, &transport_options, 0, 0);
         assert!(html.contains("A2L File Management"));
         assert!(html.contains("/path/to/file.a2l"));
+    }
+
+    #[test]
+    fn test_connect_page_devices_renders_transport_selector() {
+        let engine = TemplateEngine::new();
+        let devices = vec![json!({
+            "id": "device-1",
+            "name": "ECU1",
+            "address": "127.0.0.1:5555",
+            "a2l_name": "hello_xcp.a2l",
+            "connected": false,
+            "transport_options": [
+                { "value": "", "label": "Auto (UDP -> CAN -> TCP)" },
+                { "value": "udp", "label": "UDP - 127.0.0.1:5555" },
+                { "value": "tcp", "label": "TCP - 127.0.0.1:6000" }
+            ]
+        })];
+
+        let html = engine.connect_page_devices(&devices, "ECU1");
+
+        assert!(html.contains("transport-select-device-1"));
+        assert!(
+            html.contains("Auto (UDP -&gt; CAN -&gt; TCP)")
+                || html.contains("Auto (UDP -> CAN -> TCP)")
+        );
+        assert!(html.contains("TCP - 127.0.0.1:6000"));
     }
 }

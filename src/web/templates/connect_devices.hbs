@@ -14,15 +14,17 @@
         <colgroup>
             <col style="width: 15%;">
             <col style="width: 18%;">
-            <col style="width: 22%;">
-            <col style="width: 12%;">
-            <col style="width: 33%;">
+            <col style="width: 20%;">
+            <col style="width: 20%;">
+            <col style="width: 10%;">
+            <col style="width: 17%;">
         </colgroup>
         <thead>
             <tr style="border-bottom: 1px solid #444;">
                 <th style="text-align: left; padding: 0.5rem;">Name</th>
                 <th style="text-align: left; padding: 0.5rem;">Address</th>
                 <th style="text-align: left; padding: 0.5rem;">A2L File</th>
+                <th style="text-align: left; padding: 0.5rem;">Protocol</th>
                 <th style="text-align: left; padding: 0.5rem;">Status</th>
                 <th style="text-align: left; padding: 0.5rem;">Actions</th>
             </tr>
@@ -34,6 +36,18 @@
                 <td style="padding: 0.5rem; font-family: monospace;">{{this.address}}</td>
                 <td style="padding: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{this.a2l_name}}">{{this.a2l_name}}</td>
                 <td style="padding: 0.5rem;">
+                    <select
+                        id="transport-select-{{this.id}}"
+                        data-device-id="{{this.id}}"
+                        style="width: 100%; min-width: 180px;"
+                        {{#if this.connected}}disabled{{/if}}
+                    >
+                        {{#each this.transport_options}}
+                        <option value="{{this.value}}">{{this.label}}</option>
+                        {{/each}}
+                    </select>
+                </td>
+                <td style="padding: 0.5rem;">
                     {{#if this.connected}}
                     <span style="color: #00ff88; font-weight: bold;">Connected</span>
                     {{else}}
@@ -44,7 +58,7 @@
                     {{#if this.connected}}
                     <button type="button" class="secondary" onclick="disconnectDevice('{{this.id}}')">Disconnect</button>
                     {{else}}
-                    <button type="button" class="btn" onclick="connectDevice('{{this.id}}', '{{this.address}}')">Connect</button>
+                    <button type="button" class="btn" onclick="connectDevice('{{this.id}}')">Connect</button>
                     {{/if}}
                     <button type="button" class="secondary" onclick="removeDevice('{{this.id}}')" style="margin-left: 0.25rem;">Remove</button>
                 </td>
@@ -70,7 +84,18 @@ async function connectAllDevices() {
     btn.textContent = 'Connecting...';
 
     try {
-        const response = await fetch('/api/devices/connect-all', { method: 'POST' });
+        const transportProtocols = {};
+        document.querySelectorAll('select[id^="transport-select-"]').forEach((select) => {
+            if (select.value) {
+                transportProtocols[select.dataset.deviceId] = select.value;
+            }
+        });
+
+        const response = await fetch('/api/devices/connect-all', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ transport_protocols: transportProtocols })
+        });
         const result = await response.json();
         if (result.success) {
             alert(result.message);
@@ -86,12 +111,16 @@ async function connectAllDevices() {
     }
 }
 
-async function connectDevice(deviceId, address) {
+async function connectDevice(deviceId) {
+    const transportSelect = document.getElementById(`transport-select-${deviceId}`);
     try {
         const response = await fetch('/api/devices/connect', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ device_id: deviceId })
+            body: JSON.stringify({
+                device_id: deviceId,
+                transport_protocol: transportSelect ? transportSelect.value : ''
+            })
         });
         const result = await response.json();
         if (result.success) {

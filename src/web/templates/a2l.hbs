@@ -13,13 +13,23 @@
     </div>
     {{/if}}
 
-    {{#if slave_addresses}}
+    {{#if transport_options}}
     <div class="form-group" style="background: #0f3d0f; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem;">
-        <label style="color: #00ff88; margin-bottom: 0.5rem;">Slave Addresses from A2L</label>
-        <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
-            {{#each slave_addresses}}
-            <button type="button" class="secondary" onclick="connectTo('{{this}}')">{{this}}</button>
+        <label for="transport_protocol" style="color: #00ff88; margin-bottom: 0.5rem;">Transport Protocol from A2L</label>
+        <select id="transport_protocol" style="width: 100%; margin-bottom: 0.75rem;">
+            {{#each transport_options}}
+            <option value="{{this.value}}">{{this.label}}</option>
             {{/each}}
+        </select>
+        {{#if current_slave}}
+        <button type="button" class="secondary" onclick="connectCurrentDevice('{{current_slave.id}}', '{{current_slave.name}}')">
+            Connect Using Selected Protocol
+        </button>
+        {{else}}
+        <div style="color: #888; font-size: 0.9em;">Load an A2L file first to choose a transport protocol.</div>
+        {{/if}}
+        <div style="color: #888; font-size: 0.85em; margin-top: 0.5rem;">
+            If you do not choose one explicitly, the default order is UDP -&gt; CAN -&gt; TCP.
         </div>
     </div>
     {{/if}}
@@ -47,13 +57,13 @@
 </div>
 
 <script>
-function connectTo(address) {
-    const name = prompt('Enter slave name:', 'Slave ' + address);
+function connectCurrentDevice(deviceId, defaultName) {
+    const name = prompt('Enter slave name:', defaultName || 'Slave');
     if (name) {
         const formData = new FormData();
         formData.append('name', name);
-        formData.append('address', address);
-        formData.append('custom', '');
+        formData.append('device_id', deviceId);
+        formData.append('transport_protocol', document.getElementById('transport_protocol')?.value || '');
 
         fetch('/api/connect', {
             method: 'POST',

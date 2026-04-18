@@ -12,7 +12,7 @@ pub mod types;
 // Re-export commonly used types
 pub use compute_method::{CompuMethod, CompuMethodFactory, CompuVtabEntry};
 pub use reader::{
-    A2lCharacteristic, A2lMeasurement, A2lMemorySegment, A2lReader, AxisInfo, AxisPointSource,
-    XcpChecksum, XcpPage, XcpSegmentInfo,
+    A2lCharacteristic, A2lMeasurement, A2lMemorySegment, A2lReader, A2lTransportConfig, AxisInfo,
+    AxisPointSource, XcpChecksum, XcpPage, XcpSegmentInfo,
 };
 pub use types::{A2lDataType, CharacteristicType, DaqEvent, StorageOrder};

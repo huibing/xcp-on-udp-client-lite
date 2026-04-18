@@ -9,6 +9,7 @@ use std::path::Path;
 
 // Import types from types module
 use super::types::{A2lDataType, CharacteristicType, StorageOrder};
+use crate::transport::{TransportConfig, TransportType};
 
 /// Dimension type inferred from record layout name
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,13 +75,27 @@ impl AxisInfo {
     pub fn get_static_values(&self) -> Option<Vec<f64>> {
         match &self.point_source {
             AxisPointSource::Memory { .. } => None,
-            AxisPointSource::Calculated { offset, shift, num_points } => {
+            AxisPointSource::Calculated {
+                offset,
+                shift,
+                num_points,
+            } => {
                 let multiplier = 2f64.powi(*shift);
-                Some((0..*num_points).map(|i| offset + i as f64 * multiplier).collect())
+                Some(
+                    (0..*num_points)
+                        .map(|i| offset + i as f64 * multiplier)
+                        .collect(),
+                )
             }
-            AxisPointSource::CalculatedDist { offset, distance, num_points } => {
-                Some((0..*num_points).map(|i| offset + i as f64 * distance).collect())
-            }
+            AxisPointSource::CalculatedDist {
+                offset,
+                distance,
+                num_points,
+            } => Some(
+                (0..*num_points)
+                    .map(|i| offset + i as f64 * distance)
+                    .collect(),
+            ),
             AxisPointSource::Explicit { values } => Some(values.clone()),
         }
     }
@@ -155,6 +170,50 @@ pub enum XcpChecksum {
     Crc16Citt,
     Crc32,
     UserDefined(u8),
+}
+
+/// Transport configurations discovered from A2L IF_DATA blocks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum A2lTransportConfig {
+    Udp { addr: String },
+    Tcp { addr: String },
+    Can { can_id: u32 },
+}
+
+impl A2lTransportConfig {
+    pub fn transport_type(&self) -> TransportType {
+        match self {
+            Self::Udp { .. } => TransportType::Udp,
+            Self::Tcp { .. } => TransportType::Tcp,
+            Self::Can { .. } => TransportType::Can,
+        }
+    }
+
+    pub fn endpoint(&self) -> String {
+        match self {
+            Self::Udp { addr } | Self::Tcp { addr } => addr.clone(),
+            Self::Can { can_id } => format!("0x{:X}", can_id),
+        }
+    }
+
+    pub fn display_label(&self) -> String {
+        match self {
+            Self::Udp { addr } => format!("UDP - {}", addr),
+            Self::Tcp { addr } => format!("TCP - {}", addr),
+            Self::Can { can_id } => format!("CAN - 0x{:X}", can_id),
+        }
+    }
+
+    pub fn to_transport_config(&self) -> TransportConfig {
+        match self {
+            Self::Udp { addr } => TransportConfig::Udp { addr: addr.clone() },
+            Self::Tcp { addr } => TransportConfig::Tcp { addr: addr.clone() },
+            Self::Can { can_id } => TransportConfig::Can {
+                channel: "auto".to_string(),
+                can_id: *can_id,
+            },
+        }
+    }
 }
 
 impl XcpChecksum {
@@ -335,7 +394,9 @@ impl A2lMemorySegment {
     /// Check if this segment allows XCP write access (calibration)
     /// Returns true if the segment has XCP info and at least one page allows write
     pub fn is_calibration_allowed(&self) -> bool {
-        self.xcp_info.as_ref().map_or(false, |xcp| xcp.is_write_allowed())
+        self.xcp_info
+            .as_ref()
+            .map_or(false, |xcp| xcp.is_write_allowed())
     }
 }
 
@@ -343,6 +404,7 @@ impl A2lMemorySegment {
 pub struct A2lReader {
     file: a2lfile::A2lFile,
     events: Vec<super::types::DaqEvent>,
+    raw_content: String,
 }
 
 impl A2lReader {
@@ -350,16 +412,18 @@ impl A2lReader {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let path = path.as_ref();
         let mut errors = Vec::new();
-        let file = a2lfile::load(path, None, &mut errors, true).map_err(|e| {
-            format!("Failed to load A2L file '{}': {:?}", path.display(), e)
-        })?;
+        let file = a2lfile::load(path, None, &mut errors, true)
+            .map_err(|e| format!("Failed to load A2L file '{}': {:?}", path.display(), e))?;
 
         // Parse EVENT blocks from raw file (a2lfile crate doesn't support EVENT blocks)
-        let raw = std::fs::read_to_string(path)
-            .unwrap_or_default();
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
         let events = Self::parse_events_from_raw(&raw);
 
-        Ok(Self { file, events })
+        Ok(Self {
+            file,
+            events,
+            raw_content: raw,
+        })
     }
 
     /// Get all measurements from the A2L file
@@ -397,13 +461,19 @@ impl A2lReader {
         self.events.clone()
     }
 
+    pub fn get_transport_configs(&self) -> Vec<A2lTransportConfig> {
+        Self::parse_transport_configs_from_raw(&self.raw_content)
+    }
+
     fn parse_events_from_raw(raw: &str) -> Vec<super::types::DaqEvent> {
         let mut events = Vec::new();
         let mut search = raw;
 
         while let Some(begin_pos) = search.to_uppercase().find("/BEGIN EVENT") {
             let after_begin = &search[begin_pos + "/BEGIN EVENT".len()..];
-            let end_pos = after_begin.to_uppercase().find("/END EVENT")
+            let end_pos = after_begin
+                .to_uppercase()
+                .find("/END EVENT")
                 .unwrap_or(after_begin.len());
             let block = &after_begin[..end_pos];
 
@@ -421,7 +491,13 @@ impl A2lReader {
                 let priority: u8 = tokens.get(7).and_then(|t| t.parse().ok()).unwrap_or(0);
 
                 events.push(super::types::DaqEvent {
-                    channel, name, short_name, time_cycle, time_unit, max_daq_list, priority,
+                    channel,
+                    name,
+                    short_name,
+                    time_cycle,
+                    time_unit,
+                    max_daq_list,
+                    priority,
                 });
             }
 
@@ -429,6 +505,131 @@ impl A2lReader {
         }
 
         events
+    }
+
+    fn parse_transport_configs_from_raw(raw: &str) -> Vec<A2lTransportConfig> {
+        let mut configs = Vec::new();
+
+        if let Some(config) = Self::extract_transport_block_contents(raw, "XCP_ON_UDP_IP")
+            .into_iter()
+            .find_map(|block| Self::parse_ip_transport_block(&block, TransportType::Udp))
+        {
+            configs.push(config);
+        }
+
+        if let Some(config) = Self::extract_transport_block_contents(raw, "XCP_ON_CAN")
+            .into_iter()
+            .find_map(|block| Self::parse_can_transport_block(&block))
+        {
+            configs.push(config);
+        }
+
+        if let Some(config) = Self::extract_transport_block_contents(raw, "XCP_ON_TCP_IP")
+            .into_iter()
+            .find_map(|block| Self::parse_ip_transport_block(&block, TransportType::Tcp))
+        {
+            configs.push(config);
+        }
+
+        configs
+    }
+
+    fn extract_transport_block_contents(raw: &str, tag: &str) -> Vec<String> {
+        let begin_tag = format!("/BEGIN {}", tag);
+        let end_tag = format!("/END {}", tag);
+        let raw_upper = raw.to_uppercase();
+        let begin_upper = begin_tag.to_uppercase();
+        let end_upper = end_tag.to_uppercase();
+        let mut blocks = Vec::new();
+        let mut offset = 0usize;
+
+        while let Some(begin_rel) = raw_upper[offset..].find(&begin_upper) {
+            let block_start = offset + begin_rel + begin_tag.len();
+            let remaining_upper = &raw_upper[block_start..];
+            let Some(end_rel) = remaining_upper.find(&end_upper) else {
+                break;
+            };
+
+            let block_end = block_start + end_rel;
+            blocks.push(raw[block_start..block_end].to_string());
+            offset = block_end + end_tag.len();
+        }
+
+        blocks
+    }
+
+    fn parse_ip_transport_block(
+        block: &str,
+        transport_type: TransportType,
+    ) -> Option<A2lTransportConfig> {
+        let clean = Self::strip_comments(block);
+        let tokens = Self::tokenize_a2l(&clean);
+        if tokens.len() < 4 {
+            return None;
+        }
+
+        let port = Self::parse_u16_token(&tokens[1])?;
+        let address_idx = tokens.iter().position(|token| {
+            matches!(
+                token.to_uppercase().as_str(),
+                "ADDRESS" | "HOST_NAME" | "IPV6"
+            )
+        })?;
+        let host = tokens.get(address_idx + 1)?.trim_matches('"');
+        let addr = Self::format_host_port(host, port);
+
+        match transport_type {
+            TransportType::Udp => Some(A2lTransportConfig::Udp { addr }),
+            TransportType::Tcp => Some(A2lTransportConfig::Tcp { addr }),
+            TransportType::Can => None,
+        }
+    }
+
+    fn parse_can_transport_block(block: &str) -> Option<A2lTransportConfig> {
+        let clean = Self::strip_comments(block);
+        let tokens = Self::tokenize_a2l(&clean);
+
+        for tag in ["CAN_ID_MASTER", "CAN_ID_SLAVE", "CAN_ID_BROADCAST"] {
+            if let Some(idx) = tokens
+                .iter()
+                .position(|token| token.eq_ignore_ascii_case(tag))
+            {
+                if let Some(value) = tokens
+                    .get(idx + 1)
+                    .and_then(|token| Self::parse_u32_token(token))
+                {
+                    return Some(A2lTransportConfig::Can { can_id: value });
+                }
+            }
+        }
+
+        None
+    }
+
+    fn parse_u16_token(token: &str) -> Option<u16> {
+        let token = token.trim();
+        if token.starts_with("0x") || token.starts_with("0X") {
+            u16::from_str_radix(token.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+        } else {
+            token.parse::<u16>().ok()
+        }
+    }
+
+    fn parse_u32_token(token: &str) -> Option<u32> {
+        let token = token.trim();
+        if token.starts_with("0x") || token.starts_with("0X") {
+            u32::from_str_radix(token.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+        } else {
+            token.parse::<u32>().ok()
+        }
+    }
+
+    fn format_host_port(host: &str, port: u16) -> String {
+        if host.contains(':') && !host.starts_with('[') {
+            format!("[{}]:{}", host, port)
+        } else {
+            format!("{}:{}", host, port)
+        }
     }
 
     fn strip_comments(s: &str) -> String {
@@ -439,7 +640,10 @@ impl A2lReader {
                 chars.next(); // consume '*'
                 loop {
                     match chars.next() {
-                        Some('*') if chars.peek() == Some(&'/') => { chars.next(); break; }
+                        Some('*') if chars.peek() == Some(&'/') => {
+                            chars.next();
+                            break;
+                        }
                         None => break,
                         _ => {}
                     }
@@ -462,7 +666,10 @@ impl A2lReader {
                 let mut token = String::from('"');
                 loop {
                     match chars.next() {
-                        Some('"') => { token.push('"'); break; }
+                        Some('"') => {
+                            token.push('"');
+                            break;
+                        }
                         Some(ch) => token.push(ch),
                         None => break,
                     }
@@ -471,7 +678,9 @@ impl A2lReader {
             } else {
                 let mut token = String::new();
                 while let Some(&ch) = chars.peek() {
-                    if ch.is_whitespace() { break; }
+                    if ch.is_whitespace() {
+                        break;
+                    }
                     token.push(ch);
                     chars.next();
                 }
@@ -632,7 +841,8 @@ impl A2lReader {
             ch.characteristic_type
         );
 
-        let result: Vec<AxisInfo> = ch.axis_descr
+        let result: Vec<AxisInfo> = ch
+            .axis_descr
             .iter()
             .enumerate()
             .filter_map(|(i, axis_descr)| {
@@ -687,13 +897,20 @@ impl A2lReader {
         // Determine the axis point source
         let point_source = if let Some(fix_axis_par_list) = &axis_descr.fix_axis_par_list {
             // FIX_AXIS_PAR_LIST: explicit list of axis values
-            tracing::trace!("  -> Using FIX_AXIS_PAR_LIST with {} values", fix_axis_par_list.axis_pts_value_list.len());
+            tracing::trace!(
+                "  -> Using FIX_AXIS_PAR_LIST with {} values",
+                fix_axis_par_list.axis_pts_value_list.len()
+            );
             AxisPointSource::Explicit {
                 values: fix_axis_par_list.axis_pts_value_list.clone(),
             }
         } else if let Some(fix_axis_par_dist) = &axis_descr.fix_axis_par_dist {
             // FIX_AXIS_PAR_DIST: offset + i * distance
-            tracing::trace!("  -> Using FIX_AXIS_PAR_DIST: offset={}, distance={}", fix_axis_par_dist.offset, fix_axis_par_dist.distance);
+            tracing::trace!(
+                "  -> Using FIX_AXIS_PAR_DIST: offset={}, distance={}",
+                fix_axis_par_dist.offset,
+                fix_axis_par_dist.distance
+            );
             AxisPointSource::CalculatedDist {
                 offset: fix_axis_par_dist.offset as f64,
                 distance: fix_axis_par_dist.distance as f64,
@@ -701,7 +918,11 @@ impl A2lReader {
             }
         } else if let Some(fix_axis_par) = &axis_descr.fix_axis_par {
             // FIX_AXIS_PAR: offset + i * 2^shift
-            tracing::trace!("  -> Using FIX_AXIS_PAR: offset={}, shift={}", fix_axis_par.offset, fix_axis_par.shift);
+            tracing::trace!(
+                "  -> Using FIX_AXIS_PAR: offset={}, shift={}",
+                fix_axis_par.offset,
+                fix_axis_par.shift
+            );
             AxisPointSource::Calculated {
                 offset: fix_axis_par.offset as f64,
                 shift: fix_axis_par.shift as i32,
@@ -792,9 +1013,7 @@ impl A2lReader {
     /// Create a fallback axis source from min/max limits
     fn create_fallback_axis_source(min: f64, max: f64, num_points: usize) -> AxisPointSource {
         if num_points <= 1 {
-            AxisPointSource::Explicit {
-                values: vec![min],
-            }
+            AxisPointSource::Explicit { values: vec![min] }
         } else {
             // Linear interpolation between min and max
             let step = if num_points > 1 {
@@ -821,13 +1040,12 @@ impl A2lReader {
         if let Some(mod_par) = &module.mod_par {
             for mem_seg in &mod_par.memory_segment {
                 // Check if characteristic address falls within this segment
-                if ch.address >= mem_seg.address
-                    && ch.address < mem_seg.address + mem_seg.size
-                {
+                if ch.address >= mem_seg.address && ch.address < mem_seg.address + mem_seg.size {
                     // Check IF_DATA XCP SEGMENT for explicit address extension
                     for if_data in &mem_seg.if_data {
                         if let Some(ref generic) = if_data.ifdata_items {
-                            if let Some(ext) = Self::extract_address_extension_from_segment(generic) {
+                            if let Some(ext) = Self::extract_address_extension_from_segment(generic)
+                            {
                                 return ext;
                             }
                         }
@@ -857,13 +1075,13 @@ impl A2lReader {
             while let Some(uint_pos) = after_seg[pos..].find("UInt(") {
                 let start = pos + uint_pos + 5;
                 if let Some(end) = after_seg[start..].find(")") {
-                    if let Some(comma_pos) = after_seg[start..start+end].find(",") {
-                        let num_str = &after_seg[start..start+comma_pos];
+                    if let Some(comma_pos) = after_seg[start..start + end].find(",") {
+                        let num_str = &after_seg[start..start + comma_pos];
                         if let Ok(num) = num_str.parse::<u64>() {
                             found_values.push(num as u8);
                         }
                     } else {
-                        let num_str = &after_seg[start..start+end];
+                        let num_str = &after_seg[start..start + end];
                         if let Ok(num) = num_str.parse::<u64>() {
                             found_values.push(num as u8);
                         }
@@ -1030,7 +1248,8 @@ impl A2lReader {
                 // More than 2 AXIS_DESCR blocks - unusual
                 tracing::warn!(
                     "Characteristic '{}' has {} AXIS_DESCR blocks, expected 0-2",
-                    ch.get_name(), axis_descr_count
+                    ch.get_name(),
+                    axis_descr_count
                 );
                 None
             }
@@ -1104,13 +1323,23 @@ impl A2lReader {
     /// Infer type from common numeric prefixes
     fn infer_type_from_prefix(type_part: &str) -> A2lDataType {
         // Check for U8, U16, U32, U64 patterns
-        if type_part.starts_with("U8") || type_part.starts_with("I8") || type_part.starts_with("S8") {
+        if type_part.starts_with("U8") || type_part.starts_with("I8") || type_part.starts_with("S8")
+        {
             A2lDataType::U8
-        } else if type_part.starts_with("U16") || type_part.starts_with("I16") || type_part.starts_with("S16") {
+        } else if type_part.starts_with("U16")
+            || type_part.starts_with("I16")
+            || type_part.starts_with("S16")
+        {
             A2lDataType::U16
-        } else if type_part.starts_with("U32") || type_part.starts_with("I32") || type_part.starts_with("S32") {
+        } else if type_part.starts_with("U32")
+            || type_part.starts_with("I32")
+            || type_part.starts_with("S32")
+        {
             A2lDataType::U32
-        } else if type_part.starts_with("U64") || type_part.starts_with("I64") || type_part.starts_with("S64") {
+        } else if type_part.starts_with("U64")
+            || type_part.starts_with("I64")
+            || type_part.starts_with("S64")
+        {
             A2lDataType::U64
         } else if type_part.starts_with("F32") || type_part.starts_with("FLOAT32") {
             A2lDataType::F32
@@ -1250,6 +1479,18 @@ impl A2lReader {
     /// Get XCP slave addresses from XCP_ON_UDP_IP blocks in IF_DATA
     /// Returns a list of "ip:port" strings
     pub fn get_slave_addresses(&self) -> Vec<String> {
+        let transport_addresses: Vec<String> = self
+            .get_transport_configs()
+            .into_iter()
+            .filter_map(|config| match config {
+                A2lTransportConfig::Udp { addr } | A2lTransportConfig::Tcp { addr } => Some(addr),
+                A2lTransportConfig::Can { .. } => None,
+            })
+            .collect();
+        if !transport_addresses.is_empty() {
+            return transport_addresses;
+        }
+
         let mut addresses = Vec::new();
 
         // Parse raw IF_DATA content to find XCP_ON_UDP_IP blocks
@@ -1491,7 +1732,9 @@ impl A2lReader {
                 if let Some(quote_end) = after_quote.find("\"") {
                     let ip = &after_quote[..quote_end];
                     // Validate IP format
-                    if ip.split('.').count() == 4 && ip.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    if ip.split('.').count() == 4
+                        && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+                    {
                         return Some(format!("{}:{}", ip, port));
                     }
                 }
@@ -1661,8 +1904,7 @@ impl A2lReader {
     /// Extract checksum from SEGMENT data using the XcpChecksum enum
     fn extract_checksum_from_segment(segment_data: &str) -> Option<XcpChecksum> {
         // Use find_enum_items to find all EnumItem values and try to parse as checksum
-        Self::find_enum_items(segment_data)
-            .find_map(|s| XcpChecksum::from_str(s))
+        Self::find_enum_items(segment_data).find_map(|s| XcpChecksum::from_str(s))
     }
 
     /// Extract all PAGE info from SEGMENT data
@@ -1671,7 +1913,9 @@ impl A2lReader {
 
         // Find all PAGE blocks
         let mut search_pos = 0;
-        while let Some(page_pos) = Self::find_tagged_struct_item(&segment_data[search_pos..], "PAGE") {
+        while let Some(page_pos) =
+            Self::find_tagged_struct_item(&segment_data[search_pos..], "PAGE")
+        {
             let abs_pos = search_pos + page_pos;
 
             // Find the PAGE block content
@@ -1814,10 +2058,17 @@ mod tests {
         // Test UWORD type name pattern (simulating what would happen with Scalar_UWORD)
         // We verify the underlying type mapping logic is correct
         let module = &reader.file.project.module[0];
-        let record_layout = module.record_layout.iter().find(|rl| rl.get_name() == "U16").unwrap();
+        let record_layout = module
+            .record_layout
+            .iter()
+            .find(|rl| rl.get_name() == "U16")
+            .unwrap();
 
         // Verify the record layout exists and has FNC_VALUES
-        assert!(record_layout.fnc_values.is_some(), "U16 record layout should have FNC_VALUES");
+        assert!(
+            record_layout.fnc_values.is_some(),
+            "U16 record layout should have FNC_VALUES"
+        );
     }
 
     #[test]
@@ -1860,10 +2111,52 @@ mod tests {
         // Should find the address from the A2L file (actual address depends on file content)
         assert!(!addrs.is_empty(), "Should find at least one address");
         // The A2L file contains 0.0.0.0:5555 (any address) or a specific IP
-        assert!(addrs.contains(&"0.0.0.0:5555".to_string()) ||
-                addrs.contains(&"169.254.144.47:5555".to_string()) ||
-                addrs.iter().any(|a| a.ends_with(":5555")),
-            "Should find a slave address with port 5555 from A2L file, got: {:?}", addrs);
+        assert!(
+            addrs.contains(&"0.0.0.0:5555".to_string())
+                || addrs.contains(&"169.254.144.47:5555".to_string())
+                || addrs.iter().any(|a| a.ends_with(":5555")),
+            "Should find a slave address with port 5555 from A2L file, got: {:?}",
+            addrs
+        );
+    }
+
+    #[test]
+    fn test_parse_transport_configs_from_raw_orders_by_default_priority() {
+        let raw = r#"
+            /begin IF_DATA XCP
+                /begin XCP_ON_TCP_IP 0x104 6001 ADDRESS "192.168.0.10" /end XCP_ON_TCP_IP
+                /begin XCP_ON_CAN 0x104 CAN_ID_MASTER 0x123 CAN_ID_SLAVE 0x456 /end XCP_ON_CAN
+                /begin XCP_ON_UDP_IP 0x104 5555 ADDRESS "169.254.1.20" /end XCP_ON_UDP_IP
+            /end IF_DATA
+        "#;
+
+        let configs = A2lReader::parse_transport_configs_from_raw(raw);
+
+        assert_eq!(
+            configs,
+            vec![
+                A2lTransportConfig::Udp {
+                    addr: "169.254.1.20:5555".to_string(),
+                },
+                A2lTransportConfig::Can { can_id: 0x123 },
+                A2lTransportConfig::Tcp {
+                    addr: "192.168.0.10:6001".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_transport_configs_from_file() {
+        let reader = A2lReader::load("hello_xcp.a2l").unwrap();
+        let configs = reader.get_transport_configs();
+
+        assert_eq!(
+            configs,
+            vec![A2lTransportConfig::Udp {
+                addr: "0.0.0.0:5555".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -1876,9 +2169,11 @@ mod tests {
         // All characteristics should have address_ext = 0 by default
         // (since hello_xcp.a2l doesn't explicitly set address extension in IF_DATA)
         for ch in characteristics {
-            assert_eq!(ch.address_ext, 0,
+            assert_eq!(
+                ch.address_ext, 0,
                 "Characteristic '{}' should have default address_ext=0, got {}",
-                ch.name, ch.address_ext);
+                ch.name, ch.address_ext
+            );
         }
     }
 
@@ -1998,7 +2293,10 @@ mod tests {
         for seg in &segments {
             println!(
                 "  - {} @ 0x{:08X}, size={}, calibration_allowed={}",
-                seg.name, seg.address, seg.size, seg.is_calibration_allowed()
+                seg.name,
+                seg.address,
+                seg.size,
+                seg.is_calibration_allowed()
             );
             if let Some(ref xcp) = seg.xcp_info {
                 println!(
@@ -2018,14 +2316,26 @@ mod tests {
         assert_eq!(segments.len(), 3, "abc.a2l should have 3 memory segments");
 
         // Check segment_0
-        let seg0 = segments.iter().find(|s| s.name == "segment_0_type_data").expect("segment_0 not found");
+        let seg0 = segments
+            .iter()
+            .find(|s| s.name == "segment_0_type_data")
+            .expect("segment_0 not found");
         assert_eq!(seg0.address, 0xA0380000);
         assert_eq!(seg0.size, 0x40000);
-        assert!(seg0.is_calibration_allowed(), "segment_0 should allow calibration");
+        assert!(
+            seg0.is_calibration_allowed(),
+            "segment_0 should allow calibration"
+        );
 
         // Check segment_2 (CODE segment - should NOT allow calibration)
-        let seg2 = segments.iter().find(|s| s.name == "segment_2_type_code").expect("segment_2 not found");
-        assert!(!seg2.is_calibration_allowed(), "segment_2 should NOT allow calibration");
+        let seg2 = segments
+            .iter()
+            .find(|s| s.name == "segment_2_type_code")
+            .expect("segment_2 not found");
+        assert!(
+            !seg2.is_calibration_allowed(),
+            "segment_2 should NOT allow calibration"
+        );
     }
 
     #[test]
@@ -2039,11 +2349,17 @@ mod tests {
         for seg in &segments {
             println!(
                 "  - {} @ 0x{:08X}, size={}, calibration_allowed={}",
-                seg.name, seg.address, seg.size, seg.is_calibration_allowed()
+                seg.name,
+                seg.address,
+                seg.size,
+                seg.is_calibration_allowed()
             );
         }
 
-        assert!(segments.len() >= 2, "xcp_dft.a2l should have at least 2 memory segments");
+        assert!(
+            segments.len() >= 2,
+            "xcp_dft.a2l should have at least 2 memory segments"
+        );
 
         // All segments in xcp_dft.a2l should allow calibration
         for seg in &segments {
@@ -2062,8 +2378,14 @@ mod tests {
         let segments = reader.get_memory_segments();
 
         // Find segment_0 which has 2 pages with different write access
-        let seg0 = segments.iter().find(|s| s.name == "segment_0_type_data").expect("segment_0 not found");
-        let xcp_info = seg0.xcp_info.as_ref().expect("segment_0 should have XCP info");
+        let seg0 = segments
+            .iter()
+            .find(|s| s.name == "segment_0_type_data")
+            .expect("segment_0 not found");
+        let xcp_info = seg0
+            .xcp_info
+            .as_ref()
+            .expect("segment_0 should have XCP info");
 
         assert_eq!(xcp_info.pages.len(), 2, "segment_0 should have 2 pages");
 

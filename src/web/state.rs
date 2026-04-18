@@ -4,11 +4,13 @@
 //! Single-user design - no concurrent access handling needed.
 //! Multi-slave support: tracks multiple slaves with their own A2L data.
 
+use crate::a2l::A2lTransportConfig;
 use crate::calibration::{CalibrationManager, CalibrationValue};
 use crate::checksum::VerificationReport;
 use crate::daq::DaqManager;
 use crate::hex::HexImage;
 use crate::slave::{PageMode, SlaveId, SlaveInfo};
+use crate::transport::TransportType;
 use crate::variable::{DeviceVariable, VariableSearchManager};
 use crate::web::templates::TemplateEngine;
 use crate::XcpClient;
@@ -31,6 +33,8 @@ pub struct DeviceState {
     pub original_filename: String,
     /// MAX_CTO from A2L (max command transfer object size)
     pub max_cto: u16,
+    /// Transport configurations parsed from A2L IF_DATA
+    pub transport_configs: Vec<A2lTransportConfig>,
     /// Is connected to device
     pub connected: bool,
     /// XCP slave ID when connected
@@ -55,7 +59,14 @@ pub struct DeviceState {
 
 impl DeviceState {
     /// Create new device state from A2L
-    pub fn new(id: String, name: String, address: String, a2l_path: String, original_filename: String, max_cto: u16) -> Self {
+    pub fn new(
+        id: String,
+        name: String,
+        address: String,
+        a2l_path: String,
+        original_filename: String,
+        max_cto: u16,
+    ) -> Self {
         Self {
             id,
             name,
@@ -63,6 +74,7 @@ impl DeviceState {
             a2l_path,
             original_filename,
             max_cto,
+            transport_configs: Vec::new(),
             connected: false,
             slave_id: None,
             cal_manager: Arc::new(RwLock::new(CalibrationManager::new())),
@@ -81,6 +93,47 @@ impl DeviceState {
     /// So max data = max_cto - 1
     pub fn max_upload_size(&self) -> usize {
         (self.max_cto as usize).saturating_sub(1)
+    }
+
+    pub fn resolve_transport_config(
+        &self,
+        requested: Option<TransportType>,
+    ) -> Result<A2lTransportConfig, String> {
+        if let Some(transport_type) = requested {
+            return self
+                .transport_configs
+                .iter()
+                .find(|config| config.transport_type() == transport_type)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Transport protocol {} is not available for device {}",
+                        transport_type.as_str(),
+                        self.name
+                    )
+                });
+        }
+
+        for transport_type in [TransportType::Udp, TransportType::Can, TransportType::Tcp] {
+            if let Some(config) = self
+                .transport_configs
+                .iter()
+                .find(|config| config.transport_type() == transport_type)
+            {
+                return Ok(config.clone());
+            }
+        }
+
+        if !self.address.is_empty() {
+            return Ok(A2lTransportConfig::Udp {
+                addr: self.address.clone(),
+            });
+        }
+
+        Err(format!(
+            "No transport protocol configured for device {}",
+            self.name
+        ))
     }
 }
 
@@ -163,9 +216,9 @@ impl AppState {
     /// Create new application state
     pub fn new(
         client: XcpClient,
-        _cal_manager: CalibrationManager,  // Kept for API compatibility
-        _daq_manager: DaqManager,          // Kept for API compatibility
-        _a2l_path: String,                 // Kept for API compatibility
+        _cal_manager: CalibrationManager, // Kept for API compatibility
+        _daq_manager: DaqManager,         // Kept for API compatibility
+        _a2l_path: String,                // Kept for API compatibility
     ) -> Self {
         Self {
             client: Arc::new(Mutex::new(client)),
@@ -259,7 +312,12 @@ impl AppState {
 
     /// Get connected slave count
     pub async fn connected_count(&self) -> usize {
-        self.slave_states.read().await.values().filter(|s| s.is_connected()).count()
+        self.slave_states
+            .read()
+            .await
+            .values()
+            .filter(|s| s.is_connected())
+            .count()
     }
 
     /// Create variable search manager
@@ -280,7 +338,12 @@ impl AppState {
 
     /// Get device by ID
     pub async fn get_device(&self, id: &str) -> Option<DeviceState> {
-        self.devices.read().await.iter().find(|d| d.id == id).cloned()
+        self.devices
+            .read()
+            .await
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
     }
 
     /// Add a new device
@@ -289,7 +352,12 @@ impl AppState {
     }
 
     /// Update device connection status
-    pub async fn update_device_connection(&self, device_id: &str, connected: bool, slave_id: Option<SlaveId>) {
+    pub async fn update_device_connection(
+        &self,
+        device_id: &str,
+        connected: bool,
+        slave_id: Option<SlaveId>,
+    ) {
         let mut devices = self.devices.write().await;
         if let Some(device) = devices.iter_mut().find(|d| d.id == device_id) {
             device.connected = connected;
@@ -317,7 +385,12 @@ impl AppState {
     pub async fn current_device(&self) -> Option<DeviceState> {
         let id = self.current_device_id.read().await.clone();
         if let Some(id) = id {
-            self.devices.read().await.iter().find(|d| d.id == id).cloned()
+            self.devices
+                .read()
+                .await
+                .iter()
+                .find(|d| d.id == id)
+                .cloned()
         } else {
             None
         }
@@ -330,7 +403,11 @@ impl AppState {
 
     /// Check if address already exists in any device
     pub async fn address_exists(&self, address: &str) -> bool {
-        self.devices.read().await.iter().any(|d| d.address == address)
+        self.devices
+            .read()
+            .await
+            .iter()
+            .any(|d| d.address == address)
     }
 
     /// Get total calibration count from all devices
@@ -353,6 +430,92 @@ impl AppState {
 
     /// Get connected device count
     pub async fn connected_device_count(&self) -> usize {
-        self.devices.read().await.iter().filter(|d| d.connected).count()
+        self.devices
+            .read()
+            .await
+            .iter()
+            .filter(|d| d.connected)
+            .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::a2l::A2lTransportConfig;
+    use crate::transport::TransportType;
+
+    fn build_device(transports: Vec<A2lTransportConfig>) -> DeviceState {
+        DeviceState {
+            id: "device-1".to_string(),
+            name: "ECU1".to_string(),
+            address: "127.0.0.1:5555".to_string(),
+            a2l_path: "hello_xcp.a2l".to_string(),
+            original_filename: "hello_xcp.a2l".to_string(),
+            max_cto: 255,
+            connected: false,
+            slave_id: None,
+            cal_manager: Arc::new(RwLock::new(CalibrationManager::new())),
+            daq_manager: Arc::new(RwLock::new(DaqManager::new())),
+            cal_values: Arc::new(RwLock::new(HashMap::new())),
+            daq_running: Arc::new(RwLock::new(false)),
+            page_mode: Arc::new(RwLock::new(PageMode::Reference)),
+            hex_image: Arc::new(RwLock::new(None)),
+            hex_filename: Arc::new(RwLock::new(None)),
+            checksum_report: Arc::new(RwLock::new(None)),
+            transport_configs: transports,
+        }
+    }
+
+    #[test]
+    fn test_resolve_transport_config_prefers_requested_protocol() {
+        let device = build_device(vec![
+            A2lTransportConfig::Udp {
+                addr: "127.0.0.1:5555".to_string(),
+            },
+            A2lTransportConfig::Tcp {
+                addr: "127.0.0.1:6000".to_string(),
+            },
+        ]);
+
+        let resolved = device
+            .resolve_transport_config(Some(TransportType::Tcp))
+            .expect("tcp transport should be selected");
+
+        assert_eq!(
+            resolved,
+            A2lTransportConfig::Tcp {
+                addr: "127.0.0.1:6000".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_transport_config_uses_udp_can_tcp_priority() {
+        let device = build_device(vec![
+            A2lTransportConfig::Tcp {
+                addr: "127.0.0.1:6000".to_string(),
+            },
+            A2lTransportConfig::Can { can_id: 0x321 },
+        ]);
+
+        let resolved = device
+            .resolve_transport_config(None)
+            .expect("auto mode should fall back by default priority");
+
+        assert_eq!(resolved, A2lTransportConfig::Can { can_id: 0x321 });
+    }
+
+    #[test]
+    fn test_resolve_transport_config_rejects_unavailable_requested_protocol() {
+        let device = build_device(vec![A2lTransportConfig::Udp {
+            addr: "127.0.0.1:5555".to_string(),
+        }]);
+
+        let err = device
+            .resolve_transport_config(Some(TransportType::Tcp))
+            .expect_err("unavailable requested protocol should error");
+
+        assert!(err.contains("TCP"));
     }
 }

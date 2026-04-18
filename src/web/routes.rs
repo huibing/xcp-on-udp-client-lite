@@ -15,17 +15,79 @@ use tokio::sync::RwLock;
 #[allow(unused)]
 use serde_json::json;
 
+use crate::a2l::A2lTransportConfig;
 use crate::calibration::{CalibrationManager, CalibrationParam, CalibrationType, CalibrationValue};
 use crate::daq::DaqManager;
 use crate::slave::SlaveId;
-use crate::transport::TransportConfig;
+use crate::transport::{TransportConfig, TransportType};
 use crate::web::auth::{clear_session, try_create_session, verify_credentials};
 use crate::web::state::{AppState, DeviceState, SlaveState};
 use crate::web::templates;
 
 /// Helper function to serialize calibration parameter info including axis data
-fn serialize_cal_param(p: &CalibrationParam, device_id: &str, device_name: &str, idx: usize, connected: bool) -> serde_json::Value {
+fn serialize_cal_param(
+    p: &CalibrationParam,
+    device_id: &str,
+    device_name: &str,
+    idx: usize,
+    connected: bool,
+) -> serde_json::Value {
     p.to_json(device_id, device_name, idx, connected)
+}
+
+fn parse_transport_type(value: Option<&str>) -> Result<Option<TransportType>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+
+    if value.eq_ignore_ascii_case("udp") {
+        return Ok(Some(TransportType::Udp));
+    }
+
+    if value.eq_ignore_ascii_case("can") {
+        return Ok(Some(TransportType::Can));
+    }
+
+    if value.eq_ignore_ascii_case("tcp") {
+        return Ok(Some(TransportType::Tcp));
+    }
+
+    Err(format!("Unsupported transport protocol '{}'", value))
+}
+
+fn transport_option_value(transport_type: TransportType) -> &'static str {
+    match transport_type {
+        TransportType::Udp => "udp",
+        TransportType::Can => "can",
+        TransportType::Tcp => "tcp",
+    }
+}
+
+fn build_transport_options(device: &DeviceState) -> Vec<serde_json::Value> {
+    let mut options = vec![json!({
+        "value": "",
+        "label": "Auto (UDP -> CAN -> TCP)",
+    })];
+
+    for config in &device.transport_configs {
+        options.push(json!({
+            "value": transport_option_value(config.transport_type()),
+            "label": config.display_label(),
+        }));
+    }
+
+    options
+}
+
+fn display_device_address(config: &A2lTransportConfig) -> String {
+    match config {
+        A2lTransportConfig::Udp { addr } | A2lTransportConfig::Tcp { addr } => addr.clone(),
+        A2lTransportConfig::Can { can_id } => format!("CAN 0x{:X}", can_id),
+    }
 }
 
 /// Login page (GET /login)
@@ -49,11 +111,7 @@ pub async fn login_api(
         match try_create_session(&client_ip) {
             Ok(token) => {
                 let cookie = format!("session={}; Path=/; HttpOnly; SameSite=Strict", token);
-                (
-                    AppendHeaders([(SET_COOKIE, cookie)]),
-                    Redirect::to("/"),
-                )
-                    .into_response()
+                (AppendHeaders([(SET_COOKIE, cookie)]), Redirect::to("/")).into_response()
             }
             Err(error_msg) => {
                 // Another user is already connected
@@ -126,7 +184,12 @@ pub async fn dashboard(State(state): State<AppState>) -> Html<String> {
         daq_running,
     );
 
-    Html(templates::page("Dashboard", &content, status.as_deref(), error.as_deref()))
+    Html(templates::page(
+        "Dashboard",
+        &content,
+        status.as_deref(),
+        error.as_deref(),
+    ))
 }
 
 /// Connect page (GET /connect)
@@ -144,6 +207,7 @@ pub async fn connect_page(State(state): State<AppState>) -> Html<String> {
                 "address": d.address,
                 "a2l_name": d.original_filename,
                 "connected": d.connected,
+                "transport_options": build_transport_options(d),
             })
         })
         .collect();
@@ -156,7 +220,12 @@ pub async fn connect_page(State(state): State<AppState>) -> Html<String> {
     let error = state.take_error().await;
 
     let content = templates::connect_page_devices(&device_list, &default_name);
-    Html(templates::page("Connect", &content, status.as_deref(), error.as_deref()))
+    Html(templates::page(
+        "Connect",
+        &content,
+        status.as_deref(),
+        error.as_deref(),
+    ))
 }
 
 /// Connect API (POST /api/connect)
@@ -164,21 +233,73 @@ pub async fn connect_api(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let address = form
-        .get("custom")
-        .filter(|s| !s.is_empty())
-        .or_else(|| form.get("address"))
-        .cloned()
-        .unwrap_or_else(|| "127.0.0.1:5555".to_string());
+    let requested_transport =
+        match parse_transport_type(form.get("transport_protocol").map(String::as_str)) {
+            Ok(transport) => transport,
+            Err(error) => {
+                state.set_error(error).await;
+                return Redirect::to("/");
+            }
+        };
 
-    let slave_name = form
-        .get("name")
-        .cloned()
-        .unwrap_or_else(|| format!("Slave {}", address));
+    let (transport_config, address_label, slave_name) =
+        if let Some(device_id) = form.get("device_id").filter(|value| !value.is_empty()) {
+            let Some(device) = state.get_device(device_id).await else {
+                state.set_error("Device not found".to_string()).await;
+                return Redirect::to("/");
+            };
+
+            let resolved = match device.resolve_transport_config(requested_transport) {
+                Ok(config) => config,
+                Err(error) => {
+                    state.set_error(error).await;
+                    return Redirect::to("/");
+                }
+            };
+
+            let name = form
+                .get("name")
+                .cloned()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| device.name.clone());
+
+            (
+                resolved.to_transport_config(),
+                display_device_address(&resolved),
+                name,
+            )
+        } else {
+            let address = form
+                .get("custom")
+                .filter(|s| !s.is_empty())
+                .or_else(|| form.get("address"))
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1:5555".to_string());
+
+            let transport_config = match requested_transport {
+                Some(TransportType::Tcp) => TransportConfig::Tcp {
+                    addr: address.clone(),
+                },
+                Some(TransportType::Can) => {
+                    state
+                        .set_error("Manual CAN connect is not supported from this form".to_string())
+                        .await;
+                    return Redirect::to("/");
+                }
+                Some(TransportType::Udp) | None => TransportConfig::Udp {
+                    addr: address.clone(),
+                },
+            };
+
+            let slave_name = form
+                .get("name")
+                .cloned()
+                .unwrap_or_else(|| format!("Slave {}", address));
+
+            (transport_config, address, slave_name)
+        };
 
     let mut client = state.client.lock().await;
-
-    let transport_config = TransportConfig::Udp { addr: address.clone() };
 
     match client.connect_slave(&slave_name, transport_config).await {
         Ok(slave_id) => {
@@ -202,7 +323,9 @@ pub async fn connect_api(
                         ))
                         .await;
                 } else {
-                    state.set_status(format!("Connected to {}", slave_name)).await;
+                    state
+                        .set_status(format!("Connected to {} via {}", slave_name, address_label))
+                        .await;
                 }
             }
         }
@@ -233,10 +356,17 @@ pub async fn disconnect_api(State(state): State<AppState>) -> impl IntoResponse 
             let remaining = state.all_slaves().await;
             if remaining.is_empty() {
                 state.set_current_slave(None).await;
-                state.set_status("All slaves disconnected".to_string()).await;
+                state
+                    .set_status("All slaves disconnected".to_string())
+                    .await;
             } else {
                 state.set_current_slave(Some(remaining[0].id)).await;
-                state.set_status(format!("Disconnected, now using {}", remaining[0].display_name())).await;
+                state
+                    .set_status(format!(
+                        "Disconnected, now using {}",
+                        remaining[0].display_name()
+                    ))
+                    .await;
             }
         }
     } else {
@@ -260,7 +390,9 @@ pub async fn disconnect_slave_api(
         } else {
             state.remove_slave_state(slave_id).await;
             // Update device connection status
-            state.update_device_connection_by_slave_id(slave_id, false).await;
+            state
+                .update_device_connection_by_slave_id(slave_id, false)
+                .await;
             state.set_status("Slave disconnected".to_string()).await;
         }
     } else {
@@ -280,7 +412,9 @@ pub async fn select_slave_api(
         if state.get_slave(slave_id).await.is_some() {
             state.set_current_slave(Some(slave_id)).await;
             if let Some(slave) = state.get_slave(slave_id).await {
-                state.set_status(format!("Selected: {}", slave.display_name())).await;
+                state
+                    .set_status(format!("Selected: {}", slave.display_name()))
+                    .await;
             }
         } else {
             state.set_error("Slave not found".to_string()).await;
@@ -295,20 +429,45 @@ pub async fn select_slave_api(
 // ============== Device Management Routes ==============
 
 /// Connect all devices API (POST /api/devices/connect-all)
-pub async fn connect_all_devices(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn connect_all_devices(
+    State(state): State<AppState>,
+    payload: Option<Json<serde_json::Value>>,
+) -> impl IntoResponse {
     let devices = state.all_devices().await;
     let mut client = state.client.lock().await;
     let mut connected_count = 0;
     let mut failed_devices: Vec<String> = Vec::new();
+    let transport_overrides = payload
+        .as_ref()
+        .and_then(|Json(value)| value.get("transport_protocols"))
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
 
     for device in &devices {
         if device.connected {
             continue; // Already connected
         }
 
-        let transport_config = TransportConfig::Udp {
-            addr: device.address.clone(),
+        let requested_transport = match parse_transport_type(
+            transport_overrides
+                .get(&device.id)
+                .and_then(|value| value.as_str()),
+        ) {
+            Ok(transport) => transport,
+            Err(error) => {
+                failed_devices.push(format!("{}: {}", device.name, error));
+                continue;
+            }
         };
+        let resolved_transport = match device.resolve_transport_config(requested_transport) {
+            Ok(config) => config,
+            Err(error) => {
+                failed_devices.push(format!("{}: {}", device.name, error));
+                continue;
+            }
+        };
+        let transport_config = resolved_transport.to_transport_config();
 
         match client.connect_slave(&device.name, transport_config).await {
             Ok(slave_id) => {
@@ -316,13 +475,22 @@ pub async fn connect_all_devices(State(state): State<AppState>) -> impl IntoResp
                 if !device.a2l_path.is_empty() {
                     if let Some(xcp_slave) = client.get_slave(slave_id) {
                         let mut xcp_slave_guard = xcp_slave.lock().await;
-                        let segments = device.cal_manager.read().await.get_memory_segments().to_vec();
+                        let segments = device
+                            .cal_manager
+                            .read()
+                            .await
+                            .get_memory_segments()
+                            .to_vec();
                         xcp_slave_guard.set_memory_segments(
                             segments,
                             Some(std::path::PathBuf::from(&device.a2l_path)),
                         );
                         if let Err(e) = xcp_slave_guard.update_segment_page_state().await {
-                            tracing::warn!("Failed to query page state for {}: {:?}", device.name, e);
+                            tracing::warn!(
+                                "Failed to query page state for {}: {:?}",
+                                device.name,
+                                e
+                            );
                         }
                     }
                 }
@@ -333,7 +501,8 @@ pub async fn connect_all_devices(State(state): State<AppState>) -> impl IntoResp
                     let info = guard.info.clone();
 
                     // Query live DAQ events from slave; takes precedence over A2L events
-                    let live_events_opt = if let Ok(daq_info) = guard.get_daq_processor_info().await {
+                    let live_events_opt = if let Ok(daq_info) = guard.get_daq_processor_info().await
+                    {
                         if daq_info.max_event_channel > 0 {
                             guard.get_daq_events(daq_info.max_event_channel).await.ok()
                         } else {
@@ -348,7 +517,11 @@ pub async fn connect_all_devices(State(state): State<AppState>) -> impl IntoResp
                         if !live_events.is_empty() {
                             let mut daq_mgr = device.daq_manager.write().await;
                             daq_mgr.set_available_events(live_events);
-                            tracing::info!("Loaded {} live DAQ events from slave '{}'", daq_mgr.get_available_events().len(), device.name);
+                            tracing::info!(
+                                "Loaded {} live DAQ events from slave '{}'",
+                                daq_mgr.get_available_events().len(),
+                                device.name
+                            );
                         }
                     }
 
@@ -366,7 +539,9 @@ pub async fn connect_all_devices(State(state): State<AppState>) -> impl IntoResp
                     state.add_slave_state(slave_state).await;
 
                     // Update device connection status
-                    state.update_device_connection(&device.id, true, Some(slave_id)).await;
+                    state
+                        .update_device_connection(&device.id, true, Some(slave_id))
+                        .await;
 
                     // If this is the first connection, set it as current
                     if state.current_slave().await.is_none() {
@@ -408,10 +583,27 @@ pub async fn connect_all_devices(State(state): State<AppState>) -> impl IntoResp
 }
 
 /// Connect single device API (POST /api/devices/connect)
-pub async fn connect_device(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
-    let device_id = payload.get("device_id")
+pub async fn connect_device(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let device_id = payload
+        .get("device_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let requested_transport = match parse_transport_type(
+        payload
+            .get("transport_protocol")
+            .and_then(|value| value.as_str()),
+    ) {
+        Ok(transport) => transport,
+        Err(error) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": error,
+            }));
+        }
+    };
 
     let device = match state.get_device(device_id).await {
         Some(d) => d,
@@ -430,9 +622,16 @@ pub async fn connect_device(State(state): State<AppState>, Json(payload): Json<s
         }));
     }
 
-    let transport_config = TransportConfig::Udp {
-        addr: device.address.clone(),
+    let resolved_transport = match device.resolve_transport_config(requested_transport) {
+        Ok(config) => config,
+        Err(error) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": error,
+            }));
+        }
     };
+    let transport_config = resolved_transport.to_transport_config();
 
     let mut client = state.client.lock().await;
 
@@ -442,7 +641,12 @@ pub async fn connect_device(State(state): State<AppState>, Json(payload): Json<s
             if !device.a2l_path.is_empty() {
                 if let Some(xcp_slave) = client.get_slave(slave_id) {
                     let mut xcp_slave_guard = xcp_slave.lock().await;
-                    let segments = device.cal_manager.read().await.get_memory_segments().to_vec();
+                    let segments = device
+                        .cal_manager
+                        .read()
+                        .await
+                        .get_memory_segments()
+                        .to_vec();
                     xcp_slave_guard.set_memory_segments(
                         segments,
                         Some(std::path::PathBuf::from(&device.a2l_path)),
@@ -456,31 +660,41 @@ pub async fn connect_device(State(state): State<AppState>, Json(payload): Json<s
             // Get slave info from XcpClient and query live DAQ events
             let xcp_slave_arc = match client.get_slave(slave_id) {
                 Some(s) => s,
-                None => return Json(serde_json::json!({
-                    "success": false,
-                    "error": "Failed to get slave info after connection",
-                })),
+                None => {
+                    return Json(serde_json::json!({
+                        "success": false,
+                        "error": "Failed to get slave info after connection",
+                    }))
+                }
             };
             let info = xcp_slave_arc.lock().await.info.clone();
 
             // Query live DAQ events from slave; takes precedence over A2L events
             {
                 let slave_guard = xcp_slave_arc.lock().await;
-                let live_events_opt = if let Ok(daq_info) = slave_guard.get_daq_processor_info().await {
-                    if daq_info.max_event_channel > 0 {
-                        slave_guard.get_daq_events(daq_info.max_event_channel).await.ok()
+                let live_events_opt =
+                    if let Ok(daq_info) = slave_guard.get_daq_processor_info().await {
+                        if daq_info.max_event_channel > 0 {
+                            slave_guard
+                                .get_daq_events(daq_info.max_event_channel)
+                                .await
+                                .ok()
+                        } else {
+                            None
+                        }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
+                    };
                 drop(slave_guard);
                 if let Some(live_events) = live_events_opt {
                     if !live_events.is_empty() {
                         let mut daq_mgr = device.daq_manager.write().await;
                         daq_mgr.set_available_events(live_events);
-                        tracing::info!("Loaded {} live DAQ events from slave '{}'", daq_mgr.get_available_events().len(), device.name);
+                        tracing::info!(
+                            "Loaded {} live DAQ events from slave '{}'",
+                            daq_mgr.get_available_events().len(),
+                            device.name
+                        );
                     }
                 }
             }
@@ -499,7 +713,9 @@ pub async fn connect_device(State(state): State<AppState>, Json(payload): Json<s
             state.add_slave_state(slave_state).await;
 
             // Update device connection status
-            state.update_device_connection(&device.id, true, Some(slave_id)).await;
+            state
+                .update_device_connection(&device.id, true, Some(slave_id))
+                .await;
 
             // If this is the first connection, set it as current
             if state.current_slave().await.is_none() {
@@ -508,21 +724,23 @@ pub async fn connect_device(State(state): State<AppState>, Json(payload): Json<s
 
             Json(serde_json::json!({
                 "success": true,
-                "message": format!("Connected to {}", device.name),
+                "message": format!("Connected to {} via {}", device.name, display_device_address(&resolved_transport)),
             }))
         }
-        Err(e) => {
-            Json(serde_json::json!({
-                "success": false,
-                "error": format!("Failed to connect: {}", e),
-            }))
-        }
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": format!("Failed to connect: {}", e),
+        })),
     }
 }
 
 /// Disconnect device API (POST /api/devices/disconnect)
-pub async fn disconnect_device(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
-    let device_id = payload.get("device_id")
+pub async fn disconnect_device(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let device_id = payload
+        .get("device_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -568,7 +786,9 @@ pub async fn disconnect_device(State(state): State<AppState>, Json(payload): Jso
     }
 
     // Update device connection status
-    state.update_device_connection(&device.id, false, None).await;
+    state
+        .update_device_connection(&device.id, false, None)
+        .await;
 
     Json(serde_json::json!({
         "success": true,
@@ -577,8 +797,12 @@ pub async fn disconnect_device(State(state): State<AppState>, Json(payload): Jso
 }
 
 /// Remove device API (POST /api/devices/remove)
-pub async fn remove_device(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
-    let device_id = payload.get("device_id")
+pub async fn remove_device(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let device_id = payload
+        .get("device_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -635,7 +859,12 @@ pub async fn slaves_page(State(state): State<AppState>) -> Html<String> {
 
     let content = templates::slaves_page(&slaves_data, current_id);
 
-    Html(templates::page("Slaves", &content, status.as_deref(), error.as_deref()))
+    Html(templates::page(
+        "Slaves",
+        &content,
+        status.as_deref(),
+        error.as_deref(),
+    ))
 }
 
 /// Calibration page (GET /calibration)
@@ -661,7 +890,12 @@ pub async fn calibration_page(
 
     // Render empty calibration page - variables loaded via API
     let content = templates::calibration_page(&[], 0);
-    Html(templates::page("Calibration", &content, status.as_deref(), error.as_deref()))
+    Html(templates::page(
+        "Calibration",
+        &content,
+        status.as_deref(),
+        error.as_deref(),
+    ))
 }
 
 /// Get available calibration variables (GET /api/cal/available)
@@ -796,11 +1030,18 @@ pub async fn cal_read(
                     map.insert("cached".to_string(), serde_json::json!(true));
                     // Add enum info for scalar values
                     let is_enum = param.is_enum();
-                    let enum_options: Vec<serde_json::Value> = param.enum_options()
-                        .map(|opts| opts.iter().map(|opt| json!({
-                            "raw": opt.raw_value,
-                            "text": opt.text_value,
-                        })).collect())
+                    let enum_options: Vec<serde_json::Value> = param
+                        .enum_options()
+                        .map(|opts| {
+                            opts.iter()
+                                .map(|opt| {
+                                    json!({
+                                        "raw": opt.raw_value,
+                                        "text": opt.text_value,
+                                    })
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default();
                     map.insert("is_enum".to_string(), serde_json::json!(is_enum));
                     map.insert("enum_options".to_string(), serde_json::json!(enum_options));
@@ -830,7 +1071,11 @@ pub async fn cal_read(
                 Ok(value) => {
                     let value_str = value.format();
                     tracing::info!("Successfully read {} = {}", param.name, value_str);
-                    slave.cal_values.write().await.insert(param.name.clone(), value.clone());
+                    slave
+                        .cal_values
+                        .write()
+                        .await
+                        .insert(param.name.clone(), value.clone());
 
                     // Build response using parameter's to_json for base metadata
                     let mut base = param.to_json("", &slave.display_name(), 0, true);
@@ -841,11 +1086,18 @@ pub async fn cal_read(
                         map.insert("value".to_string(), serde_json::json!(value_str));
                         // Add enum info for scalar values
                         let is_enum = param.is_enum();
-                        let enum_options: Vec<serde_json::Value> = param.enum_options()
-                            .map(|opts| opts.iter().map(|opt| json!({
-                                "raw": opt.raw_value,
-                                "text": opt.text_value,
-                            })).collect())
+                        let enum_options: Vec<serde_json::Value> = param
+                            .enum_options()
+                            .map(|opts| {
+                                opts.iter()
+                                    .map(|opt| {
+                                        json!({
+                                            "raw": opt.raw_value,
+                                            "text": opt.text_value,
+                                        })
+                                    })
+                                    .collect()
+                            })
                             .unwrap_or_default();
                         map.insert("is_enum".to_string(), serde_json::json!(is_enum));
                         map.insert("enum_options".to_string(), serde_json::json!(enum_options));
@@ -887,7 +1139,12 @@ async fn read_calibration_from_slave(
     let mta = Mta::new(param.address, param.address_ext);
     let size = param.data_type.size();
 
-    tracing::trace!("Reading {} bytes from address 0x{:08X} (ext: {})", size, mta.address, mta.extension);
+    tracing::trace!(
+        "Reading {} bytes from address 0x{:08X} (ext: {})",
+        size,
+        mta.address,
+        mta.extension
+    );
 
     // Check for zero size (invalid matrix_dim issue)
     if size == 0 {
@@ -899,7 +1156,10 @@ async fn read_calibration_from_slave(
 
     // Use slave's actual maxCTO from CONNECT response (not A2L's MAX_CTO)
     // This ensures we use the correct chunk size for UPLOAD operations
-    let data = slave.read_large_data(mta, size, None).await.map_err(|e| e.to_string())?;
+    let data = slave
+        .read_large_data(mta, size, None)
+        .await
+        .map_err(|e| e.to_string())?;
 
     tracing::trace!("Read {} bytes, expected {}", data.len(), size);
 
@@ -907,7 +1167,8 @@ async fn read_calibration_from_slave(
     if data.len() != size {
         return Err(format!(
             "Data length mismatch: expected {} bytes, got {}",
-            size, data.len()
+            size,
+            data.len()
         ));
     }
 
@@ -915,51 +1176,48 @@ async fn read_calibration_from_slave(
     let value = match &param.data_type {
         // Scalar types
         CalibrationType::U8 => CalibrationValue::U8(data[0]),
-        CalibrationType::U16 => {
-            CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]]))
-        }
+        CalibrationType::U16 => CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]])),
         CalibrationType::U32 => {
             CalibrationValue::U32(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
         }
-        CalibrationType::U64 => {
-            CalibrationValue::U64(u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
-        }
+        CalibrationType::U64 => CalibrationValue::U64(u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ])),
         CalibrationType::I8 => CalibrationValue::I8(data[0] as i8),
-        CalibrationType::I16 => {
-            CalibrationValue::I16(i16::from_le_bytes([data[0], data[1]]))
-        }
+        CalibrationType::I16 => CalibrationValue::I16(i16::from_le_bytes([data[0], data[1]])),
         CalibrationType::I32 => {
             CalibrationValue::I32(i32::from_le_bytes([data[0], data[1], data[2], data[3]]))
         }
-        CalibrationType::I64 => {
-            CalibrationValue::I64(i64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
-        }
+        CalibrationType::I64 => CalibrationValue::I64(i64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ])),
         CalibrationType::F32 => {
             CalibrationValue::F32(f32::from_le_bytes([data[0], data[1], data[2], data[3]]))
         }
-        CalibrationType::F64 => {
-            CalibrationValue::F64(f64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
-        }
+        CalibrationType::F64 => CalibrationValue::F64(f64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ])),
         CalibrationType::Bool => CalibrationValue::Bool(data[0] != 0),
 
         // Array types
-        CalibrationType::U8Array(_len) => {
-            CalibrationValue::U8Array(data.clone())
-        }
+        CalibrationType::U8Array(_len) => CalibrationValue::U8Array(data.clone()),
         CalibrationType::U16Array(_len) => {
-            let vals: Vec<u16> = data.chunks_exact(2)
+            let vals: Vec<u16> = data
+                .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
             CalibrationValue::U16Array(vals)
         }
         CalibrationType::U32Array(_len) => {
-            let vals: Vec<u32> = data.chunks_exact(4)
+            let vals: Vec<u32> = data
+                .chunks_exact(4)
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
             CalibrationValue::U32Array(vals)
         }
         CalibrationType::U64Array(_len) => {
-            let vals: Vec<u64> = data.chunks_exact(8)
+            let vals: Vec<u64> = data
+                .chunks_exact(8)
                 .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                 .collect();
             CalibrationValue::U64Array(vals)
@@ -968,31 +1226,36 @@ async fn read_calibration_from_slave(
             CalibrationValue::I8Array(data.iter().map(|&v| v as i8).collect())
         }
         CalibrationType::I16Array(_len) => {
-            let vals: Vec<i16> = data.chunks_exact(2)
+            let vals: Vec<i16> = data
+                .chunks_exact(2)
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect();
             CalibrationValue::I16Array(vals)
         }
         CalibrationType::I32Array(_len) => {
-            let vals: Vec<i32> = data.chunks_exact(4)
+            let vals: Vec<i32> = data
+                .chunks_exact(4)
                 .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
             CalibrationValue::I32Array(vals)
         }
         CalibrationType::I64Array(_len) => {
-            let vals: Vec<i64> = data.chunks_exact(8)
+            let vals: Vec<i64> = data
+                .chunks_exact(8)
                 .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                 .collect();
             CalibrationValue::I64Array(vals)
         }
         CalibrationType::F32Array(_len) => {
-            let vals: Vec<f32> = data.chunks_exact(4)
+            let vals: Vec<f32> = data
+                .chunks_exact(4)
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
             CalibrationValue::F32Array(vals)
         }
         CalibrationType::F64Array(_len) => {
-            let vals: Vec<f64> = data.chunks_exact(8)
+            let vals: Vec<f64> = data
+                .chunks_exact(8)
                 .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                 .collect();
             CalibrationValue::F64Array(vals)
@@ -1003,13 +1266,12 @@ async fn read_calibration_from_slave(
 
         // Matrix types - flatten to 2D vectors
         CalibrationType::U8Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<u8>> = data.chunks_exact(*cols)
-                .map(|c| c.to_vec())
-                .collect();
+            let matrix: Vec<Vec<u8>> = data.chunks_exact(*cols).map(|c| c.to_vec()).collect();
             CalibrationValue::U8Matrix(matrix)
         }
         CalibrationType::U16Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<u16>> = data.chunks_exact(cols * 2)
+            let matrix: Vec<Vec<u16>> = data
+                .chunks_exact(cols * 2)
                 .map(|row| {
                     row.chunks_exact(2)
                         .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -1019,7 +1281,8 @@ async fn read_calibration_from_slave(
             CalibrationValue::U16Matrix(matrix)
         }
         CalibrationType::U32Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<u32>> = data.chunks_exact(cols * 4)
+            let matrix: Vec<Vec<u32>> = data
+                .chunks_exact(cols * 4)
                 .map(|row| {
                     row.chunks_exact(4)
                         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -1029,23 +1292,28 @@ async fn read_calibration_from_slave(
             CalibrationValue::U32Matrix(matrix)
         }
         CalibrationType::U64Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<u64>> = data.chunks_exact(cols * 8)
+            let matrix: Vec<Vec<u64>> = data
+                .chunks_exact(cols * 8)
                 .map(|row| {
                     row.chunks_exact(8)
-                        .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                        .map(|c| {
+                            u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
+                        })
                         .collect()
                 })
                 .collect();
             CalibrationValue::U64Matrix(matrix)
         }
         CalibrationType::I8Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<i8>> = data.chunks_exact(*cols)
+            let matrix: Vec<Vec<i8>> = data
+                .chunks_exact(*cols)
                 .map(|row| row.iter().map(|&v| v as i8).collect())
                 .collect();
             CalibrationValue::I8Matrix(matrix)
         }
         CalibrationType::I16Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<i16>> = data.chunks_exact(cols * 2)
+            let matrix: Vec<Vec<i16>> = data
+                .chunks_exact(cols * 2)
                 .map(|row| {
                     row.chunks_exact(2)
                         .map(|c| i16::from_le_bytes([c[0], c[1]]))
@@ -1055,7 +1323,8 @@ async fn read_calibration_from_slave(
             CalibrationValue::I16Matrix(matrix)
         }
         CalibrationType::I32Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<i32>> = data.chunks_exact(cols * 4)
+            let matrix: Vec<Vec<i32>> = data
+                .chunks_exact(cols * 4)
                 .map(|row| {
                     row.chunks_exact(4)
                         .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -1065,17 +1334,21 @@ async fn read_calibration_from_slave(
             CalibrationValue::I32Matrix(matrix)
         }
         CalibrationType::I64Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<i64>> = data.chunks_exact(cols * 8)
+            let matrix: Vec<Vec<i64>> = data
+                .chunks_exact(cols * 8)
                 .map(|row| {
                     row.chunks_exact(8)
-                        .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                        .map(|c| {
+                            i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
+                        })
                         .collect()
                 })
                 .collect();
             CalibrationValue::I64Matrix(matrix)
         }
         CalibrationType::F32Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<f32>> = data.chunks_exact(cols * 4)
+            let matrix: Vec<Vec<f32>> = data
+                .chunks_exact(cols * 4)
                 .map(|row| {
                     row.chunks_exact(4)
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -1085,17 +1358,21 @@ async fn read_calibration_from_slave(
             CalibrationValue::F32Matrix(matrix)
         }
         CalibrationType::F64Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<f64>> = data.chunks_exact(cols * 8)
+            let matrix: Vec<Vec<f64>> = data
+                .chunks_exact(cols * 8)
                 .map(|row| {
                     row.chunks_exact(8)
-                        .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                        .map(|c| {
+                            f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
+                        })
                         .collect()
                 })
                 .collect();
             CalibrationValue::F64Matrix(matrix)
         }
         CalibrationType::BoolMatrix(_rows, cols) => {
-            let matrix: Vec<Vec<bool>> = data.chunks_exact(*cols)
+            let matrix: Vec<Vec<bool>> = data
+                .chunks_exact(*cols)
                 .map(|row| row.iter().map(|&v| v != 0).collect())
                 .collect();
             CalibrationValue::BoolMatrix(matrix)
@@ -1138,8 +1415,13 @@ pub async fn cal_write_page(
     if let Some(param) = cal_manager.params().get(idx) {
         let current = cal_values.get(&param.name).map(|v| v.format());
         let is_enum = param.is_enum();
-        let enum_options: Vec<(i64, String)> = param.enum_options()
-            .map(|opts| opts.iter().map(|opt| (opt.raw_value, opt.text_value.clone())).collect())
+        let enum_options: Vec<(i64, String)> = param
+            .enum_options()
+            .map(|opts| {
+                opts.iter()
+                    .map(|opt| (opt.raw_value, opt.text_value.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         let content = templates::cal_write_page(
             &device_id_str,
@@ -1176,12 +1458,16 @@ pub async fn cal_write_api(
 
     let slave_id = SlaveId(uuid);
     let Some(slave) = state.get_slave(slave_id).await else {
-        state.set_error("Device not found or not connected".to_string()).await;
+        state
+            .set_error("Device not found or not connected".to_string())
+            .await;
         return Redirect::to("/calibration");
     };
 
     if !slave.is_connected() {
-        state.set_error("Not connected to XCP slave".to_string()).await;
+        state
+            .set_error("Not connected to XCP slave".to_string())
+            .await;
         return Redirect::to("/calibration");
     }
 
@@ -1205,14 +1491,24 @@ pub async fn cal_write_api(
                     let result = async {
                         let xcp_slave_guard = xcp_slave.lock().await;
                         write_calibration_to_slave(&xcp_slave_guard, &param, &value).await
-                    }.await;
+                    }
+                    .await;
 
                     match result {
                         Ok(_) => {
                             // Update cache after successful write
-                            slave.cal_values.write().await.insert(param.name.clone(), value.clone());
+                            slave
+                                .cal_values
+                                .write()
+                                .await
+                                .insert(param.name.clone(), value.clone());
                             state
-                                .set_status(format!("[{}] Wrote {} = {}", slave.display_name(), param.name, value_str))
+                                .set_status(format!(
+                                    "[{}] Wrote {} = {}",
+                                    slave.display_name(),
+                                    param.name,
+                                    value_str
+                                ))
                                 .await;
                         }
                         Err(e) => {
@@ -1247,7 +1543,9 @@ async fn write_calibration_to_slave(
 
     tracing::info!(
         "write_calibration_to_slave: param='{}' type={:?} address=0x{:08X}",
-        param.name, param.data_type, param.address
+        param.name,
+        param.data_type,
+        param.address
     );
 
     let mta = Mta::new(param.address, param.address_ext);
@@ -1304,53 +1602,71 @@ async fn write_calibration_to_slave(
         (CalibrationValue::U8Matrix(mat), CalibrationType::U8Matrix(_, _)) => {
             mat.iter().flat_map(|row| row.iter().copied()).collect()
         }
-        (CalibrationValue::U16Matrix(mat), CalibrationType::U16Matrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
-        }
-        (CalibrationValue::U32Matrix(mat), CalibrationType::U32Matrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
-        }
-        (CalibrationValue::U64Matrix(mat), CalibrationType::U64Matrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
-        }
-        (CalibrationValue::I8Matrix(mat), CalibrationType::I8Matrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().map(|v| *v as u8)).collect()
-        }
-        (CalibrationValue::I16Matrix(mat), CalibrationType::I16Matrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
-        }
-        (CalibrationValue::I32Matrix(mat), CalibrationType::I32Matrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
-        }
-        (CalibrationValue::I64Matrix(mat), CalibrationType::I64Matrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
-        }
-        (CalibrationValue::F32Matrix(mat), CalibrationType::F32Matrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
-        }
-        (CalibrationValue::F64Matrix(mat), CalibrationType::F64Matrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes())).collect()
-        }
-        (CalibrationValue::BoolMatrix(mat), CalibrationType::BoolMatrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().map(|v| if *v { 1u8 } else { 0u8 })).collect()
-        }
+        (CalibrationValue::U16Matrix(mat), CalibrationType::U16Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::U32Matrix(mat), CalibrationType::U32Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::U64Matrix(mat), CalibrationType::U64Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::I8Matrix(mat), CalibrationType::I8Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().map(|v| *v as u8))
+            .collect(),
+        (CalibrationValue::I16Matrix(mat), CalibrationType::I16Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::I32Matrix(mat), CalibrationType::I32Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::I64Matrix(mat), CalibrationType::I64Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::F32Matrix(mat), CalibrationType::F32Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::F64Matrix(mat), CalibrationType::F64Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::BoolMatrix(mat), CalibrationType::BoolMatrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().map(|v| if *v { 1u8 } else { 0u8 }))
+            .collect(),
         _ => return Err(format!("Value type mismatch for {:?}", param.data_type)),
     };
 
     tracing::info!(
         "write_calibration_to_slave: writing {} bytes to 0x{:08X} (ext={})",
-        data.len(), mta.address, mta.extension
+        data.len(),
+        mta.address,
+        mta.extension
     );
 
     // Write data using sequential DOWNLOAD commands (no DOWNLOAD_NEXT)
     // This is more compatible with slaves that don't support block transfer
     if data.len() <= 255 {
         tracing::info!("write_calibration_to_slave: using write_memory_sequential (small data)");
-        slave.write_memory_sequential(mta, &data).await.map_err(|e| e.to_string())
+        slave
+            .write_memory_sequential(mta, &data)
+            .await
+            .map_err(|e| e.to_string())
     } else {
         tracing::info!("write_calibration_to_slave: using write_u8_array_sequential (large data)");
         // Use sequential download for larger writes
-        slave.write_u8_array_sequential(mta, &data).await.map_err(|e| e.to_string())
+        slave
+            .write_u8_array_sequential(mta, &data)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -1399,7 +1715,10 @@ pub async fn switch_page_mode(
     Json(payload): Json<HashMap<String, String>>,
 ) -> impl IntoResponse {
     // Get the mode from payload
-    let mode_str = payload.get("mode").cloned().unwrap_or_else(|| "reference".to_string());
+    let mode_str = payload
+        .get("mode")
+        .cloned()
+        .unwrap_or_else(|| "reference".to_string());
     let mode = match mode_str.as_str() {
         "working" => crate::slave::PageMode::Working,
         "reference" => crate::slave::PageMode::Reference,
@@ -1452,12 +1771,10 @@ pub async fn switch_page_mode(
                     "segments_switched": segments_switched.len(),
                 }))
             }
-            Err(e) => {
-                Json(json!({
-                    "success": false,
-                    "error": e.to_string()
-                }))
-            }
+            Err(e) => Json(json!({
+                "success": false,
+                "error": e.to_string()
+            })),
         }
     } else {
         Json(json!({
@@ -1474,14 +1791,19 @@ pub async fn daq_page(State(state): State<AppState>) -> Html<String> {
 
     // Render empty DAQ page - variables loaded via API
     let content = templates::daq_page(
-        &[],  // measurements
-        &[],  // selected_indices
+        &[],   // measurements
+        &[],   // selected_indices
         false, // daq_running
         &[],   // latest_values
         &[],   // slaves
         None,  // current_slave_id
     );
-    Html(templates::page("DAQ", &content, status.as_deref(), error.as_deref()))
+    Html(templates::page(
+        "DAQ",
+        &content,
+        status.as_deref(),
+        error.as_deref(),
+    ))
 }
 
 /// Get available DAQ measurements (GET /api/daq/available)
@@ -1576,15 +1898,15 @@ pub async fn daq_start(State(state): State<AppState>) -> impl IntoResponse {
     match daq_manager.start(&*xcp_slave_guard, 1000).await {
         Ok(_) => {
             *slave.daq_running.write().await = true;
-            state.set_status(format!("DAQ started on {}", slave_name)).await;
+            state
+                .set_status(format!("DAQ started on {}", slave_name))
+                .await;
             Json(json!({ "success": true }))
         }
-        Err(e) => {
-            Json(json!({
-                "success": false,
-                "error": format!("DAQ start failed: {}", e)
-            }))
-        }
+        Err(e) => Json(json!({
+            "success": false,
+            "error": format!("DAQ start failed: {}", e)
+        })),
     }
 }
 
@@ -1621,15 +1943,15 @@ pub async fn daq_stop(State(state): State<AppState>) -> impl IntoResponse {
     match daq_manager.stop(&*xcp_slave_guard).await {
         Ok(_) => {
             *slave.daq_running.write().await = false;
-            state.set_status(format!("DAQ stopped on {}", slave_name)).await;
+            state
+                .set_status(format!("DAQ stopped on {}", slave_name))
+                .await;
             Json(json!({ "success": true }))
         }
-        Err(e) => {
-            Json(json!({
-                "success": false,
-                "error": format!("DAQ stop failed: {}", e)
-            }))
-        }
+        Err(e) => Json(json!({
+            "success": false,
+            "error": format!("DAQ stop failed: {}", e)
+        })),
     }
 }
 
@@ -1678,7 +2000,9 @@ pub async fn daq_start_recording(State(state): State<AppState>) -> impl IntoResp
             "error": "No running DAQ found to record"
         }))
     } else {
-        state.set_status(format!("Recording started on {} slave(s)", started_count)).await;
+        state
+            .set_status(format!("Recording started on {} slave(s)", started_count))
+            .await;
         Json(json!({ "success": true, "started": started_count }))
     }
 }
@@ -1718,7 +2042,9 @@ pub async fn daq_stop_recording(State(state): State<AppState>) -> impl IntoRespo
             "stopped": stopped_count
         }))
     } else {
-        state.set_status(format!("Recording stopped on {} slave(s)", stopped_count)).await;
+        state
+            .set_status(format!("Recording stopped on {} slave(s)", stopped_count))
+            .await;
         Json(json!({ "success": true, "stopped": stopped_count }))
     }
 }
@@ -1783,18 +2109,19 @@ pub async fn daq_set_selection(
 pub async fn daq_status(State(state): State<AppState>) -> impl IntoResponse {
     let current_slave = state.current_slave().await;
 
-    let (running, recording, rec_duration, csv_size, mf4_size) = if let Some(ref slave) = current_slave {
-        let daq = slave.daq_manager.read().await;
-        let is_rec = daq.is_recording();
-        let (dur, csv, mf4) = if is_rec {
-            daq.recording_stats().await
+    let (running, recording, rec_duration, csv_size, mf4_size) =
+        if let Some(ref slave) = current_slave {
+            let daq = slave.daq_manager.read().await;
+            let is_rec = daq.is_recording();
+            let (dur, csv, mf4) = if is_rec {
+                daq.recording_stats().await
+            } else {
+                (0.0, 0, 0)
+            };
+            (*slave.daq_running.read().await, is_rec, dur, csv, mf4)
         } else {
-            (0.0, 0, 0)
+            (false, false, 0.0, 0, 0)
         };
-        (*slave.daq_running.read().await, is_rec, dur, csv, mf4)
-    } else {
-        (false, false, 0.0, 0, 0)
-    };
 
     Json(json!({
         "running": running,
@@ -1811,7 +2138,10 @@ pub async fn daq_toggle(
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
     // Support both slave_id and device_id parameters
-    let device_id_str = form.get("device_id").or_else(|| form.get("slave_id")).cloned();
+    let device_id_str = form
+        .get("device_id")
+        .or_else(|| form.get("slave_id"))
+        .cloned();
     let idx_str = form.get("idx").cloned();
     let selected = form.get("selected").map(|s| s == "true");
 
@@ -1872,7 +2202,9 @@ pub async fn daq_clear(State(state): State<AppState>) -> impl IntoResponse {
     if let Some(slave) = current_slave {
         let mut daq_manager = slave.daq_manager.write().await;
         daq_manager.clear_samples();
-        state.set_status(format!("DAQ data cleared for {}", slave.display_name())).await;
+        state
+            .set_status(format!("DAQ data cleared for {}", slave.display_name()))
+            .await;
     } else {
         // Clear all slaves
         let slaves = state.all_slaves().await;
@@ -1880,7 +2212,9 @@ pub async fn daq_clear(State(state): State<AppState>) -> impl IntoResponse {
             let mut daq_manager = slave.daq_manager.write().await;
             daq_manager.clear_samples();
         }
-        state.set_status("DAQ data cleared for all slaves".to_string()).await;
+        state
+            .set_status("DAQ data cleared for all slaves".to_string())
+            .await;
     }
 
     Json(json!({ "success": true }))
@@ -1924,8 +2258,10 @@ pub async fn daq_data(
                     let device_id = slave.id.to_string();
 
                     // Filter by selected variables if any
-                    if filter_set.is_empty() || filter_set.contains(&(device_id.clone(), k.clone())) {
-                        let updated_at = r.signal_timestamps.get(k).copied().unwrap_or(r.timestamp_s);
+                    if filter_set.is_empty() || filter_set.contains(&(device_id.clone(), k.clone()))
+                    {
+                        let updated_at =
+                            r.signal_timestamps.get(k).copied().unwrap_or(r.timestamp_s);
                         values.push(json!({
                             "device_id": device_id,
                             "var_name": k,
@@ -1965,33 +2301,49 @@ pub async fn daq_data(
 /// A2L page (GET /a2l)
 pub async fn a2l_page(State(state): State<AppState>) -> Html<String> {
     let devices = state.all_devices().await;
+    let selected_device = state
+        .current_device()
+        .await
+        .or_else(|| devices.first().cloned());
 
     // Get path from current device or first device
-    let (path, cal_count, meas_count) = if let Some(current_device) = state.current_device().await {
-        let cal_mgr = current_device.cal_manager.read().await;
-        let daq_mgr = current_device.daq_manager.read().await;
-        (current_device.a2l_path.clone(), cal_mgr.params().len(), daq_mgr.available_count())
-    } else if let Some(first_device) = devices.first() {
-        let cal_mgr = first_device.cal_manager.read().await;
-        let daq_mgr = first_device.daq_manager.read().await;
-        (first_device.a2l_path.clone(), cal_mgr.params().len(), daq_mgr.available_count())
+    let (path, cal_count, meas_count) = if let Some(device) = selected_device.as_ref() {
+        let cal_mgr = device.cal_manager.read().await;
+        let daq_mgr = device.daq_manager.read().await;
+        (
+            device.a2l_path.clone(),
+            cal_mgr.params().len(),
+            daq_mgr.available_count(),
+        )
     } else {
         (String::new(), 0, 0)
     };
 
-    // Get slave addresses from devices
-    let slave_addresses: Vec<String> = devices.iter().map(|d| d.address.clone()).collect();
-
     // Build current device info for template
-    let current_device_info = state.current_device().await.map(|d| {
-        (d.id.clone(), d.name.clone())
-    });
+    let current_device_info = selected_device
+        .as_ref()
+        .map(|d| (d.id.clone(), d.name.clone()));
+    let transport_options = selected_device
+        .as_ref()
+        .map(build_transport_options)
+        .unwrap_or_default();
 
     let status = state.take_status().await;
     let error = state.take_error().await;
 
-    let content = templates::a2l_page(&path, current_device_info.as_ref(), &slave_addresses, cal_count, meas_count);
-    Html(templates::page("A2L", &content, status.as_deref(), error.as_deref()))
+    let content = templates::a2l_page(
+        &path,
+        current_device_info.as_ref(),
+        &transport_options,
+        cal_count,
+        meas_count,
+    );
+    Html(templates::page(
+        "A2L",
+        &content,
+        status.as_deref(),
+        error.as_deref(),
+    ))
 }
 
 /// A2L load API (POST /api/a2l/load)
@@ -2063,22 +2415,14 @@ pub async fn a2l_load(
     if let Some(path) = path {
         use crate::A2lReader;
 
-        // Parse A2L file to get device address
-        let (reader, addresses) = match tokio::task::spawn_blocking({
+        // Parse A2L file and extract transport metadata
+        let reader = match tokio::task::spawn_blocking({
             let path = path.clone();
-            move || {
-                // Load A2L and get addresses without using ? in closure
-                let reader_result = A2lReader::load(&path);
-                match reader_result {
-                    Ok(reader) => {
-                        let addrs = reader.get_slave_addresses();
-                        Ok((reader, addrs))
-                    }
-                    Err(e) => Err(format!("A2L parse error: {:?}", e)),
-                }
-            }
-        }).await {
-            Ok(Ok(result)) => result,
+            move || A2lReader::load(&path).map_err(|e| format!("A2L parse error: {:?}", e))
+        })
+        .await
+        {
+            Ok(Ok(reader)) => reader,
             Ok(Err(e)) => {
                 return axum::Json(serde_json::json!({
                     "success": false,
@@ -2093,8 +2437,12 @@ pub async fn a2l_load(
             }
         };
 
-        // Get device address from A2L
-        let device_addr = addresses.first().cloned().unwrap_or_else(|| "127.0.0.1:5555".to_string());
+        let transport_configs = reader.get_transport_configs();
+        let device_addr = transport_configs
+            .first()
+            .map(display_device_address)
+            .or_else(|| reader.get_slave_addresses().first().cloned())
+            .unwrap_or_else(|| "127.0.0.1:5555".to_string());
 
         // Check for duplicate IP address
         if state.address_exists(&device_addr).await {
@@ -2123,7 +2471,9 @@ pub async fn a2l_load(
         let device_id = uuid::Uuid::new_v4().to_string();
 
         // Use original filename from user upload
-        let original_filename = file_name.clone().unwrap_or_else(|| "unknown.a2l".to_string());
+        let original_filename = file_name
+            .clone()
+            .unwrap_or_else(|| "unknown.a2l".to_string());
 
         // Get current device count for naming (synchronous approximation)
         let device_count = state.devices.read().await.len();
@@ -2165,6 +2515,7 @@ pub async fn a2l_load(
             a2l_path: path.to_string_lossy().to_string(),
             original_filename: original_filename.clone(),
             max_cto,
+            transport_configs: transport_configs.clone(),
             connected: false,
             slave_id: None,
             cal_manager: Arc::new(RwLock::new(cal_manager)),
@@ -2179,10 +2530,24 @@ pub async fn a2l_load(
 
         state.add_device(device).await;
 
-        state.set_status(format!(
-            "Added device {} with address {} ({} cal params, {} measurements)",
-            original_filename, device_addr, cal_count, meas_count
-        )).await;
+        state
+            .set_status(format!(
+                "Added device {} with address {} ({} cal params, {} measurements, protocols: {})",
+                original_filename,
+                device_addr,
+                cal_count,
+                meas_count,
+                if transport_configs.is_empty() {
+                    "default UDP".to_string()
+                } else {
+                    transport_configs
+                        .iter()
+                        .map(|config| config.transport_type().as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ))
+            .await;
 
         return axum::Json(serde_json::json!({
             "success": true,
@@ -2195,6 +2560,10 @@ pub async fn a2l_load(
             "meas_count": meas_count,
             "device_id": device_id,
             "device_address": device_addr,
+            "transport_protocols": transport_configs
+                .iter()
+                .map(|config| transport_option_value(config.transport_type()))
+                .collect::<Vec<_>>(),
         }));
     }
 
@@ -2206,39 +2575,51 @@ pub async fn a2l_load(
 
 /// Get available DAQ events (GET /api/daq/events)
 pub async fn daq_events(State(state): State<AppState>) -> impl IntoResponse {
-    let get_events_from_daq = |daq: &DaqManager| -> (Vec<serde_json::Value>, u16, serde_json::Value) {
-        let events = daq.get_available_events().iter().map(|e| {
-            json!({
-                "channel": e.channel,
-                "name": e.name,
-                "short_name": e.short_name,
-                "time_cycle": e.time_cycle,
-                "time_unit": e.time_unit,
-                "max_daq_list": e.max_daq_list,
-                "priority": e.priority,
-                "display_label": e.display_label(),
-                "cycle_time_ms": e.cycle_time_ms(),
-            })
-        }).collect();
-        // Build per-measurement event map: { "measurement_idx": event_channel, ... }
-        let meas_events: serde_json::Map<String, serde_json::Value> = daq.get_measurement_events()
-            .iter()
-            .map(|(idx, ch)| (idx.to_string(), json!(*ch)))
-            .collect();
-        (events, daq.get_event_channel(), json!(meas_events))
-    };
+    let get_events_from_daq =
+        |daq: &DaqManager| -> (Vec<serde_json::Value>, u16, serde_json::Value) {
+            let events = daq
+                .get_available_events()
+                .iter()
+                .map(|e| {
+                    json!({
+                        "channel": e.channel,
+                        "name": e.name,
+                        "short_name": e.short_name,
+                        "time_cycle": e.time_cycle,
+                        "time_unit": e.time_unit,
+                        "max_daq_list": e.max_daq_list,
+                        "priority": e.priority,
+                        "display_label": e.display_label(),
+                        "cycle_time_ms": e.cycle_time_ms(),
+                    })
+                })
+                .collect();
+            // Build per-measurement event map: { "measurement_idx": event_channel, ... }
+            let meas_events: serde_json::Map<String, serde_json::Value> = daq
+                .get_measurement_events()
+                .iter()
+                .map(|(idx, ch)| (idx.to_string(), json!(*ch)))
+                .collect();
+            (events, daq.get_event_channel(), json!(meas_events))
+        };
 
     if let Some(slave) = state.current_slave().await {
         let daq = slave.daq_manager.read().await;
         let (events, selected, meas_events) = get_events_from_daq(&daq);
-        return Json(json!({ "success": true, "events": events, "selected_channel": selected, "measurement_events": meas_events }));
+        return Json(
+            json!({ "success": true, "events": events, "selected_channel": selected, "measurement_events": meas_events }),
+        );
     }
     if let Some(device) = state.current_device().await {
         let daq = device.daq_manager.read().await;
         let (events, selected, meas_events) = get_events_from_daq(&daq);
-        return Json(json!({ "success": true, "events": events, "selected_channel": selected, "measurement_events": meas_events }));
+        return Json(
+            json!({ "success": true, "events": events, "selected_channel": selected, "measurement_events": meas_events }),
+        );
     }
-    Json(json!({ "success": true, "events": [], "selected_channel": 0u16, "measurement_events": {} }))
+    Json(
+        json!({ "success": true, "events": [], "selected_channel": 0u16, "measurement_events": {} }),
+    )
 }
 
 /// Set default DAQ event channel (POST /api/daq/event)
@@ -2306,16 +2687,12 @@ pub async fn daq_set_measurement_events(
 }
 
 /// Download DAQ CSV file
-pub async fn daq_download_csv(
-    State(_state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn daq_download_csv(State(_state): State<AppState>) -> impl IntoResponse {
     serve_file_download("daq_data.csv", "text/csv", "daq_data.csv").await
 }
 
 /// Download DAQ MDF4 file
-pub async fn daq_download_mf4(
-    State(_state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn daq_download_mf4(State(_state): State<AppState>) -> impl IntoResponse {
     serve_file_download("daq_data.mf4", "application/octet-stream", "daq_data.mf4").await
 }
 
@@ -2325,8 +2702,8 @@ async fn serve_file_download(
     content_type: &str,
     filename: &str,
 ) -> axum::response::Response {
-    use axum::http::{header, StatusCode};
     use axum::body::Body;
+    use axum::http::{header, StatusCode};
 
     match tokio::fs::read(path).await {
         Ok(data) => {
@@ -2339,9 +2716,7 @@ async fn serve_file_download(
             ];
             (StatusCode::OK, headers, Body::from(data)).into_response()
         }
-        Err(_) => {
-            (StatusCode::NOT_FOUND, "File not found").into_response()
-        }
+        Err(_) => (StatusCode::NOT_FOUND, "File not found").into_response(),
     }
 }
 
@@ -2404,9 +2779,7 @@ fn convert_characteristic(
 }
 
 /// Convert A2L measurement to DAQ measurement
-fn convert_measurement(
-    m: crate::a2l::A2lMeasurement,
-) -> Option<crate::daq::Measurement> {
+fn convert_measurement(m: crate::a2l::A2lMeasurement) -> Option<crate::daq::Measurement> {
     Some(crate::daq::Measurement::with_type(
         &m.name,
         m.address,
@@ -2474,38 +2847,53 @@ pub async fn cal_value_api(
                 Ok(value) => {
                     // Get dimensions
                     let (rows, cols) = match &param.data_type {
-                        CalibrationType::U8Array(n) | CalibrationType::I8Array(n) |
-                        CalibrationType::U16Array(n) | CalibrationType::I16Array(n) |
-                        CalibrationType::U32Array(n) | CalibrationType::I32Array(n) |
-                        CalibrationType::U64Array(n) | CalibrationType::I64Array(n) |
-                        CalibrationType::F32Array(n) | CalibrationType::F64Array(n) |
-                        CalibrationType::BoolArray(n) => (1, *n),
-                        CalibrationType::U8Matrix(r, c) | CalibrationType::I8Matrix(r, c) |
-                        CalibrationType::U16Matrix(r, c) | CalibrationType::I16Matrix(r, c) |
-                        CalibrationType::U32Matrix(r, c) | CalibrationType::I32Matrix(r, c) |
-                        CalibrationType::U64Matrix(r, c) | CalibrationType::I64Matrix(r, c) |
-                        CalibrationType::F32Matrix(r, c) | CalibrationType::F64Matrix(r, c) |
-                        CalibrationType::BoolMatrix(r, c) => (*r, *c),
+                        CalibrationType::U8Array(n)
+                        | CalibrationType::I8Array(n)
+                        | CalibrationType::U16Array(n)
+                        | CalibrationType::I16Array(n)
+                        | CalibrationType::U32Array(n)
+                        | CalibrationType::I32Array(n)
+                        | CalibrationType::U64Array(n)
+                        | CalibrationType::I64Array(n)
+                        | CalibrationType::F32Array(n)
+                        | CalibrationType::F64Array(n)
+                        | CalibrationType::BoolArray(n) => (1, *n),
+                        CalibrationType::U8Matrix(r, c)
+                        | CalibrationType::I8Matrix(r, c)
+                        | CalibrationType::U16Matrix(r, c)
+                        | CalibrationType::I16Matrix(r, c)
+                        | CalibrationType::U32Matrix(r, c)
+                        | CalibrationType::I32Matrix(r, c)
+                        | CalibrationType::U64Matrix(r, c)
+                        | CalibrationType::I64Matrix(r, c)
+                        | CalibrationType::F32Matrix(r, c)
+                        | CalibrationType::F64Matrix(r, c)
+                        | CalibrationType::BoolMatrix(r, c) => (*r, *c),
                         _ => (1, 1),
                     };
 
                     // Check if it's a 1D or 2D type
-                    let is_1d = matches!(param.data_type,
-                        CalibrationType::U8Array(_) | CalibrationType::I8Array(_) |
-                        CalibrationType::U16Array(_) | CalibrationType::I16Array(_) |
-                        CalibrationType::U32Array(_) | CalibrationType::I32Array(_) |
-                        CalibrationType::U64Array(_) | CalibrationType::I64Array(_) |
-                        CalibrationType::F32Array(_) | CalibrationType::F64Array(_) |
-                        CalibrationType::BoolArray(_)
+                    let is_1d = matches!(
+                        param.data_type,
+                        CalibrationType::U8Array(_)
+                            | CalibrationType::I8Array(_)
+                            | CalibrationType::U16Array(_)
+                            | CalibrationType::I16Array(_)
+                            | CalibrationType::U32Array(_)
+                            | CalibrationType::I32Array(_)
+                            | CalibrationType::U64Array(_)
+                            | CalibrationType::I64Array(_)
+                            | CalibrationType::F32Array(_)
+                            | CalibrationType::F64Array(_)
+                            | CalibrationType::BoolArray(_)
                     );
 
                     // Convert value to JSON array format
                     let value_json = calibration_value_to_json(&value, is_1d);
 
                     // Get axis info
-                    let axis_info: Vec<serde_json::Value> = param.axis_info.iter().map(|axis| {
-                        axis.to_json()
-                    }).collect();
+                    let axis_info: Vec<serde_json::Value> =
+                        param.axis_info.iter().map(|axis| axis.to_json()).collect();
 
                     // Read axis values (from static source or XCP memory)
                     let axis_values = read_axis_values_from_slave(&xcp_slave_guard, &param).await;
@@ -2521,11 +2909,18 @@ pub async fn cal_value_api(
 
                     // Check if this is an enum type and get options
                     let is_enum = param.is_enum();
-                    let enum_options: Vec<serde_json::Value> = param.enum_options()
-                        .map(|opts| opts.iter().map(|opt| json!({
-                            "raw": opt.raw_value,
-                            "text": opt.text_value,
-                        })).collect())
+                    let enum_options: Vec<serde_json::Value> = param
+                        .enum_options()
+                        .map(|opts| {
+                            opts.iter()
+                                .map(|opt| {
+                                    json!({
+                                        "raw": opt.raw_value,
+                                        "text": opt.text_value,
+                                    })
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default();
 
                     Json(json!({
@@ -2544,12 +2939,10 @@ pub async fn cal_value_api(
                         "enum_options": enum_options,
                     }))
                 }
-                Err(e) => {
-                    Json(json!({
-                        "success": false,
-                        "error": format!("Failed to read: {}", e)
-                    }))
-                }
+                Err(e) => Json(json!({
+                    "success": false,
+                    "error": format!("Failed to read: {}", e)
+                })),
             }
         } else {
             Json(json!({
@@ -2583,13 +2976,25 @@ async fn read_axis_values_from_slave(
         }
 
         // If requires memory read, read from XCP
-        if let AxisPointSource::Memory { address, address_ext, data_type, num_points } = &axis.point_source {
+        if let AxisPointSource::Memory {
+            address,
+            address_ext,
+            data_type,
+            num_points,
+        } = &axis.point_source
+        {
             // Calculate element size (size of single axis point)
             let element_size = match data_type {
-                crate::a2l::A2lDataType::U8 | crate::a2l::A2lDataType::I8 | crate::a2l::A2lDataType::Bool => 1,
+                crate::a2l::A2lDataType::U8
+                | crate::a2l::A2lDataType::I8
+                | crate::a2l::A2lDataType::Bool => 1,
                 crate::a2l::A2lDataType::U16 | crate::a2l::A2lDataType::I16 => 2,
-                crate::a2l::A2lDataType::U32 | crate::a2l::A2lDataType::I32 | crate::a2l::A2lDataType::F32 => 4,
-                crate::a2l::A2lDataType::U64 | crate::a2l::A2lDataType::I64 | crate::a2l::A2lDataType::F64 => 8,
+                crate::a2l::A2lDataType::U32
+                | crate::a2l::A2lDataType::I32
+                | crate::a2l::A2lDataType::F32 => 4,
+                crate::a2l::A2lDataType::U64
+                | crate::a2l::A2lDataType::I64
+                | crate::a2l::A2lDataType::F64 => 8,
                 _ => 4, // Default to 4 bytes
             };
             let total_size = element_size * num_points;
@@ -2616,7 +3021,11 @@ async fn read_axis_values_from_slave(
 }
 
 /// Parse axis values from raw bytes based on data type
-fn parse_axis_values(data: &[u8], data_type: &crate::a2l::A2lDataType, num_points: usize) -> Vec<f64> {
+fn parse_axis_values(
+    data: &[u8],
+    data_type: &crate::a2l::A2lDataType,
+    num_points: usize,
+) -> Vec<f64> {
     use crate::a2l::A2lDataType;
 
     let mut values = Vec::with_capacity(num_points);
@@ -2640,14 +3049,30 @@ fn parse_axis_values(data: &[u8], data_type: &crate::a2l::A2lDataType, num_point
         let val = match data_type {
             A2lDataType::U8 | A2lDataType::U8Array(_) => slice[0] as f64,
             A2lDataType::I8 | A2lDataType::I8Array(_) => slice[0] as i8 as f64,
-            A2lDataType::U16 | A2lDataType::U16Array(_) => u16::from_le_bytes([slice[0], slice[1]]) as f64,
-            A2lDataType::I16 | A2lDataType::I16Array(_) => i16::from_le_bytes([slice[0], slice[1]]) as f64,
-            A2lDataType::U32 | A2lDataType::U32Array(_) => u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64,
-            A2lDataType::I32 | A2lDataType::I32Array(_) => i32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64,
-            A2lDataType::F32 | A2lDataType::F32Array(_) => f32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64,
-            A2lDataType::U64 | A2lDataType::U64Array(_) => u64::from_le_bytes([slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7]]) as f64,
-            A2lDataType::I64 | A2lDataType::I64Array(_) => i64::from_le_bytes([slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7]]) as f64,
-            A2lDataType::F64 | A2lDataType::F64Array(_) => f64::from_le_bytes([slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7]]),
+            A2lDataType::U16 | A2lDataType::U16Array(_) => {
+                u16::from_le_bytes([slice[0], slice[1]]) as f64
+            }
+            A2lDataType::I16 | A2lDataType::I16Array(_) => {
+                i16::from_le_bytes([slice[0], slice[1]]) as f64
+            }
+            A2lDataType::U32 | A2lDataType::U32Array(_) => {
+                u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64
+            }
+            A2lDataType::I32 | A2lDataType::I32Array(_) => {
+                i32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64
+            }
+            A2lDataType::F32 | A2lDataType::F32Array(_) => {
+                f32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64
+            }
+            A2lDataType::U64 | A2lDataType::U64Array(_) => u64::from_le_bytes([
+                slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+            ]) as f64,
+            A2lDataType::I64 | A2lDataType::I64Array(_) => i64::from_le_bytes([
+                slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+            ]) as f64,
+            A2lDataType::F64 | A2lDataType::F64Array(_) => f64::from_le_bytes([
+                slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+            ]),
             _ => i as f64,
         };
         values.push(val);
@@ -2730,16 +3155,28 @@ fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -> serde_jso
         }
         CalibrationValue::F32Array(arr) => {
             if is_1d {
-                json!(arr.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>())
+                json!(arr
+                    .iter()
+                    .map(|v| json!(format!("{:.6}", v)))
+                    .collect::<Vec<_>>())
             } else {
-                json!([arr.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>()])
+                json!([arr
+                    .iter()
+                    .map(|v| json!(format!("{:.6}", v)))
+                    .collect::<Vec<_>>()])
             }
         }
         CalibrationValue::F64Array(arr) => {
             if is_1d {
-                json!(arr.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>())
+                json!(arr
+                    .iter()
+                    .map(|v| json!(format!("{:.6}", v)))
+                    .collect::<Vec<_>>())
             } else {
-                json!([arr.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>()])
+                json!([arr
+                    .iter()
+                    .map(|v| json!(format!("{:.6}", v)))
+                    .collect::<Vec<_>>()])
             }
         }
         CalibrationValue::BoolArray(arr) => {
@@ -2751,37 +3188,76 @@ fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -> serde_jso
         }
         // Matrices (2D)
         CalibrationValue::U8Matrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
         CalibrationValue::U16Matrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
         CalibrationValue::U32Matrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
         CalibrationValue::U64Matrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
         CalibrationValue::I8Matrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
         CalibrationValue::I16Matrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
         CalibrationValue::I32Matrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
         CalibrationValue::I64Matrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
         CalibrationValue::F32Matrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row
+                    .iter()
+                    .map(|v| json!(format!("{:.6}", v)))
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
         CalibrationValue::F64Matrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(format!("{:.6}", v))).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row
+                    .iter()
+                    .map(|v| json!(format!("{:.6}", v)))
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
         CalibrationValue::BoolMatrix(mat) => {
-            json!(mat.iter().map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>()).collect::<Vec<_>>())
+            json!(mat
+                .iter()
+                .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         }
     }
 }
@@ -2880,33 +3356,40 @@ pub async fn cal_write_element_api(
             };
 
             // Modify the element at (row, col)
-            match modify_element(&mut current_value, &param.data_type, row, col, &value_to_write) {
+            match modify_element(
+                &mut current_value,
+                &param.data_type,
+                row,
+                col,
+                &value_to_write,
+            ) {
                 Ok(_) => {
                     // Write back the entire value
                     let xcp_slave_guard = xcp_slave.lock().await;
-                    match write_calibration_to_slave(&xcp_slave_guard, &param, &current_value).await {
+                    match write_calibration_to_slave(&xcp_slave_guard, &param, &current_value).await
+                    {
                         Ok(_) => {
                             // Update cache
-                            slave.cal_values.write().await.insert(param.name.clone(), current_value.clone());
+                            slave
+                                .cal_values
+                                .write()
+                                .await
+                                .insert(param.name.clone(), current_value.clone());
                             Json(json!({
                                 "success": true,
                                 "message": format!("Updated element [{}, {}] = {}", row, col, value_str)
                             }))
                         }
-                        Err(e) => {
-                            Json(json!({
-                                "success": false,
-                                "error": format!("Failed to write: {}", e)
-                            }))
-                        }
+                        Err(e) => Json(json!({
+                            "success": false,
+                            "error": format!("Failed to write: {}", e)
+                        })),
                     }
                 }
-                Err(e) => {
-                    Json(json!({
-                        "success": false,
-                        "error": e
-                    }))
-                }
+                Err(e) => Json(json!({
+                    "success": false,
+                    "error": e
+                })),
             }
         } else {
             Json(json!({
@@ -2923,7 +3406,13 @@ pub async fn cal_write_element_api(
 }
 
 /// Modify a single element in a CalibrationValue
-fn modify_element(value: &mut CalibrationValue, data_type: &CalibrationType, row: usize, col: usize, value_str: &str) -> Result<(), String> {
+fn modify_element(
+    value: &mut CalibrationValue,
+    data_type: &CalibrationType,
+    row: usize,
+    col: usize,
+    value_str: &str,
+) -> Result<(), String> {
     match (value, data_type) {
         // 1D Arrays - treat as row 0
         (CalibrationValue::U8Array(arr), CalibrationType::U8Array(_)) => {
@@ -3008,7 +3497,9 @@ fn modify_element(value: &mut CalibrationValue, data_type: &CalibrationType, row
         }
         (CalibrationValue::BoolArray(arr), CalibrationType::BoolArray(_)) => {
             if col < arr.len() {
-                arr[col] = value_str.parse().map_err(|_| "Invalid BOOL value (true/false)")?;
+                arr[col] = value_str
+                    .parse()
+                    .map_err(|_| "Invalid BOOL value (true/false)")?;
                 Ok(())
             } else {
                 Err(format!("Index {} out of bounds", col))
@@ -3097,7 +3588,9 @@ fn modify_element(value: &mut CalibrationValue, data_type: &CalibrationType, row
         }
         (CalibrationValue::BoolMatrix(mat), CalibrationType::BoolMatrix(_, _)) => {
             if row < mat.len() && col < mat[row].len() {
-                mat[row][col] = value_str.parse().map_err(|_| "Invalid BOOL value (true/false)")?;
+                mat[row][col] = value_str
+                    .parse()
+                    .map_err(|_| "Invalid BOOL value (true/false)")?;
                 Ok(())
             } else {
                 Err(format!("Index [{}, {}] out of bounds", row, col))
@@ -3145,7 +3638,9 @@ fn modify_element(value: &mut CalibrationValue, data_type: &CalibrationType, row
             Ok(())
         }
         (CalibrationValue::Bool(v), CalibrationType::Bool) => {
-            *v = value_str.parse().map_err(|_| "Invalid BOOL value (true/false)")?;
+            *v = value_str
+                .parse()
+                .map_err(|_| "Invalid BOOL value (true/false)")?;
             Ok(())
         }
         _ => Err("Type mismatch or unsupported type".to_string()),
@@ -3183,7 +3678,7 @@ pub async fn cal_detail_api(
                 &slave.id.to_string(),
                 &slave.display_name(),
                 idx,
-                slave.is_connected()
+                slave.is_connected(),
             );
 
             // Read axis values from XCP if connected and has memory-based axes
@@ -3310,13 +3805,10 @@ pub async fn checksum_page(
     let devices = state.all_devices().await;
 
     // Determine selected device
-    let selected_device_id = params
-        .get("device")
-        .cloned()
-        .or_else(|| {
-            // Try current device, then first device
-            None
-        });
+    let selected_device_id = params.get("device").cloned().or_else(|| {
+        // Try current device, then first device
+        None
+    });
 
     let selected_device_id = if let Some(id) = selected_device_id {
         Some(id)
@@ -3376,31 +3868,40 @@ pub async fn checksum_page(
                     .results
                     .iter()
                     .map(|r| {
-                        let (is_pass, is_fail, is_skipped, is_error, status_detail) = match &r.status {
-                            crate::checksum::SegmentStatus::Pass => (true, false, false, false, None),
-                            crate::checksum::SegmentStatus::Fail => (false, true, false, false, None),
-                            crate::checksum::SegmentStatus::Skipped(reason) => {
-                                (false, false, true, false, Some(reason.clone()))
-                            }
-                            crate::checksum::SegmentStatus::Error(msg) => {
-                                (false, false, false, true, Some(msg.clone()))
-                            }
-                        };
+                        let (is_pass, is_fail, is_skipped, is_error, status_detail) =
+                            match &r.status {
+                                crate::checksum::SegmentStatus::Pass => {
+                                    (true, false, false, false, None)
+                                }
+                                crate::checksum::SegmentStatus::Fail => {
+                                    (false, true, false, false, None)
+                                }
+                                crate::checksum::SegmentStatus::Skipped(reason) => {
+                                    (false, false, true, false, Some(reason.clone()))
+                                }
+                                crate::checksum::SegmentStatus::Error(msg) => {
+                                    (false, false, false, true, Some(msg.clone()))
+                                }
+                            };
 
-                        let (has_chunks, chunk_count, chunks_data) = if let Some(ref chunks) = r.chunks {
-                            let cd: Vec<serde_json::Value> = chunks.iter().map(|c| {
-                                json!({
-                                    "offset_hex": format!("{:08X}", c.offset),
-                                    "size": c.size,
-                                    "master_hex": format!("{:08X}", c.master_checksum),
-                                    "slave_hex": format!("{:08X}", c.slave_checksum),
-                                    "passed": c.passed,
-                                })
-                            }).collect();
-                            (true, chunks.len(), Some(cd))
-                        } else {
-                            (false, 0, None)
-                        };
+                        let (has_chunks, chunk_count, chunks_data) =
+                            if let Some(ref chunks) = r.chunks {
+                                let cd: Vec<serde_json::Value> = chunks
+                                    .iter()
+                                    .map(|c| {
+                                        json!({
+                                            "offset_hex": format!("{:08X}", c.offset),
+                                            "size": c.size,
+                                            "master_hex": format!("{:08X}", c.master_checksum),
+                                            "slave_hex": format!("{:08X}", c.slave_checksum),
+                                            "passed": c.passed,
+                                        })
+                                    })
+                                    .collect();
+                                (true, chunks.len(), Some(cd))
+                            } else {
+                                (false, 0, None)
+                            };
 
                         json!({
                             "name": r.name,
@@ -3439,7 +3940,12 @@ pub async fn checksum_page(
     let error = state.take_error().await;
 
     let content = state.templates.checksum_page(&data);
-    Html(templates::page("Checksum", &content, status.as_deref(), error.as_deref()))
+    Html(templates::page(
+        "Checksum",
+        &content,
+        status.as_deref(),
+        error.as_deref(),
+    ))
 }
 
 /// HEX file upload API (POST /api/hex/load/:device_id)
@@ -3493,25 +3999,22 @@ pub async fn hex_load(
         }
     };
 
-    let hex_image = match tokio::task::spawn_blocking(move || {
-        crate::hex::HexImage::from_str(&hex_str)
-    })
-    .await
-    {
-        Ok(Ok(image)) => image,
-        Ok(Err(e)) => {
-            return Json(json!({
-                "success": false,
-                "error": format!("HEX parse error: {}", e)
-            }));
-        }
-        Err(e) => {
-            return Json(json!({
-                "success": false,
-                "error": format!("Task error: {}", e)
-            }));
-        }
-    };
+    let hex_image =
+        match tokio::task::spawn_blocking(move || crate::hex::HexImage::from_str(&hex_str)).await {
+            Ok(Ok(image)) => image,
+            Ok(Err(e)) => {
+                return Json(json!({
+                    "success": false,
+                    "error": format!("HEX parse error: {}", e)
+                }));
+            }
+            Err(e) => {
+                return Json(json!({
+                    "success": false,
+                    "error": format!("Task error: {}", e)
+                }));
+            }
+        };
 
     let byte_count = hex_image.total_bytes();
 
