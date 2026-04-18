@@ -2,32 +2,37 @@
 //!
 //! A Rust implementation of XCP Master for calibration and DAQ.
 
-pub mod protocol;
-pub mod transport;
-pub mod client;
+pub mod a2l;
 pub mod calibration;
+pub mod client;
 pub mod daq;
-pub mod a2l;  // A2L module with COMPU_METHOD support
-// pub mod a2l_reader;  // DEPRECATED: Will be removed, use `a2l` module instead
-pub mod web;
+pub mod protocol;
+pub mod transport; // A2L module with COMPU_METHOD support
+                   // pub mod a2l_reader;  // DEPRECATED: Will be removed, use `a2l` module instead
+pub mod checksum;
+pub mod hex;
 pub mod slave;
 pub mod variable;
-pub mod hex;
-pub mod checksum;
+pub mod web;
 
+pub use calibration::{
+    matrix_to_flat, CalibrationManager, CalibrationParam, CalibrationType, CalibrationValue,
+};
 pub use client::XcpClient;
-pub use calibration::{CalibrationParam, CalibrationValue, CalibrationType, CalibrationManager, matrix_to_flat};
-pub use daq::{DaqManager, Measurement, DaqRecord, DaqConfiguration, OdtEntryConfig};
+pub use daq::{DaqConfiguration, DaqManager, DaqRecord, Measurement, OdtEntryConfig};
 // Use types from a2l module
 pub use a2l::{
-    CompuMethod, CompuVtabEntry,
-    A2lReader, A2lMeasurement, A2lCharacteristic, A2lDataType,
-    A2lMemorySegment, AxisInfo, AxisPointSource,
-    CharacteristicType, StorageOrder, DaqEvent,
-    XcpChecksum, XcpSegmentInfo, XcpPage,
+    A2lCharacteristic, A2lDataType, A2lMeasurement, A2lMemorySegment, A2lReader, AxisInfo,
+    AxisPointSource, CharacteristicType, CompuMethod, CompuVtabEntry, DaqEvent, StorageOrder,
+    XcpChecksum, XcpPage, XcpSegmentInfo,
 };
-pub use slave::{XcpSlave, SlaveId, SlaveInfo, SlaveEvent, SlaveError, SegmentPageState, CalibrationWriteError, PageMode};
-pub use variable::{DeviceVariable, VariableType, VariableFilter, VariableSearchManager, VariableSummary};
+pub use slave::{
+    CalibrationWriteError, PageMode, SegmentPageState, SlaveError, SlaveEvent, SlaveId, SlaveInfo,
+    XcpSlave,
+};
+pub use variable::{
+    DeviceVariable, VariableFilter, VariableSearchManager, VariableSummary, VariableType,
+};
 
 // Re-export for TUI use
 pub use calibration::CalibrationParam as CalParam;

@@ -5,9 +5,7 @@
 //! - Provides backward-compatible single-slave API
 //! - Event system for monitoring slave state changes
 
-use crate::protocol::{
-    ConnectInfo, ErrorCode, Mta,
-};
+use crate::protocol::{ConnectInfo, ErrorCode, Mta};
 use crate::slave::{SlaveError, SlaveEvent, SlaveId, SlaveInfo, XcpSlave};
 use crate::transport::{TransportConfig, TransportError};
 use std::collections::HashMap;
@@ -158,7 +156,9 @@ impl XcpClient {
         name: impl Into<String>,
         addr: &str,
     ) -> Result<SlaveId, XcpError> {
-        let config = TransportConfig::Udp { addr: addr.to_string() };
+        let config = TransportConfig::Udp {
+            addr: addr.to_string(),
+        };
         self.connect_slave(name, config).await
     }
 
@@ -237,9 +237,10 @@ impl XcpClient {
         id: SlaveId,
         path: P,
     ) -> Result<(), XcpError> {
-        let slave = self.slaves.get(&id).ok_or_else(|| {
-            XcpError::SlaveNotFound(format!("{:?}", id))
-        })?;
+        let slave = self
+            .slaves
+            .get(&id)
+            .ok_or_else(|| XcpError::SlaveNotFound(format!("{:?}", id)))?;
 
         let mut slave = slave.lock().await;
         slave.load_a2l(path).map_err(|e| XcpError::ParseError(e))?;
@@ -321,7 +322,9 @@ impl XcpClient {
 
     /// Get DTO receiver for current slave (backward compatible)
     /// Returns None if no slave is connected
-    pub async fn get_dto_receiver(&self) -> Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::transport::XcpMessage>>>> {
+    pub async fn get_dto_receiver(
+        &self,
+    ) -> Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::transport::XcpMessage>>>> {
         if let Some(id) = self.current_slave_id {
             if let Some(slave) = self.get_slave(id) {
                 let slave = slave.lock().await;
@@ -348,96 +351,84 @@ impl XcpClient {
 
     /// Get ID from current slave (backward compatible)
     pub async fn get_id(&self, id_type: u8) -> Result<String, XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.get_id(id_type).await.map_err(|e| e.into())
     }
 
     /// Read memory from current slave (backward compatible)
     pub async fn read_memory(&self, mta: Mta, length: u8) -> Result<Vec<u8>, XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.read_memory(mta, length).await.map_err(|e| e.into())
     }
 
     /// Write memory to current slave (backward compatible)
     pub async fn write_memory(&self, mta: Mta, data: &[u8]) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.write_memory(mta, data).await.map_err(|e| e.into())
     }
 
     /// Set MTA on current slave (backward compatible)
     pub async fn set_mta(&self, mta: Mta) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.set_mta(mta).await.map_err(|e| e.into())
     }
 
     /// Upload data from current slave (backward compatible)
     pub async fn upload(&self, length: u8) -> Result<Vec<u8>, XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.upload(length).await.map_err(|e| e.into())
     }
 
     /// Download data to current slave (backward compatible)
     pub async fn download(&self, data: &[u8]) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.download(data).await.map_err(|e| e.into())
     }
 
     /// Read U32 from current slave (backward compatible)
     pub async fn read_u32(&self, mta: Mta) -> Result<u32, XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.read_u32(mta).await.map_err(|e| e.into())
     }
 
     /// Write U32 to current slave (backward compatible)
     pub async fn write_u32(&self, mta: Mta, value: u32) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.write_u32(mta, value).await.map_err(|e| e.into())
     }
 
     /// Read U8 from current slave (backward compatible)
     pub async fn read_u8(&self, mta: Mta) -> Result<u8, XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.read_u8(mta).await.map_err(|e| e.into())
     }
 
     /// Write U8 to current slave (backward compatible)
     pub async fn write_u8(&self, mta: Mta, value: u8) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.write_u8(mta, value).await.map_err(|e| e.into())
     }
 
     /// Read U8 array from current slave (backward compatible)
     pub async fn read_u8_array(&self, mta: Mta, count: usize) -> Result<Vec<u8>, XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.read_u8_array(mta, count).await.map_err(|e| e.into())
     }
 
     /// Write U8 array to current slave (backward compatible)
     pub async fn write_u8_array(&self, mta: Mta, data: &[u8]) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.write_u8_array(mta, data).await.map_err(|e| e.into())
     }
@@ -446,50 +437,47 @@ impl XcpClient {
 
     /// Get DAQ resolution info from current slave
     pub async fn get_daq_resolution_info(&self) -> Result<DAQResolutionInfo, XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.get_daq_resolution_info().await.map_err(|e| e.into())
     }
 
     /// Get DAQ processor info from current slave
     pub async fn get_daq_processor_info(&self) -> Result<DAQProcessorInfo, XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.get_daq_processor_info().await.map_err(|e| e.into())
     }
 
     /// Get DAQ clock from current slave
     pub async fn get_daq_clock(&self) -> Result<u32, XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.get_daq_clock().await.map_err(|e| e.into())
     }
 
     /// Free DAQ resources on current slave
     pub async fn free_daq(&self) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.free_daq().await.map_err(|e| e.into())
     }
 
     /// Allocate DAQ lists on current slave
     pub async fn alloc_daq(&self, daq_count: u16) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.alloc_daq(daq_count).await.map_err(|e| e.into())
     }
 
     /// Allocate ODTs on current slave
     pub async fn alloc_odt(&self, daq_list: u16, odt_count: u8) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-        slave.alloc_odt(daq_list, odt_count).await.map_err(|e| e.into())
+        slave
+            .alloc_odt(daq_list, odt_count)
+            .await
+            .map_err(|e| e.into())
     }
 
     /// Allocate ODT entries on current slave
@@ -499,26 +487,32 @@ impl XcpClient {
         odt: u8,
         entry_count: u8,
     ) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-        slave.alloc_odt_entry(daq_list, odt, entry_count).await.map_err(|e| e.into())
+        slave
+            .alloc_odt_entry(daq_list, odt, entry_count)
+            .await
+            .map_err(|e| e.into())
     }
 
     /// Set DAQ pointer on current slave
     pub async fn set_daq_ptr(&self, daq_list: u16, odt: u8, entry: u8) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-        slave.set_daq_ptr(daq_list, odt, entry).await.map_err(|e| e.into())
+        slave
+            .set_daq_ptr(daq_list, odt, entry)
+            .await
+            .map_err(|e| e.into())
     }
 
     /// Write DAQ entry on current slave
     pub async fn write_daq(&self, bit_offset: u8, mta: Mta, data_size: u8) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-        slave.write_daq(bit_offset, mta, data_size).await.map_err(|e| e.into())
+        slave
+            .write_daq(bit_offset, mta, data_size)
+            .await
+            .map_err(|e| e.into())
     }
 
     /// Set DAQ list mode on current slave
@@ -530,25 +524,27 @@ impl XcpClient {
         prescaler: u8,
         priority: u8,
     ) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-        slave.set_daq_list_mode(mode, daq_list, event_channel, prescaler, priority)
-            .await.map_err(|e| e.into())
+        slave
+            .set_daq_list_mode(mode, daq_list, event_channel, prescaler, priority)
+            .await
+            .map_err(|e| e.into())
     }
 
     /// Start/stop DAQ list on current slave
     pub async fn start_stop_daq_list(&self, mode: u8, daq_list: u16) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
-        slave.start_stop_daq_list(mode, daq_list).await.map_err(|e| e.into())
+        slave
+            .start_stop_daq_list(mode, daq_list)
+            .await
+            .map_err(|e| e.into())
     }
 
     /// Start/stop synch on current slave
     pub async fn start_stop_synch(&self, mode: u8) -> Result<(), XcpError> {
-        let slave = self.current_slave()
-            .ok_or(XcpError::NotConnected)?;
+        let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave.start_stop_synch(mode).await.map_err(|e| e.into())
     }
@@ -580,7 +576,6 @@ mod tests {
 
     #[test]
     fn test_slave_id_hashmap() {
-
         let mut client = XcpClient::new();
         let id1 = SlaveId::new();
         let id2 = SlaveId::new();
@@ -599,7 +594,10 @@ mod tests {
         let config = TransportConfig::Udp {
             addr: "127.0.0.1:5555".to_string(),
         };
-        assert_eq!(config.transport_type(), crate::transport::TransportType::Udp);
+        assert_eq!(
+            config.transport_type(),
+            crate::transport::TransportType::Udp
+        );
     }
 
     #[test]
@@ -608,7 +606,10 @@ mod tests {
             channel: "can0".to_string(),
             can_id: 0x123,
         };
-        assert_eq!(config.transport_type(), crate::transport::TransportType::Can);
+        assert_eq!(
+            config.transport_type(),
+            crate::transport::TransportType::Can
+        );
     }
 
     #[test]
@@ -616,7 +617,10 @@ mod tests {
         let config = TransportConfig::Tcp {
             addr: "127.0.0.1:5555".to_string(),
         };
-        assert_eq!(config.transport_type(), crate::transport::TransportType::Tcp);
+        assert_eq!(
+            config.transport_type(),
+            crate::transport::TransportType::Tcp
+        );
     }
 
     #[test]
@@ -652,12 +656,22 @@ mod tests {
         };
 
         // Test all event variants can be created
-        let _ = SlaveEvent::Connected { id, info: info.clone() };
+        let _ = SlaveEvent::Connected {
+            id,
+            info: info.clone(),
+        };
         let _ = SlaveEvent::Disconnected { id };
-        let _ = SlaveEvent::A2lLoaded { id, cal_count: 10, meas_count: 20 };
+        let _ = SlaveEvent::A2lLoaded {
+            id,
+            cal_count: 10,
+            meas_count: 20,
+        };
         let _ = SlaveEvent::DaqStarted { id };
         let _ = SlaveEvent::DaqStopped { id };
-        let _ = SlaveEvent::Error { id, error: "test".to_string() };
+        let _ = SlaveEvent::Error {
+            id,
+            error: "test".to_string(),
+        };
     }
 
     #[test]

@@ -204,7 +204,10 @@ impl UdpTransport {
         Ok(())
     }
 
-    async fn decode_datagram_payloads(&self, datagram: &[u8]) -> Result<VecDeque<Vec<u8>>, TransportError> {
+    async fn decode_datagram_payloads(
+        &self,
+        datagram: &[u8],
+    ) -> Result<VecDeque<Vec<u8>>, TransportError> {
         let packets = parse_xcp_datagram(datagram);
         if packets.is_empty() {
             return Err(TransportError::RecvFailed(
@@ -239,7 +242,10 @@ impl UdpTransport {
         pending_packets.extend(payloads);
     }
 
-    async fn receive_payload_from_socket(&self, timeout_ms: Option<u64>) -> Result<Option<Vec<u8>>, TransportError> {
+    async fn receive_payload_from_socket(
+        &self,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
         let mut buf = vec![0u8; MAX_DTO_SIZE];
         let len = match timeout_ms {
             Some(timeout_ms) => match timeout(Duration::from_millis(timeout_ms), async {
@@ -272,7 +278,10 @@ impl UdpTransport {
         Ok(Some(first_payload))
     }
 
-    async fn recv_payload_packet(&self, timeout_ms: Option<u64>) -> Result<Option<Vec<u8>>, TransportError> {
+    async fn recv_payload_packet(
+        &self,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
         {
             let mut pending_packets = self.pending_packets.lock().await;
             if let Some(payload) = pending_packets.pop_front() {
@@ -296,7 +305,10 @@ impl UdpTransport {
             .await
             .map_err(|e: std::io::Error| TransportError::SendFailed(e.to_string()))?;
 
-        match self.receive_payload_from_socket(Some(self.timeout_ms)).await? {
+        match self
+            .receive_payload_from_socket(Some(self.timeout_ms))
+            .await?
+        {
             Some(payload) => Ok(payload),
             None => Err(TransportError::Timeout),
         }
@@ -423,8 +435,8 @@ mod tests {
     #[test]
     fn test_parse_xcp_datagram_strips_headers_and_preserves_counter() {
         let datagram = vec![
-            0x04, 0x00, 0x01, 0x00, 0xFF, 0xAA, 0xBB, 0xCC,
-            0x03, 0x00, 0x02, 0x00, 0xC0, 0x10, 0x11,
+            0x04, 0x00, 0x01, 0x00, 0xFF, 0xAA, 0xBB, 0xCC, 0x03, 0x00, 0x02, 0x00, 0xC0, 0x10,
+            0x11,
         ];
 
         let packets = parse_xcp_datagram(&datagram);
@@ -440,8 +452,7 @@ mod tests {
     #[test]
     fn test_parse_xcp_datagram_stops_on_incomplete_frame() {
         let datagram = vec![
-            0x01, 0x00, 0x01, 0x00, 0xFF,
-            0x04, 0x00, 0x02, 0x00, 0xC0, 0x10,
+            0x01, 0x00, 0x01, 0x00, 0xFF, 0x04, 0x00, 0x02, 0x00, 0xC0, 0x10,
         ];
 
         let packets = parse_xcp_datagram(&datagram);
@@ -449,4 +460,3 @@ mod tests {
         assert_eq!(packets[0].payload, vec![0xFF]);
     }
 }
-

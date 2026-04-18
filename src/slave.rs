@@ -5,14 +5,12 @@
 
 use crate::a2l::A2lMemorySegment;
 use crate::calibration::CalibrationManager;
+use crate::client::{DAQProcessorInfo, DAQResolutionInfo};
 use crate::daq::DaqManager;
 use crate::protocol::{
     commands, parse_checksum, parse_checksum_error, parse_connect_response, parse_error_response,
-    parse_get_id_response, parse_response,
-    ConnectInfo, ErrorCode,
-    Mta, Response,
+    parse_get_id_response, parse_response, ConnectInfo, ErrorCode, Mta, Response,
 };
-use crate::client::{DAQResolutionInfo, DAQProcessorInfo};
 use crate::transport::{
     MessageRouter, Transport, TransportConfig, TransportError, TransportFactory, XcpMessage,
 };
@@ -200,7 +198,11 @@ impl XcpSlave {
         let id = SlaveId::new();
         let name = name.into();
 
-        tracing::info!("Connecting to slave '{}' at {}...", name, transport_config.addr_string());
+        tracing::info!(
+            "Connecting to slave '{}' at {}...",
+            name,
+            transport_config.addr_string()
+        );
 
         // Create transport
         let transport = TransportFactory::create(&transport_config)
@@ -261,20 +263,27 @@ impl XcpSlave {
         let connect_cmd = commands::connect();
         let response = self.send_command_and_wait(&connect_cmd).await?;
 
-        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let parsed =
+            parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
         let res_data = match parsed {
             Response::Res(data) => data,
             Response::Err(err) => return Err(SlaveError::Protocol(err)),
-            _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => {
+                return Err(SlaveError::InvalidResponse(
+                    "Unexpected response type".to_string(),
+                ))
+            }
         };
 
-        let connect_info = parse_connect_response(&res_data)
-            .map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let connect_info =
+            parse_connect_response(&res_data).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
         tracing::info!(
             "Connected: max_cto={}, max_dto={}, resource={:?}",
-            connect_info.max_cto, connect_info.max_dto, connect_info.resource
+            connect_info.max_cto,
+            connect_info.max_dto,
+            connect_info.resource
         );
 
         Ok(connect_info)
@@ -312,17 +321,24 @@ impl XcpSlave {
 
     /// Get identification from slave
     pub async fn get_id(&self, id_type: u8) -> Result<String, SlaveError> {
-        let response = self.send_command_and_wait(&commands::get_id(id_type)).await?;
-        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let response = self
+            .send_command_and_wait(&commands::get_id(id_type))
+            .await?;
+        let parsed =
+            parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
         let res_data = match parsed {
             Response::Res(data) => data,
             Response::Err(err) => return Err(SlaveError::Protocol(err)),
-            _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => {
+                return Err(SlaveError::InvalidResponse(
+                    "Unexpected response type".to_string(),
+                ))
+            }
         };
 
-        let (_, id_string) = parse_get_id_response(&res_data)
-            .map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let (_, id_string) =
+            parse_get_id_response(&res_data).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
         Ok(id_string)
     }
@@ -336,13 +352,20 @@ impl XcpSlave {
     /// # Returns
     /// The current active page number for the specified segment and access mode
     pub async fn get_cal_page(&self, segment: u8, mode: u8) -> Result<u8, SlaveError> {
-        let response = self.send_command_and_wait(&commands::get_cal_page(mode, segment)).await?;
-        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let response = self
+            .send_command_and_wait(&commands::get_cal_page(mode, segment))
+            .await?;
+        let parsed =
+            parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
         let res_data = match parsed {
             Response::Res(data) => data,
             Response::Err(err) => return Err(SlaveError::Protocol(err)),
-            _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => {
+                return Err(SlaveError::InvalidResponse(
+                    "Unexpected response type".to_string(),
+                ))
+            }
         };
 
         let page = super::protocol::parse_cal_page_response(&res_data)
@@ -369,9 +392,17 @@ impl XcpSlave {
     /// // Switch to page 1 for XCP access on segment 0
     /// slave.set_cal_page(0, 1, 0x02).await?;
     /// ```
-    pub async fn set_cal_page(&mut self, segment: u8, page: u8, mode: u8) -> Result<(), SlaveError> {
-        let response = self.send_command_and_wait(&commands::set_cal_page(mode, segment, page)).await?;
-        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+    pub async fn set_cal_page(
+        &mut self,
+        segment: u8,
+        page: u8,
+        mode: u8,
+    ) -> Result<(), SlaveError> {
+        let response = self
+            .send_command_and_wait(&commands::set_cal_page(mode, segment, page))
+            .await?;
+        let parsed =
+            parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
         match parsed {
             Response::Res(_) => {
@@ -386,12 +417,16 @@ impl XcpSlave {
                 }
                 tracing::info!(
                     "Set segment {} page to {} (mode=0x{:02X})",
-                    segment, page, mode
+                    segment,
+                    page,
+                    mode
                 );
                 Ok(())
             }
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
@@ -418,10 +453,7 @@ impl XcpSlave {
         for segment in 0..num_segments {
             match self.get_cal_page(segment as u8, 0x02).await {
                 Ok(xcp_page) => {
-                    tracing::trace!(
-                        "Segment {} current XCP page: {}",
-                        segment, xcp_page
-                    );
+                    tracing::trace!("Segment {} current XCP page: {}", segment, xcp_page);
                     self.segment_pages.push(SegmentPageState {
                         segment: segment as u8,
                         xcp_page,
@@ -429,10 +461,7 @@ impl XcpSlave {
                     });
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to get cal page for segment {}: {:?}",
-                        segment, e
-                    );
+                    tracing::warn!("Failed to get cal page for segment {}: {:?}", segment, e);
                     // Still add the segment with default page 0
                     self.segment_pages.push(SegmentPageState {
                         segment: segment as u8,
@@ -506,14 +535,17 @@ impl XcpSlave {
     /// - Err if no write-allowed page exists or switch failed
     pub async fn switch_to_write_page(&mut self, segment: u8) -> Result<u8, SlaveError> {
         // Find a page that allows write
-        let new_page = self.find_write_allowed_page(segment)
-            .ok_or_else(|| SlaveError::CalibrationWrite(
-                CalibrationWriteError::SegmentNoWriteAllowed(segment)
-            ))?;
+        let new_page = self.find_write_allowed_page(segment).ok_or_else(|| {
+            SlaveError::CalibrationWrite(CalibrationWriteError::SegmentNoWriteAllowed(segment))
+        })?;
 
         // Check if we're already on that page
         if self.get_current_xcp_page(segment) == Some(new_page) {
-            tracing::trace!("Already on write-allowed page {} for segment {}", new_page, segment);
+            tracing::trace!(
+                "Already on write-allowed page {} for segment {}",
+                new_page,
+                segment
+            );
             return Ok(new_page);
         }
 
@@ -522,7 +554,8 @@ impl XcpSlave {
 
         tracing::info!(
             "Switched segment {} to write-allowed page {}",
-            segment, new_page
+            segment,
+            new_page
         );
 
         Ok(new_page)
@@ -608,10 +641,7 @@ impl XcpSlave {
             let target_page = match self.find_page_for_mode(segment, mode) {
                 Some(page) => page,
                 None => {
-                    tracing::trace!(
-                        "Segment {} has no {:?} page, skipping",
-                        segment, mode
-                    );
+                    tracing::trace!("Segment {} has no {:?} page, skipping", segment, mode);
                     continue;
                 }
             };
@@ -620,7 +650,9 @@ impl XcpSlave {
             if self.get_current_xcp_page(segment) == Some(target_page) {
                 tracing::trace!(
                     "Segment {} already on {} page {}",
-                    segment, mode.description(), target_page
+                    segment,
+                    mode.description(),
+                    target_page
                 );
                 continue;
             }
@@ -630,14 +662,18 @@ impl XcpSlave {
                 Ok(()) => {
                     tracing::info!(
                         "Segment {} switched to {} page {}",
-                        segment, mode.description(), target_page
+                        segment,
+                        mode.description(),
+                        target_page
                     );
                     switched.push((segment, target_page));
                 }
                 Err(e) => {
                     tracing::warn!(
                         "Failed to switch segment {} to page {}: {:?}",
-                        segment, target_page, e
+                        segment,
+                        target_page,
+                        e
                     );
                     // Continue with other segments even if one fails
                 }
@@ -669,7 +705,10 @@ impl XcpSlave {
         }
 
         for state in &self.segment_pages {
-            if self.cal_manager.is_page_write_allowed(state.segment, state.xcp_page) {
+            if self
+                .cal_manager
+                .is_page_write_allowed(state.segment, state.xcp_page)
+            {
                 return PageMode::Working;
             }
         }
@@ -687,9 +726,15 @@ impl XcpSlave {
     /// # Returns
     /// - Ok(segment, page) if write is allowed
     /// - Err with specific error if write is not allowed
-    pub fn check_write_permission(&self, address: u32, address_ext: u8) -> Result<(u8, u8), CalibrationWriteError> {
+    pub fn check_write_permission(
+        &self,
+        address: u32,
+        address_ext: u8,
+    ) -> Result<(u8, u8), CalibrationWriteError> {
         // Step 1: Find the segment for this address
-        let segment = self.cal_manager.find_segment_for_address(address, address_ext);
+        let segment = self
+            .cal_manager
+            .find_segment_for_address(address, address_ext);
 
         match segment {
             None => {
@@ -700,7 +745,10 @@ impl XcpSlave {
                     Ok((0, 0))
                 } else {
                     // Segments are defined but address doesn't match any
-                    Err(CalibrationWriteError::AddressNotInSegment(address, address_ext))
+                    Err(CalibrationWriteError::AddressNotInSegment(
+                        address,
+                        address_ext,
+                    ))
                 }
             }
             Some(seg_num) => {
@@ -752,7 +800,9 @@ impl XcpSlave {
         value: &crate::calibration::CalibrationValue,
     ) -> Result<(), SlaveError> {
         // Get the parameter
-        let param = self.cal_manager.get_param(param_name)
+        let param = self
+            .cal_manager
+            .get_param(param_name)
             .ok_or_else(|| SlaveError::A2lError(format!("Parameter '{}' not found", param_name)))?;
 
         let mta = param.mta();
@@ -863,15 +913,27 @@ impl XcpSlave {
                 self.write_u8_array(mta, &flat).await?;
             }
             (CalibrationType::U16Matrix(_, _), CalibrationValue::U16Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                let flat: Vec<u8> = mat
+                    .iter()
+                    .flatten()
+                    .flat_map(|&x| x.to_le_bytes())
+                    .collect();
                 self.write_memory(mta, &flat).await?;
             }
             (CalibrationType::U32Matrix(_, _), CalibrationValue::U32Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                let flat: Vec<u8> = mat
+                    .iter()
+                    .flatten()
+                    .flat_map(|&x| x.to_le_bytes())
+                    .collect();
                 self.write_memory(mta, &flat).await?;
             }
             (CalibrationType::U64Matrix(_, _), CalibrationValue::U64Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                let flat: Vec<u8> = mat
+                    .iter()
+                    .flatten()
+                    .flat_map(|&x| x.to_le_bytes())
+                    .collect();
                 self.write_memory(mta, &flat).await?;
             }
             (CalibrationType::I8Matrix(_, _), CalibrationValue::I8Matrix(mat)) => {
@@ -879,27 +941,51 @@ impl XcpSlave {
                 self.write_u8_array(mta, &flat).await?;
             }
             (CalibrationType::I16Matrix(_, _), CalibrationValue::I16Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                let flat: Vec<u8> = mat
+                    .iter()
+                    .flatten()
+                    .flat_map(|&x| x.to_le_bytes())
+                    .collect();
                 self.write_memory(mta, &flat).await?;
             }
             (CalibrationType::I32Matrix(_, _), CalibrationValue::I32Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                let flat: Vec<u8> = mat
+                    .iter()
+                    .flatten()
+                    .flat_map(|&x| x.to_le_bytes())
+                    .collect();
                 self.write_memory(mta, &flat).await?;
             }
             (CalibrationType::I64Matrix(_, _), CalibrationValue::I64Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                let flat: Vec<u8> = mat
+                    .iter()
+                    .flatten()
+                    .flat_map(|&x| x.to_le_bytes())
+                    .collect();
                 self.write_memory(mta, &flat).await?;
             }
             (CalibrationType::F32Matrix(_, _), CalibrationValue::F32Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                let flat: Vec<u8> = mat
+                    .iter()
+                    .flatten()
+                    .flat_map(|&x| x.to_le_bytes())
+                    .collect();
                 self.write_memory(mta, &flat).await?;
             }
             (CalibrationType::F64Matrix(_, _), CalibrationValue::F64Matrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().flat_map(|&x| x.to_le_bytes()).collect();
+                let flat: Vec<u8> = mat
+                    .iter()
+                    .flatten()
+                    .flat_map(|&x| x.to_le_bytes())
+                    .collect();
                 self.write_memory(mta, &flat).await?;
             }
             (CalibrationType::BoolMatrix(_, _), CalibrationValue::BoolMatrix(mat)) => {
-                let flat: Vec<u8> = mat.iter().flatten().map(|&x| if x { 1 } else { 0 }).collect();
+                let flat: Vec<u8> = mat
+                    .iter()
+                    .flatten()
+                    .map(|&x| if x { 1 } else { 0 })
+                    .collect();
                 self.write_u8_array(mta, &flat).await?;
             }
             _ => {
@@ -907,7 +993,7 @@ impl XcpSlave {
                     CalibrationWriteError::TypeMismatch(format!(
                         "Type mismatch for parameter {}",
                         param.name
-                    ))
+                    )),
                 ));
             }
         }
@@ -924,19 +1010,23 @@ impl XcpSlave {
         if length as usize > max_per_read {
             tracing::warn!(
                 "Requested read of {} bytes exceeds max CTO limit ({}), truncating",
-                length, max_per_read
+                length,
+                max_per_read
             );
         }
 
         let response = self
             .send_command_and_wait(&commands::short_upload(mta, length))
             .await?;
-        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let parsed =
+            parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
         match parsed {
             Response::Res(data) => Ok(data),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
@@ -944,7 +1034,8 @@ impl XcpSlave {
     /// SHORT_UPLOAD response: [RES (1 byte), data...]
     /// So max data = max_cto - 1
     pub fn max_upload_size(&self) -> usize {
-        self.info.connect_info
+        self.info
+            .connect_info
             .as_ref()
             .map(|ci| (ci.max_cto as usize).saturating_sub(1))
             .unwrap_or(254) // Default to 254 if not connected
@@ -954,7 +1045,8 @@ impl XcpSlave {
     /// SHORT_DOWNLOAD: [CMD, LEN, reserved, ext, addr(4), data...]
     /// So max data = max_cto - 8 (header overhead)
     pub fn max_download_size(&self) -> usize {
-        self.info.connect_info
+        self.info
+            .connect_info
             .as_ref()
             .map(|ci| (ci.max_cto as usize).saturating_sub(8))
             .unwrap_or(247) // Default to 247 if not connected
@@ -965,7 +1057,8 @@ impl XcpSlave {
     /// DOWNLOAD_NEXT: [CMD, REMAINING, data...] - 2 bytes header
     /// So max data = max_cto - 2
     pub fn max_download_block_size(&self) -> usize {
-        self.info.connect_info
+        self.info
+            .connect_info
             .as_ref()
             .map(|ci| (ci.max_cto as usize).saturating_sub(2))
             .unwrap_or(253) // Default to 253 if not connected
@@ -978,7 +1071,12 @@ impl XcpSlave {
     /// * `mta` - Memory transfer address
     /// * `size` - Total bytes to read
     /// * `max_per_read_override` - Optional override for maximum bytes per read
-    pub async fn read_large_data(&self, mta: Mta, size: usize, max_per_read_override: Option<usize>) -> Result<Vec<u8>, SlaveError> {
+    pub async fn read_large_data(
+        &self,
+        mta: Mta,
+        size: usize,
+        max_per_read_override: Option<usize>,
+    ) -> Result<Vec<u8>, SlaveError> {
         // Use the override if provided, otherwise use the default from connect_info
         let max_per_read = max_per_read_override.unwrap_or_else(|| self.max_upload_size());
 
@@ -989,7 +1087,8 @@ impl XcpSlave {
 
         tracing::trace!(
             "Reading {} bytes in chunks (max per read: {})",
-            size, max_per_read
+            size,
+            max_per_read
         );
 
         // Use SET_MTA + UPLOAD for large reads
@@ -1035,19 +1134,25 @@ impl XcpSlave {
             let response = self
                 .send_command_and_wait(&commands::short_download(mta, data))
                 .await?;
-            let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+            let parsed =
+                parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
             match parsed {
                 Response::Res(_) => return Ok(()),
                 Response::Err(err) => return Err(SlaveError::Protocol(err)),
-                _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+                _ => {
+                    return Err(SlaveError::InvalidResponse(
+                        "Unexpected response type".to_string(),
+                    ))
+                }
             }
         }
 
         // Data too large for SHORT_DOWNLOAD, use SET_MTA + DOWNLOAD instead
         tracing::trace!(
             "Data size {} exceeds SHORT_DOWNLOAD limit {}, using DOWNLOAD instead",
-            data.len(), max_short_download
+            data.len(),
+            max_short_download
         );
         self.write_memory_download(mta, data).await
     }
@@ -1072,19 +1177,23 @@ impl XcpSlave {
             let response = self
                 .send_command_and_wait(&commands::download(total_size as u8, data))
                 .await?;
-            let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+            let parsed =
+                parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
             return match parsed {
                 Response::Res(_) => Ok(()),
                 Response::Err(err) => Err(SlaveError::Protocol(err)),
-                _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+                _ => Err(SlaveError::InvalidResponse(
+                    "Unexpected response type".to_string(),
+                )),
             };
         }
 
         // Multi-packet transfer
         tracing::trace!(
             "Writing {} bytes in chunks (max per packet: {})",
-            total_size, max_block
+            total_size,
+            max_block
         );
 
         let mut offset = 0;
@@ -1114,11 +1223,16 @@ impl XcpSlave {
 
             // Only the last packet expects a response
             if remaining_after == 0 {
-                let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+                let parsed =
+                    parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
                 match parsed {
                     Response::Res(_) => return Ok(()),
                     Response::Err(err) => return Err(SlaveError::Protocol(err)),
-                    _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+                    _ => {
+                        return Err(SlaveError::InvalidResponse(
+                            "Unexpected response type".to_string(),
+                        ))
+                    }
                 }
             }
 
@@ -1132,12 +1246,15 @@ impl XcpSlave {
     /// Set MTA for subsequent UPLOAD/DOWNLOAD operations
     pub async fn set_mta(&self, mta: Mta) -> Result<(), SlaveError> {
         let response = self.send_command_and_wait(&commands::set_mta(mta)).await?;
-        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let parsed =
+            parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
         match parsed {
             Response::Res(_) => Ok(()),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
@@ -1149,11 +1266,7 @@ impl XcpSlave {
     /// If the slave returns ERR_OUT_OF_RANGE with a corrected max_block_size,
     /// the method automatically retries with the slave-reported block size,
     /// splitting into multiple chunks and combining results as needed.
-    pub async fn build_checksum(
-        &self,
-        mta: Mta,
-        block_size: u32,
-    ) -> Result<(u8, u32), SlaveError> {
+    pub async fn build_checksum(&self, mta: Mta, block_size: u32) -> Result<(u8, u32), SlaveError> {
         self.set_mta(mta).await?;
 
         let response = self
@@ -1182,8 +1295,8 @@ impl XcpSlave {
 
         match parsed {
             Response::Res(data) => {
-                let (ctype, cvalue) = parse_checksum(&data)
-                    .map_err(|e| SlaveError::ParseError(e.to_string()))?;
+                let (ctype, cvalue) =
+                    parse_checksum(&data).map_err(|e| SlaveError::ParseError(e.to_string()))?;
                 tracing::debug!(
                     "BUILD_CHECKSUM: addr=0x{:08X}, size=0x{:X}, type={}, value=0x{:08X}",
                     mta.address,
@@ -1226,8 +1339,8 @@ impl XcpSlave {
 
             match parsed {
                 Response::Res(data) => {
-                    let (ctype, cvalue) = parse_checksum(&data)
-                        .map_err(|e| SlaveError::ParseError(e.to_string()))?;
+                    let (ctype, cvalue) =
+                        parse_checksum(&data).map_err(|e| SlaveError::ParseError(e.to_string()))?;
                     checksum_type = ctype;
                     combined = combined.wrapping_add(cvalue);
                     tracing::debug!(
@@ -1259,13 +1372,18 @@ impl XcpSlave {
 
     /// Upload (read) data using current MTA
     pub async fn upload(&self, length: u8) -> Result<Vec<u8>, SlaveError> {
-        let response = self.send_command_and_wait(&commands::upload(length)).await?;
-        let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+        let response = self
+            .send_command_and_wait(&commands::upload(length))
+            .await?;
+        let parsed =
+            parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
         match parsed {
             Response::Res(data) => Ok(data),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
@@ -1283,12 +1401,15 @@ impl XcpSlave {
             let response = self
                 .send_command_and_wait(&commands::download(total_size as u8, data))
                 .await?;
-            let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+            let parsed =
+                parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
 
             return match parsed {
                 Response::Res(_) => Ok(()),
                 Response::Err(err) => Err(SlaveError::Protocol(err)),
-                _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+                _ => Err(SlaveError::InvalidResponse(
+                    "Unexpected response type".to_string(),
+                )),
             };
         }
 
@@ -1318,11 +1439,16 @@ impl XcpSlave {
 
             // Only the last packet expects a response
             if remaining_after == 0 {
-                let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+                let parsed =
+                    parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
                 match parsed {
                     Response::Res(_) => return Ok(()),
                     Response::Err(err) => return Err(SlaveError::Protocol(err)),
-                    _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+                    _ => {
+                        return Err(SlaveError::InvalidResponse(
+                            "Unexpected response type".to_string(),
+                        ))
+                    }
                 }
             }
 
@@ -1362,28 +1488,40 @@ impl XcpSlave {
 
         tracing::info!(
             "download_sequential: {} bytes in {} packets (max_block={})",
-            total_size, num_packets, max_block
+            total_size,
+            num_packets,
+            max_block
         );
 
         for (i, chunk) in data.chunks(max_block).enumerate() {
             let chunk_size = chunk.len();
             tracing::trace!(
                 "download_sequential: packet {} - {} bytes",
-                i + 1, chunk_size
+                i + 1,
+                chunk_size
             );
 
             let response = self
                 .send_command_and_wait(&commands::download(chunk_size as u8, chunk))
                 .await?;
 
-            let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
+            let parsed =
+                parse_response(&response).map_err(|e| SlaveError::ParseError(e.to_string()))?;
             match parsed {
                 Response::Res(_) => {}
                 Response::Err(err) => {
-                    tracing::error!("download_sequential: packet {} failed with error {:?}", i + 1, err);
+                    tracing::error!(
+                        "download_sequential: packet {} failed with error {:?}",
+                        i + 1,
+                        err
+                    );
                     return Err(SlaveError::Protocol(err));
                 }
-                _ => return Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+                _ => {
+                    return Err(SlaveError::InvalidResponse(
+                        "Unexpected response type".to_string(),
+                    ))
+                }
             }
         }
 
@@ -1400,7 +1538,9 @@ impl XcpSlave {
     pub async fn write_memory_sequential(&self, mta: Mta, data: &[u8]) -> Result<(), SlaveError> {
         tracing::info!(
             "write_memory_sequential: {} bytes to address 0x{:08X} (ext={})",
-            data.len(), mta.address, mta.extension
+            data.len(),
+            mta.address,
+            mta.extension
         );
 
         // Set MTA once at the beginning
@@ -1414,7 +1554,9 @@ impl XcpSlave {
     pub async fn read_u32(&self, mta: Mta) -> Result<u32, SlaveError> {
         let data = self.read_memory(mta, 4).await?;
         if data.len() < 4 {
-            return Err(SlaveError::InvalidResponse("Not enough data for u32".to_string()));
+            return Err(SlaveError::InvalidResponse(
+                "Not enough data for u32".to_string(),
+            ));
         }
         Ok(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
     }
@@ -1429,7 +1571,9 @@ impl XcpSlave {
     pub async fn read_u8(&self, mta: Mta) -> Result<u8, SlaveError> {
         let data = self.read_memory(mta, 1).await?;
         if data.is_empty() {
-            return Err(SlaveError::InvalidResponse("Not enough data for u8".to_string()));
+            return Err(SlaveError::InvalidResponse(
+                "Not enough data for u8".to_string(),
+            ));
         }
         Ok(data[0])
     }
@@ -1473,7 +1617,9 @@ impl XcpSlave {
     pub async fn write_u8_array_sequential(&self, mta: Mta, data: &[u8]) -> Result<(), SlaveError> {
         tracing::info!(
             "write_u8_array_sequential: {} bytes to address 0x{:08X} (ext={})",
-            data.len(), mta.address, mta.extension
+            data.len(),
+            mta.address,
+            mta.extension
         );
         self.set_mta(mta).await?;
         self.download_sequential(data).await
@@ -1483,7 +1629,11 @@ impl XcpSlave {
     pub fn load_a2l<P: AsRef<Path>>(&mut self, path: P) -> Result<(), String> {
         let path = path.as_ref();
 
-        tracing::info!("Loading A2L file '{}' for slave '{}'...", path.display(), self.info.name);
+        tracing::info!(
+            "Loading A2L file '{}' for slave '{}'...",
+            path.display(),
+            self.info.name
+        );
 
         // Load calibration parameters
         self.cal_manager = CalibrationManager::from_a2l(path)?;
@@ -1507,7 +1657,11 @@ impl XcpSlave {
 
     /// Set memory segments without re-parsing the A2L file.
     /// Use when segments are already pre-parsed (e.g. from DeviceState).
-    pub fn set_memory_segments(&mut self, segments: Vec<A2lMemorySegment>, a2l_path: Option<PathBuf>) {
+    pub fn set_memory_segments(
+        &mut self,
+        segments: Vec<A2lMemorySegment>,
+        a2l_path: Option<PathBuf>,
+    ) {
         self.cal_manager.set_memory_segments(segments);
         if let Some(path) = a2l_path {
             self.a2l_path = Some(path);
@@ -1530,7 +1684,10 @@ impl XcpSlave {
         self.router.stop().await;
 
         // Close transport
-        self.transport.close().await.map_err(SlaveError::Transport)?;
+        self.transport
+            .close()
+            .await
+            .map_err(SlaveError::Transport)?;
 
         self.info.connected = false;
 
@@ -1553,7 +1710,9 @@ impl XcpSlave {
 
     /// Get DAQ resolution info from slave
     pub async fn get_daq_resolution_info(&self) -> Result<DAQResolutionInfo, SlaveError> {
-        let response = self.send_command_and_wait(&commands::get_daq_resolution_info()).await?;
+        let response = self
+            .send_command_and_wait(&commands::get_daq_resolution_info())
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
@@ -1571,13 +1730,17 @@ impl XcpSlave {
                 data.len()
             ))),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
     /// Get DAQ processor info from slave
     pub async fn get_daq_processor_info(&self) -> Result<DAQProcessorInfo, SlaveError> {
-        let response = self.send_command_and_wait(&commands::get_daq_processor_info()).await?;
+        let response = self
+            .send_command_and_wait(&commands::get_daq_processor_info())
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
@@ -1589,7 +1752,9 @@ impl XcpSlave {
                 min_daq: data[5],
                 daq_key_byte: data[6],
             }),
-            _ => Err(SlaveError::InvalidResponse("Invalid response length".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Invalid response length".to_string(),
+            )),
         }
     }
 
@@ -1597,10 +1762,15 @@ impl XcpSlave {
     ///
     /// After GET_DAQ_EVENT_INFO, the slave automatically sets its MTA to the start of
     /// the event name string. A subsequent UPLOAD fetches the name bytes.
-    pub async fn get_daq_events(&self, max_event_channel: u16) -> Result<Vec<crate::a2l::DaqEvent>, SlaveError> {
+    pub async fn get_daq_events(
+        &self,
+        max_event_channel: u16,
+    ) -> Result<Vec<crate::a2l::DaqEvent>, SlaveError> {
         let mut events = Vec::new();
         for channel in 0..max_event_channel {
-            let response = self.send_command_and_wait(&commands::get_daq_event_info(channel)).await?;
+            let response = self
+                .send_command_and_wait(&commands::get_daq_event_info(channel))
+                .await?;
             let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
             match parsed {
                 Response::Res(data) if data.len() >= 6 => {
@@ -1643,7 +1813,9 @@ impl XcpSlave {
 
     /// Get DAQ clock from slave
     pub async fn get_daq_clock(&self) -> Result<u32, SlaveError> {
-        let response = self.send_command_and_wait(&commands::get_daq_clock()).await?;
+        let response = self
+            .send_command_and_wait(&commands::get_daq_clock())
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
@@ -1657,7 +1829,9 @@ impl XcpSlave {
                 data.len()
             ))),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
@@ -1670,33 +1844,43 @@ impl XcpSlave {
         match parsed {
             Response::Res(_) => Ok(()),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
     /// Allocate DAQ lists on slave
     pub async fn alloc_daq(&self, daq_count: u16) -> Result<(), SlaveError> {
-        let response = self.send_command_and_wait(&commands::alloc_daq(daq_count)).await?;
+        let response = self
+            .send_command_and_wait(&commands::alloc_daq(daq_count))
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
         match parsed {
             Response::Res(_) => Ok(()),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
     /// Allocate ODTs on slave
     pub async fn alloc_odt(&self, daq_list: u16, odt_count: u8) -> Result<(), SlaveError> {
-        let response = self.send_command_and_wait(&commands::alloc_odt(daq_list, odt_count)).await?;
+        let response = self
+            .send_command_and_wait(&commands::alloc_odt(daq_list, odt_count))
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
         match parsed {
             Response::Res(_) => Ok(()),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
@@ -1707,40 +1891,57 @@ impl XcpSlave {
         odt: u8,
         entry_count: u8,
     ) -> Result<(), SlaveError> {
-        let response = self.send_command_and_wait(&commands::alloc_odt_entry(daq_list, odt, entry_count)).await?;
+        let response = self
+            .send_command_and_wait(&commands::alloc_odt_entry(daq_list, odt, entry_count))
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
         match parsed {
             Response::Res(_) => Ok(()),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
     /// Set DAQ pointer on slave
     pub async fn set_daq_ptr(&self, daq_list: u16, odt: u8, entry: u8) -> Result<(), SlaveError> {
-        let response = self.send_command_and_wait(&commands::set_daq_ptr(daq_list, odt, entry)).await?;
+        let response = self
+            .send_command_and_wait(&commands::set_daq_ptr(daq_list, odt, entry))
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
         match parsed {
             Response::Res(_) => Ok(()),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
     /// Write DAQ entry on slave
-    pub async fn write_daq(&self, bit_offset: u8, mta: Mta, data_size: u8) -> Result<(), SlaveError> {
-        let response = self.send_command_and_wait(&commands::write_daq(bit_offset, mta, data_size)).await?;
+    pub async fn write_daq(
+        &self,
+        bit_offset: u8,
+        mta: Mta,
+        data_size: u8,
+    ) -> Result<(), SlaveError> {
+        let response = self
+            .send_command_and_wait(&commands::write_daq(bit_offset, mta, data_size))
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
         match parsed {
             Response::Res(_) => Ok(()),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
@@ -1753,42 +1954,58 @@ impl XcpSlave {
         prescaler: u8,
         priority: u8,
     ) -> Result<(), SlaveError> {
-        let response = self.send_command_and_wait(&commands::set_daq_list_mode(
-            mode, daq_list, event_channel, prescaler, priority,
-        )).await?;
+        let response = self
+            .send_command_and_wait(&commands::set_daq_list_mode(
+                mode,
+                daq_list,
+                event_channel,
+                prescaler,
+                priority,
+            ))
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
         match parsed {
             Response::Res(_) => Ok(()),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
     /// Start/stop DAQ list on slave
     pub async fn start_stop_daq_list(&self, mode: u8, daq_list: u16) -> Result<(), SlaveError> {
-        let response = self.send_command_and_wait(&commands::start_stop_daq_list(mode, daq_list)).await?;
+        let response = self
+            .send_command_and_wait(&commands::start_stop_daq_list(mode, daq_list))
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
         match parsed {
             Response::Res(_) => Ok(()),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
     /// Start/stop synch on slave
     pub async fn start_stop_synch(&self, mode: u8) -> Result<(), SlaveError> {
-        let response = self.send_command_and_wait(&commands::start_stop_synch(mode)).await?;
+        let response = self
+            .send_command_and_wait(&commands::start_stop_synch(mode))
+            .await?;
 
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
         match parsed {
             Response::Res(_) => Ok(()),
             Response::Err(err) => Err(SlaveError::Protocol(err)),
-            _ => Err(SlaveError::InvalidResponse("Unexpected response type".to_string())),
+            _ => Err(SlaveError::InvalidResponse(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 }
@@ -1967,18 +2184,27 @@ mod tests {
         // Test AddressNotInSegment error
         let err = CalibrationWriteError::AddressNotInSegment(0x12345678, 0x02);
         assert!(err.to_string().contains("0x12345678"));
-        assert!(err.to_string().contains("not within any defined memory segment"));
+        assert!(err
+            .to_string()
+            .contains("not within any defined memory segment"));
 
         // Test SegmentNoWriteAllowed error
         let err = CalibrationWriteError::SegmentNoWriteAllowed(2);
         assert!(err.to_string().contains("Segment 2"));
-        assert!(err.to_string().contains("no pages that allow XCP write access"));
+        assert!(err
+            .to_string()
+            .contains("no pages that allow XCP write access"));
 
         // Test CurrentPageNoWrite error
-        let err = CalibrationWriteError::CurrentPageNoWrite { segment: 0, page: 0 };
+        let err = CalibrationWriteError::CurrentPageNoWrite {
+            segment: 0,
+            page: 0,
+        };
         assert!(err.to_string().contains("page 0"));
         assert!(err.to_string().contains("segment 0"));
-        assert!(err.to_string().contains("Please switch to a page with write permission"));
+        assert!(err
+            .to_string()
+            .contains("Please switch to a page with write permission"));
 
         // Test PageStateNotInitialized error
         let err = CalibrationWriteError::PageStateNotInitialized;
@@ -2060,7 +2286,11 @@ mod tests {
 
         // First chunk (DOWNLOAD)
         let first_chunk_size = max_block.min(remaining);
-        chunks.push(("DOWNLOAD", total_size as u8, data[offset..offset + first_chunk_size].to_vec()));
+        chunks.push((
+            "DOWNLOAD",
+            total_size as u8,
+            data[offset..offset + first_chunk_size].to_vec(),
+        ));
         offset += first_chunk_size;
         remaining -= first_chunk_size;
 
@@ -2068,7 +2298,11 @@ mod tests {
         while remaining > 0 {
             let chunk_size = max_block.min(remaining);
             let remaining_after = remaining - chunk_size;
-            chunks.push(("DOWNLOAD_NEXT", remaining_after as u8, data[offset..offset + chunk_size].to_vec()));
+            chunks.push((
+                "DOWNLOAD_NEXT",
+                remaining_after as u8,
+                data[offset..offset + chunk_size].to_vec(),
+            ));
             offset += chunk_size;
             remaining -= chunk_size;
         }
@@ -2107,7 +2341,11 @@ pub enum SlaveEvent {
     /// Slave disconnected
     Disconnected { id: SlaveId },
     /// A2L file loaded
-    A2lLoaded { id: SlaveId, cal_count: usize, meas_count: usize },
+    A2lLoaded {
+        id: SlaveId,
+        cal_count: usize,
+        meas_count: usize,
+    },
     /// DAQ started
     DaqStarted { id: SlaveId },
     /// DAQ stopped
@@ -2115,4 +2353,3 @@ pub enum SlaveEvent {
     /// Error occurred
     Error { id: SlaveId, error: String },
 }
-

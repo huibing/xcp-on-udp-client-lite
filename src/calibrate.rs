@@ -4,15 +4,15 @@
 //! - Single variable: `--var name --value 10`
 //! - DCM file: `--dcm file.DCM` (bulk calibration from DAMOS file)
 
-use std::path::Path;
-use xcp_client::{
-    A2lReader, CalibrationManager, CalibrationParam, CalibrationValue, CalibrationType,
-    PageMode, StorageOrder, XcpClient, matrix_to_flat,
-};
-use xcp_client::transport::TransportConfig;
-use dcm_utils::DcmData;
 use dcm_utils::block::Block as DcmBlock;
 use dcm_utils::value::Value as DcmValue;
+use dcm_utils::DcmData;
+use std::path::Path;
+use xcp_client::transport::TransportConfig;
+use xcp_client::{
+    matrix_to_flat, A2lReader, CalibrationManager, CalibrationParam, CalibrationType,
+    CalibrationValue, PageMode, StorageOrder, XcpClient,
+};
 
 /// Run the calibrate subcommand
 pub async fn run_calibrate(
@@ -28,9 +28,7 @@ pub async fn run_calibrate(
             name: v.clone(),
             value: val.clone(),
         },
-        (None, None, Some(dcm)) => CalibrateMode::DcmFile {
-            path: dcm.clone(),
-        },
+        (None, None, Some(dcm)) => CalibrateMode::DcmFile { path: dcm.clone() },
         (Some(_), None, _) => {
             eprintln!("Error: --value is required when using --var");
             std::process::exit(1);
@@ -51,15 +49,16 @@ pub async fn run_calibrate(
 
     // Load A2L file
     println!("Loading A2L file: {}", a2l_path);
-    let reader = A2lReader::load(a2l_path)
-        .map_err(|e| format!("Failed to load A2L: {}", e))?;
+    let reader = A2lReader::load(a2l_path).map_err(|e| format!("Failed to load A2L: {}", e))?;
 
     // Get slave address (override or from A2L)
     let slave_addr = if let Some(addr) = addr_override {
         addr
     } else {
         let addrs = reader.get_slave_addresses();
-        addrs.into_iter().next()
+        addrs
+            .into_iter()
+            .next()
             .ok_or("No slave address found in A2L file. Use --addr to specify one.")?
     };
 
@@ -75,7 +74,10 @@ pub async fn run_calibrate(
     // Prepare write jobs
     let jobs = match &mode {
         CalibrateMode::SingleVar { name, value } => {
-            let _param = cal_manager.params().iter().find(|p| p.name == *name)
+            let _param = cal_manager
+                .params()
+                .iter()
+                .find(|p| p.name == *name)
                 .ok_or_else(|| format!("Variable '{}' not found in A2L", name))?;
             vec![WriteJob {
                 param_name: name.clone(),
@@ -99,14 +101,19 @@ pub async fn run_calibrate(
     // Connect to slave
     println!("\nConnecting to slave at {}...", slave_addr);
     let mut client = XcpClient::new();
-    let transport_config = TransportConfig::Udp { addr: slave_addr.clone() };
-    let slave_id = client.connect_slave("calibrate-target", transport_config).await
+    let transport_config = TransportConfig::Udp {
+        addr: slave_addr.clone(),
+    };
+    let slave_id = client
+        .connect_slave("calibrate-target", transport_config)
+        .await
         .map_err(|e| format!("Failed to connect: {}", e))?;
     println!("  Connected (id: {})", slave_id);
 
     // Setup: load segments, query page state, switch to working page
     let setup_result = async {
-        let xcp_slave = client.get_slave(slave_id)
+        let xcp_slave = client
+            .get_slave(slave_id)
             .ok_or("Failed to get slave handle")?;
         let mut guard = xcp_slave.lock().await;
 
@@ -136,7 +143,8 @@ pub async fn run_calibrate(
         }
 
         Ok::<(), String>(())
-    }.await;
+    }
+    .await;
 
     if let Err(e) = setup_result {
         eprintln!("Setup failed: {}", e);
@@ -210,13 +218,15 @@ async fn write_single_value(
     cal_manager: &CalibrationManager,
     job: &WriteJob,
 ) -> Result<(), String> {
-    let param = cal_manager.params().iter().find(|p| p.name == job.param_name)
+    let param = cal_manager
+        .params()
+        .iter()
+        .find(|p| p.name == job.param_name)
         .ok_or_else(|| format!("Parameter '{}' not found", job.param_name))?;
 
     let value = cal_manager.parse_value(param, &job.value_str)?;
 
-    let xcp_slave = client.get_slave(slave_id)
-        .ok_or("Slave handle lost")?;
+    let xcp_slave = client.get_slave(slave_id).ok_or("Slave handle lost")?;
     let guard = xcp_slave.lock().await;
 
     write_to_slave(&guard, param, &value).await
@@ -287,11 +297,16 @@ fn matrix_value_to_bytes(
 /// Extract (rows, cols) from a matrix CalibrationType, or None for non-matrix types.
 fn matrix_dimensions(dt: &CalibrationType) -> Option<(usize, usize)> {
     match dt {
-        CalibrationType::U8Matrix(r, c) | CalibrationType::U16Matrix(r, c)
-        | CalibrationType::U32Matrix(r, c) | CalibrationType::U64Matrix(r, c)
-        | CalibrationType::I8Matrix(r, c) | CalibrationType::I16Matrix(r, c)
-        | CalibrationType::I32Matrix(r, c) | CalibrationType::I64Matrix(r, c)
-        | CalibrationType::F32Matrix(r, c) | CalibrationType::F64Matrix(r, c)
+        CalibrationType::U8Matrix(r, c)
+        | CalibrationType::U16Matrix(r, c)
+        | CalibrationType::U32Matrix(r, c)
+        | CalibrationType::U64Matrix(r, c)
+        | CalibrationType::I8Matrix(r, c)
+        | CalibrationType::I16Matrix(r, c)
+        | CalibrationType::I32Matrix(r, c)
+        | CalibrationType::I64Matrix(r, c)
+        | CalibrationType::F32Matrix(r, c)
+        | CalibrationType::F64Matrix(r, c)
         | CalibrationType::BoolMatrix(r, c) => Some((*r, *c)),
         _ => None,
     }
@@ -311,9 +326,15 @@ async fn write_to_slave(
     if let Some((rows, cols)) = matrix_dimensions(&param.data_type) {
         if let Some(data) = matrix_value_to_bytes(value, rows, cols, param.storage_order) {
             return if data.len() <= 255 {
-                slave.write_memory_sequential(mta, &data).await.map_err(|e| e.to_string())
+                slave
+                    .write_memory_sequential(mta, &data)
+                    .await
+                    .map_err(|e| e.to_string())
             } else {
-                slave.write_u8_array_sequential(mta, &data).await.map_err(|e| e.to_string())
+                slave
+                    .write_u8_array_sequential(mta, &data)
+                    .await
+                    .map_err(|e| e.to_string())
             };
         }
         return Err(format!("Type mismatch for matrix parameter {}", param.name));
@@ -354,18 +375,32 @@ async fn write_to_slave(
         (CalibrationValue::F64Array(arr), CalibrationType::F64Array(_)) => {
             arr.iter().flat_map(|v| v.to_le_bytes()).collect()
         }
-        _ => return Err(format!("Unsupported type combination: {:?}", param.data_type)),
+        _ => {
+            return Err(format!(
+                "Unsupported type combination: {:?}",
+                param.data_type
+            ))
+        }
     };
 
     if data.len() <= 255 {
-        slave.write_memory_sequential(mta, &data).await.map_err(|e| e.to_string())
+        slave
+            .write_memory_sequential(mta, &data)
+            .await
+            .map_err(|e| e.to_string())
     } else {
-        slave.write_u8_array_sequential(mta, &data).await.map_err(|e| e.to_string())
+        slave
+            .write_u8_array_sequential(mta, &data)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
 /// Build write jobs from a DCM file by matching blocks to A2L parameters
-fn build_dcm_jobs(dcm_path: &str, cal_manager: &CalibrationManager) -> Result<Vec<WriteJob>, String> {
+fn build_dcm_jobs(
+    dcm_path: &str,
+    cal_manager: &CalibrationManager,
+) -> Result<Vec<WriteJob>, String> {
     let dcm = DcmData::new(Path::new(dcm_path));
     let mut jobs = Vec::new();
     let mut skipped = Vec::new();
@@ -428,7 +463,10 @@ fn build_dcm_jobs(dcm_path: &str, cal_manager: &CalibrationManager) -> Result<Ve
     }
 
     if !skipped.is_empty() {
-        println!("  Skipped {} DCM variable(s) not found in A2L:", skipped.len());
+        println!(
+            "  Skipped {} DCM variable(s) not found in A2L:",
+            skipped.len()
+        );
         for name in skipped.iter().take(10) {
             println!("    - {}", name);
         }
@@ -463,14 +501,13 @@ fn dcm_value_to_raw_string(value: &DcmValue, param: &CalibrationParam) -> Result
 fn dcm_array_to_raw_string(value: &DcmValue, param: &CalibrationParam) -> Result<String, String> {
     match value {
         DcmValue::WERT(values) => {
-            let raw_strings: Result<Vec<String>, String> = values.iter()
+            let raw_strings: Result<Vec<String>, String> = values
+                .iter()
                 .map(|v| physical_to_raw_string(*v, param))
                 .collect();
             Ok(raw_strings?.join(", "))
         }
-        DcmValue::TEXT(texts) => {
-            Ok(texts.join(", "))
-        }
+        DcmValue::TEXT(texts) => Ok(texts.join(", ")),
     }
 }
 
@@ -486,12 +523,14 @@ fn dcm_map_to_raw_string(
     let (dcm_ncol, dcm_nrow) = map.dim; // ncol = X-axis size, nrow = Y-axis size
 
     // Collect DCM values into [nrow(Y)][ncol(X)] numeric matrix
-    let dcm_values: Vec<Vec<f64>> = map.value.iter().filter_map(|row| {
-        match row {
+    let dcm_values: Vec<Vec<f64>> = map
+        .value
+        .iter()
+        .filter_map(|row| match row {
             DcmValue::WERT(values) => Some(values.clone()),
             DcmValue::TEXT(_) => None,
-        }
-    }).collect();
+        })
+        .collect();
 
     // Handle TEXT maps (no transpose needed for enum lookups)
     if dcm_values.is_empty() {
@@ -527,13 +566,16 @@ fn dcm_map_to_raw_string(
 fn physical_to_raw_string(physical: f64, param: &CalibrationParam) -> Result<String, String> {
     match &param.data_type {
         // Float types: physical = stored value, write directly
-        CalibrationType::F32 | CalibrationType::F64
-        | CalibrationType::F32Array(_) | CalibrationType::F64Array(_)
-        | CalibrationType::F32Matrix(_, _) | CalibrationType::F64Matrix(_, _) => {
-            Ok(physical.to_string())
-        }
+        CalibrationType::F32
+        | CalibrationType::F64
+        | CalibrationType::F32Array(_)
+        | CalibrationType::F64Array(_)
+        | CalibrationType::F32Matrix(_, _)
+        | CalibrationType::F64Matrix(_, _) => Ok(physical.to_string()),
         // Bool
-        CalibrationType::Bool | CalibrationType::BoolArray(_) | CalibrationType::BoolMatrix(_, _) => {
+        CalibrationType::Bool
+        | CalibrationType::BoolArray(_)
+        | CalibrationType::BoolMatrix(_, _) => {
             Ok(if physical != 0.0 { "true" } else { "false" }.to_string())
         }
         // Integer types: convert physical → raw via compu_method
@@ -572,7 +614,10 @@ mod tests {
         let param = make_param(
             "test",
             CalibrationType::U8,
-            CompuMethod::Linear { factor: 0.5, offset: 10.0 },
+            CompuMethod::Linear {
+                factor: 0.5,
+                offset: 10.0,
+            },
         );
         // physical = factor * raw + offset → raw = (physical - offset) / factor
         // physical=60 → raw = (60-10)/0.5 = 100
@@ -653,7 +698,8 @@ mod tests {
         let value = cal.parse_value(&param, &raw_str).unwrap();
         let bytes = matrix_value_to_bytes(&value, x_size, y_size, order).unwrap();
         // Convert bytes back to f32 for readable assertions
-        bytes.chunks(4)
+        bytes
+            .chunks(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }
@@ -745,18 +791,23 @@ mod tests {
     fn test_matrix_value_to_bytes_u8() {
         let mat = vec![vec![1u8, 2], vec![3, 4], vec![5, 6]];
         // RowDir with invert → ColumnDir: columns first
-        let bytes = matrix_value_to_bytes(
-            &CalibrationValue::U8Matrix(mat),
-            3, 2, StorageOrder::RowDir,
-        ).unwrap();
+        let bytes =
+            matrix_value_to_bytes(&CalibrationValue::U8Matrix(mat), 3, 2, StorageOrder::RowDir)
+                .unwrap();
         // invert(RowDir) = ColumnDir → mat[*][0], mat[*][1] = 1,3,5,2,4,6
         assert_eq!(bytes, vec![1, 3, 5, 2, 4, 6]);
     }
 
     #[test]
     fn test_matrix_dimensions() {
-        assert_eq!(matrix_dimensions(&CalibrationType::F32Matrix(3, 9)), Some((3, 9)));
-        assert_eq!(matrix_dimensions(&CalibrationType::U8Matrix(2, 4)), Some((2, 4)));
+        assert_eq!(
+            matrix_dimensions(&CalibrationType::F32Matrix(3, 9)),
+            Some((3, 9))
+        );
+        assert_eq!(
+            matrix_dimensions(&CalibrationType::U8Matrix(2, 4)),
+            Some((2, 4))
+        );
         assert_eq!(matrix_dimensions(&CalibrationType::F32), None);
         assert_eq!(matrix_dimensions(&CalibrationType::F32Array(5)), None);
     }

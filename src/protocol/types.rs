@@ -194,7 +194,11 @@ pub enum Response {
     /// Negative response (error)
     Err(ErrorCode),
     /// DAQ data packet
-    Daq { daq_list: u16, odt: u8, data: Vec<u8> },
+    Daq {
+        daq_list: u16,
+        odt: u8,
+        data: Vec<u8>,
+    },
 }
 
 /// Memory Transfer Address
@@ -285,7 +289,7 @@ pub enum AddressGranularity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ByteOrder {
     #[default]
-    MsbLast,  // Big-endian
+    MsbLast, // Big-endian
     MsbFirst, // Little-endian
 }
 
@@ -302,8 +306,7 @@ pub fn u16_from_le_bytes(data: &[u8]) -> u16 {
 /// Convert u64 from little-endian bytes
 pub fn u64_from_le_bytes(data: &[u8]) -> u64 {
     u64::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ])
 }
 
@@ -315,8 +318,7 @@ pub fn f32_from_le_bytes(data: &[u8]) -> f32 {
 /// Convert f64 from little-endian bytes
 pub fn f64_from_le_bytes(data: &[u8]) -> f64 {
     f64::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ])
 }
 
@@ -432,9 +434,15 @@ mod tests {
 
     #[test]
     fn test_error_code_display() {
-        assert_eq!(format!("{}", ErrorCode::CmdProcessorBusy), "Command processor busy");
+        assert_eq!(
+            format!("{}", ErrorCode::CmdProcessorBusy),
+            "Command processor busy"
+        );
         assert_eq!(format!("{}", ErrorCode::UnknownCommand), "Unknown command");
-        assert_eq!(format!("{}", ErrorCode::Unknown(0xAB)), "Undefined error: 0xAB");
+        assert_eq!(
+            format!("{}", ErrorCode::Unknown(0xAB)),
+            "Undefined error: 0xAB"
+        );
     }
 
     #[test]

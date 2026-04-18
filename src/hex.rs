@@ -122,10 +122,7 @@ impl HexImage {
     /// Check if any data exists in the given address range
     pub fn has_data_in_range(&self, base_address: u32, size: u32) -> bool {
         let end = base_address.saturating_add(size);
-        self.data
-            .range(base_address..end)
-            .next()
-            .is_some()
+        self.data.range(base_address..end).next().is_some()
     }
 
     /// Count how many bytes are populated in the given address range
@@ -196,11 +193,7 @@ impl HexRecord {
         if bytes.len() < expected_len {
             return Err(HexError::Parse {
                 line: line_num,
-                message: format!(
-                    "Expected {} bytes but got {}",
-                    expected_len,
-                    bytes.len()
-                ),
+                message: format!("Expected {} bytes but got {}", expected_len, bytes.len()),
             });
         }
 
@@ -276,9 +269,9 @@ mod tests {
     fn test_extended_linear_address() {
         // Set upper address to 0xA038, then write data at offset 0x0000
         let hex = concat!(
-            ":02000004A03822\n",        // Extended Linear Address: 0xA038
-            ":04000000AABBCCDDEE\n",    // Data at 0xA0380000
-            ":00000001FF\n",            // EOF
+            ":02000004A03822\n",     // Extended Linear Address: 0xA038
+            ":04000000AABBCCDDEE\n", // Data at 0xA0380000
+            ":00000001FF\n",         // EOF
         );
         let image = HexImage::from_str(hex).unwrap();
         let data = image.extract_range(0xA0380000, 4, 0xFF);
@@ -289,8 +282,8 @@ mod tests {
     fn test_extended_segment_address() {
         // Set segment to 0x1000, so base = 0x10000
         let hex = concat!(
-            ":020000021000EC\n",        // Extended Segment Address: 0x1000
-            ":020000001234B8\n",        // Data at 0x10000
+            ":020000021000EC\n", // Extended Segment Address: 0x1000
+            ":020000001234B8\n", // Data at 0x10000
             ":00000001FF\n",
         );
         let image = HexImage::from_str(hex).unwrap();
@@ -340,9 +333,9 @@ mod tests {
     #[test]
     fn test_multiple_data_records() {
         let hex = concat!(
-            ":0200000480007A\n",        // Extended: 0x8000
-            ":0400000001020304F2\n",    // 4 bytes at 0x80000000
-            ":0400040005060708DE\n",    // 4 bytes at 0x80000004
+            ":0200000480007A\n",     // Extended: 0x8000
+            ":0400000001020304F2\n", // 4 bytes at 0x80000000
+            ":0400040005060708DE\n", // 4 bytes at 0x80000004
             ":00000001FF\n",
         );
         let image = HexImage::from_str(hex).unwrap();
@@ -353,10 +346,7 @@ mod tests {
 
     #[test]
     fn test_byte_count_in_range() {
-        let hex = concat!(
-            ":04000000AABBCCDDEE\n",
-            ":00000001FF\n",
-        );
+        let hex = concat!(":04000000AABBCCDDEE\n", ":00000001FF\n",);
         let image = HexImage::from_str(hex).unwrap();
         assert_eq!(image.byte_count_in_range(0x0000, 4), 4);
         assert_eq!(image.byte_count_in_range(0x0000, 8), 4);
@@ -403,7 +393,7 @@ mod tests {
         // Record type 05 (start linear address) should be ignored, not error
         let hex = concat!(
             ":04000000AABBCCDDEE\n",
-            ":0400000508000000EF\n",  // Start Linear Address (entry point)
+            ":0400000508000000EF\n", // Start Linear Address (entry point)
             ":00000001FF\n",
         );
         let image = HexImage::from_str(hex).unwrap();
@@ -412,10 +402,17 @@ mod tests {
 
     #[test]
     fn test_hex_error_display() {
-        let err = HexError::Parse { line: 3, message: "bad line".to_string() };
+        let err = HexError::Parse {
+            line: 3,
+            message: "bad line".to_string(),
+        };
         assert!(format!("{}", err).contains("bad line"));
 
-        let err = HexError::Checksum { line: 5, expected: 0xAA, actual: 0xBB };
+        let err = HexError::Checksum {
+            line: 5,
+            expected: 0xAA,
+            actual: 0xBB,
+        };
         let msg = format!("{}", err);
         assert!(msg.contains("5"));
     }
@@ -437,7 +434,10 @@ mod tests {
                 sum = sum.wrapping_add(byte);
             }
             let checksum = (!sum).wrapping_add(1);
-            hex.push_str(&format!(":10{:04X}00{}{:02X}\n", offset, line_data, checksum));
+            hex.push_str(&format!(
+                ":10{:04X}00{}{:02X}\n",
+                offset, line_data, checksum
+            ));
         }
         hex.push_str(":00000001FF\n");
 

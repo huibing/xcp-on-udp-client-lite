@@ -178,7 +178,10 @@ impl TcpTransport {
 
     /// Read from the TCP stream until either one normalized XCP payload is available,
     /// the timeout expires, or the socket closes.
-    async fn recv_payload_packet(&self, timeout_ms: Option<u64>) -> Result<Option<Vec<u8>>, TransportError> {
+    async fn recv_payload_packet(
+        &self,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
         let mut read_state = self.reader_state.lock().await;
 
         loop {
@@ -354,7 +357,10 @@ mod tests {
         });
 
         let transport = TcpTransport::connect(&addr.to_string()).await.unwrap();
-        transport.send_command_only(&[0xFF, 0x01, 0x02]).await.unwrap();
+        transport
+            .send_command_only(&[0xFF, 0x01, 0x02])
+            .await
+            .unwrap();
         server.await.unwrap();
         assert_eq!(transport.current_counter(), 1);
     }

@@ -109,11 +109,15 @@ impl CompuMethod {
                         return format!("{:.6}", phys);
                     }
                 }
-                pairs.first().map(|p| p.1.to_string()).unwrap_or_else(|| raw.to_string())
+                pairs
+                    .first()
+                    .map(|p| p.1.to_string())
+                    .unwrap_or_else(|| raw.to_string())
             }
-            Self::CompuVtab { raw_to_text, .. } => {
-                raw_to_text.get(&raw).cloned().unwrap_or_else(|| raw.to_string())
-            }
+            Self::CompuVtab { raw_to_text, .. } => raw_to_text
+                .get(&raw)
+                .cloned()
+                .unwrap_or_else(|| raw.to_string()),
         }
     }
 
@@ -176,12 +180,8 @@ impl CompuMethod {
                 let raw = ((phys - *offset) / *factor).round() as i64;
                 Ok(raw)
             }
-            Self::Rational { .. } => {
-                Err("Rational conversion reverse not supported".to_string())
-            }
-            Self::TabVerb { .. } => {
-                Err("TabVerb conversion reverse not supported".to_string())
-            }
+            Self::Rational { .. } => Err("Rational conversion reverse not supported".to_string()),
+            Self::TabVerb { .. } => Err("TabVerb conversion reverse not supported".to_string()),
             Self::CompuVtab { text_to_raw, .. } => {
                 // First try to match enum text
                 if let Some(&raw) = text_to_raw.get(display) {
@@ -221,9 +221,7 @@ impl CompuMethod {
     /// Get a specific enum entry by raw value
     pub fn get_enum_text(&self, raw: i64) -> Option<&str> {
         match self {
-            Self::CompuVtab { raw_to_text, .. } => {
-                raw_to_text.get(&raw).map(|s| s.as_str())
-            }
+            Self::CompuVtab { raw_to_text, .. } => raw_to_text.get(&raw).map(|s| s.as_str()),
             _ => None,
         }
     }
@@ -231,9 +229,7 @@ impl CompuMethod {
     /// Get raw value for an enum text
     pub fn get_enum_raw(&self, text: &str) -> Option<i64> {
         match self {
-            Self::CompuVtab { text_to_raw, .. } => {
-                text_to_raw.get(text).copied()
-            }
+            Self::CompuVtab { text_to_raw, .. } => text_to_raw.get(text).copied(),
             _ => None,
         }
     }
@@ -254,8 +250,7 @@ fn parse_int_bytes(bytes: &[u8]) -> i64 {
         2 => i16::from_le_bytes([bytes[0], bytes[1]]) as i64,
         4 => i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64,
         8 => i64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]),
         _ => 0,
     }
@@ -269,8 +264,7 @@ fn parse_float_bytes(bytes: &[u8]) -> f64 {
             val as f64
         }
         8 => f64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]),
         _ => 0.0,
     }

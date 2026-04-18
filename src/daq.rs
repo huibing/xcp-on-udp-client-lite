@@ -9,26 +9,28 @@
 //! or `mf4-rs-backend` (mdf4-rs crate). Only one may be active at a time.
 
 #[cfg(all(feature = "mf4-native", feature = "mf4-rs-backend"))]
-compile_error!("Features `mf4-native` and `mf4-rs-backend` are mutually exclusive. Enable only one.");
+compile_error!(
+    "Features `mf4-native` and `mf4-rs-backend` are mutually exclusive. Enable only one."
+);
 
 use crate::a2l::{A2lDataType, A2lMeasurement, A2lReader, CompuMethod};
 use crate::client::DAQResolutionInfo;
 use crate::protocol::Mta;
 use crate::slave::XcpSlave;
 // Note: chrono not used - timestamps are raw slave clock values, not UTC time
+#[cfg(feature = "mf4-rs-backend")]
+use mdf4_rs::{DataType as MdfDataType, DecodedValue, FlushPolicy, MdfWriter};
+#[cfg(feature = "mf4-native")]
+use mf4_parse::writer::builder::Mf4Metadata;
 #[cfg(feature = "mf4-native")]
 use mf4_parse::writer::stream_writer::{
     ChannelGroupDefBuilder, Mf4StreamWriter, StreamingDataGroup,
 };
-#[cfg(feature = "mf4-native")]
-use mf4_parse::writer::builder::Mf4Metadata;
-#[cfg(feature = "mf4-rs-backend")]
-use mdf4_rs::{DataType as MdfDataType, DecodedValue, FlushPolicy, MdfWriter};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{Cursor, Read};
 use std::io::Write as IoWrite;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -79,7 +81,6 @@ struct Mf4EventGroup {
     /// Channel names in this group (time_s first, then signals)
     channel_names: Vec<String>,
 }
-
 
 /// Measurement definition with full type information
 #[derive(Debug, Clone)]
@@ -141,7 +142,7 @@ impl TimestampUnit {
             TimestampUnit::DAQTIMESTAMPUNIT1S => 1.0,
         }
     }
-    
+
     /// 从 u16 安全转换
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -533,7 +534,7 @@ impl DaqManager {
             latest_sample: Arc::new(RwLock::new(None)),
             timestamp_fixed: false,
             timestamp_size: None,
-            indentification_field_type: IdentificationFieldType::AbosulteODT,   // most commonly used
+            indentification_field_type: IdentificationFieldType::AbosulteODT, // most commonly used
             timestamp_unit: None,
             base_timestamp: None,
             daq_resolution: None,
@@ -800,7 +801,8 @@ impl DaqManager {
         }
 
         // Group selected measurement indices by event channel
-        let mut event_groups: std::collections::BTreeMap<u16, Vec<usize>> = std::collections::BTreeMap::new();
+        let mut event_groups: std::collections::BTreeMap<u16, Vec<usize>> =
+            std::collections::BTreeMap::new();
         for (sel_idx, &meas_idx) in self.selected_indices.iter().enumerate() {
             let event_ch = self.get_measurement_event(meas_idx);
             event_groups.entry(event_ch).or_default().push(sel_idx);
@@ -839,7 +841,9 @@ impl DaqManager {
                 }
 
                 // Add measurement to current ODT
-                current_odt.push(OdtEntryAllocation { measurement_idx: idx });
+                current_odt.push(OdtEntryAllocation {
+                    measurement_idx: idx,
+                });
             }
 
             // Flush remaining ODT/list for this event group
@@ -958,28 +962,33 @@ impl DaqManager {
         self.latest_sample.read().await.clone()
     }
 
-    pub async fn get_timestamp_mode(&mut self, slave: &XcpSlave) -> Result<(), String>{
+    pub async fn get_timestamp_mode(&mut self, slave: &XcpSlave) -> Result<(), String> {
         tracing::trace!("Getting timestamp mode...");
         // Get timestamp mode from slave through GET_DAQ_RESOLUTION_INFO
-        let daqresolution_info = slave.get_daq_resolution_info().await.map_err(|e| format!("GET_DAQ_RESOLUTION_INFO failed: {}", e))?;
+        let daqresolution_info = slave
+            .get_daq_resolution_info()
+            .await
+            .map_err(|e| format!("GET_DAQ_RESOLUTION_INFO failed: {}", e))?;
         let timestamp_mode = daqresolution_info.timestamp_mode;
         self.timestamp_fixed = timestamp_mode & 0b1000 == 0b1000;
         let timestamp_size_bits = timestamp_mode & 0b0111;
         match timestamp_size_bits {
             0 if self.timestamp_fixed => {
                 tracing::error!("Timestamp mode is fixed but timestamp size is 0.");
-                return Err("Timestamp mode is fixed but timestamp size is not specified".to_string());
+                return Err(
+                    "Timestamp mode is fixed but timestamp size is not specified".to_string(),
+                );
             }
             0 => {
                 self.timestamp_size = None;
             }
-            1 | 2 | 4 => {  
+            1 | 2 | 4 => {
                 tracing::trace!("Timestamp size: {}", timestamp_size_bits);
                 self.timestamp_size = Some(timestamp_size_bits);
             }
             _ => {
                 tracing::error!("Timestamp SIZE NOT ALLOWED: {}", timestamp_size_bits);
-                return Err("Timestamp SIZE NOT ALLOWED".to_string())
+                return Err("Timestamp SIZE NOT ALLOWED".to_string());
             }
         }
         let timestamp_unit = (timestamp_mode & 0b1111_0000) >> 4;
@@ -988,9 +997,15 @@ impl DaqManager {
         Ok(())
     }
 
-    pub async fn get_daq_processor_info(&self, slave: &XcpSlave) -> Result<IdentificationFieldType, String> {
+    pub async fn get_daq_processor_info(
+        &self,
+        slave: &XcpSlave,
+    ) -> Result<IdentificationFieldType, String> {
         tracing::trace!("Getting DAQ processor info...");
-        let daq_processor_info = slave.get_daq_processor_info().await.map_err(|e| format!("GET_DAQ_PROCESSOR_INFO failed: {}", e))?;
+        let daq_processor_info = slave
+            .get_daq_processor_info()
+            .await
+            .map_err(|e| format!("GET_DAQ_PROCESSOR_INFO failed: {}", e))?;
         let daq_key_byte = daq_processor_info.daq_key_byte;
         tracing::info!("DAQ key byte: {}", daq_key_byte);
         let bits = (daq_key_byte & 0b11000000) >> 6;
@@ -999,7 +1014,7 @@ impl DaqManager {
                 tracing::trace!("abosulte odt is used");
                 Ok(IdentificationFieldType::AbosulteODT)
             }
-            1  => {
+            1 => {
                 tracing::trace!("releative odt is used");
                 Ok(IdentificationFieldType::RelatetiveODTBYTE)
             }
@@ -1036,7 +1051,9 @@ impl DaqManager {
         self.get_timestamp_mode(slave).await?;
 
         // Get DAQ resolution info for ODT entry limits
-        let daq_resolution = slave.get_daq_resolution_info().await
+        let daq_resolution = slave
+            .get_daq_resolution_info()
+            .await
             .map_err(|e| format!("GET_DAQ_RESOLUTION_INFO failed: {}", e))?;
         self.daq_resolution = Some(daq_resolution);
 
@@ -1044,8 +1061,11 @@ impl DaqManager {
         let odt_granularity = daq_resolution.odt_entry_granularity_daq;
 
         tracing::info!("Configuring Dynamic DAQ...");
-        tracing::info!("ODT entry limits: max_size={}, granularity={}",
-            max_odt_entry_size, odt_granularity);
+        tracing::info!(
+            "ODT entry limits: max_size={}, granularity={}",
+            max_odt_entry_size,
+            odt_granularity
+        );
 
         // Calculate ODT allocation based on slave limits
         let selected_measurements = self.selected_measurements();
@@ -1059,12 +1079,20 @@ impl DaqManager {
         tracing::info!("ODT allocation: {} DAQ lists", allocation.daq_list_count);
         for (list_idx, odt_count) in allocation.odt_count_per_list.iter().enumerate() {
             let event_ch = allocation.event_channel_per_list[list_idx];
-            tracing::info!("  DAQ list {}: {} ODTs, event_channel={}", list_idx, odt_count, event_ch);
+            tracing::info!(
+                "  DAQ list {}: {} ODTs, event_channel={}",
+                list_idx,
+                odt_count,
+                event_ch
+            );
         }
 
         // 1. FREE_DAQ - Release any existing DAQ configuration
         tracing::trace!("FREE_DAQ");
-        slave.free_daq().await.map_err(|e| format!("FREE_DAQ failed: {}", e))?;
+        slave
+            .free_daq()
+            .await
+            .map_err(|e| format!("FREE_DAQ failed: {}", e))?;
 
         // Clear old configuration
         {
@@ -1104,8 +1132,12 @@ impl DaqManager {
             for (odt_idx, odt_allocation) in list_allocation.odts.iter().enumerate() {
                 let odt = odt_idx as u8;
                 let entry_count = odt_allocation.entries.len() as u8;
-                tracing::trace!("ALLOC_ODT_ENTRY: DAQ list {}, ODT {}, {} entries",
-                    daq_list, odt, entry_count);
+                tracing::trace!(
+                    "ALLOC_ODT_ENTRY: DAQ list {}, ODT {}, {} entries",
+                    daq_list,
+                    odt,
+                    entry_count
+                );
                 slave
                     .alloc_odt_entry(daq_list, odt, entry_count)
                     .await
@@ -1130,7 +1162,11 @@ impl DaqManager {
 
                     tracing::trace!(
                         "WRITE_DAQ: DAQ list {}, ODT {}, entry {}, addr 0x{:08X}, size {}",
-                        daq_list, odt, entry_idx, meas.address, meas.size
+                        daq_list,
+                        odt,
+                        entry_idx,
+                        meas.address,
+                        meas.size
                     );
 
                     slave
@@ -1138,7 +1174,8 @@ impl DaqManager {
                         .await
                         .map_err(|e| format!("SET_DAQ_PTR failed: {}", e))?;
 
-                    let aligned_size = meas.size.div_ceil(odt_granularity as usize) * odt_granularity as usize;
+                    let aligned_size =
+                        meas.size.div_ceil(odt_granularity as usize) * odt_granularity as usize;
                     slave
                         .write_daq(0, meas.mta(), aligned_size as u8)
                         .await
@@ -1171,7 +1208,8 @@ impl DaqManager {
             let list_event_channel = allocation.event_channel_per_list[daq_list_idx];
             tracing::trace!(
                 "SET_DAQ_LIST_MODE: mode=0x10, daq_list={}, event_channel={}, prescaler=1",
-                daq_list, list_event_channel
+                daq_list,
+                list_event_channel
             );
             slave
                 .set_daq_list_mode(0x10, daq_list, list_event_channel, 1, 0)
@@ -1179,15 +1217,24 @@ impl DaqManager {
                 .map_err(|e| format!("SET_DAQ_LIST_MODE failed: {}", e))?;
         }
 
-        tracing::info!("DAQ configuration complete: {} entries configured", global_entry_idx);
+        tracing::info!(
+            "DAQ configuration complete: {} entries configured",
+            global_entry_idx
+        );
 
         // Log configuration summary
         {
             let config = self.daq_config.read().await;
             tracing::info!("DAQ Configuration:");
             for entry in &config.odt_entries {
-                tracing::info!("  {}: DAQ={}, ODT={}, entry={}, offset={}",
-                    entry.name, entry.daq_list, entry.odt, entry.entry, entry.byte_offset);
+                tracing::info!(
+                    "  {}: DAQ={}, ODT={}, entry={}, offset={}",
+                    entry.name,
+                    entry.daq_list,
+                    entry.odt,
+                    entry.entry,
+                    entry.byte_offset
+                );
             }
         }
 
@@ -1221,7 +1268,7 @@ impl DaqManager {
         for daq_list in 0..daq_list_count {
             tracing::info!("Selecting DAQ list {}", daq_list);
             slave
-                .start_stop_daq_list(2, daq_list)  // mode=2 (select DAQ list)
+                .start_stop_daq_list(2, daq_list) // mode=2 (select DAQ list)
                 .await
                 .map_err(|e| format!("START_STOP_DAQ_LIST failed for list {}: {}", daq_list, e))?;
         }
@@ -1230,13 +1277,19 @@ impl DaqManager {
 
         // Query timestamp mode info for later use by start_recording()
         if self.timestamp_unit.is_some() && self.timestamp_size.is_some() {
-            tracing::info!("Timestamp mode enabled (size={:?}, unit={:?})",
-                self.timestamp_size, self.timestamp_unit);
+            tracing::info!(
+                "Timestamp mode enabled (size={:?}, unit={:?})",
+                self.timestamp_size,
+                self.timestamp_unit
+            );
         } else {
             tracing::trace!("Timestamp mode not enabled");
         }
 
-        slave.start_stop_synch(0x01).await.map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
+        slave
+            .start_stop_synch(0x01)
+            .await
+            .map_err(|e| format!("START_STOP_SYNCH failed: {}", e))?;
 
         self.running.store(true, Ordering::SeqCst);
 
@@ -1293,16 +1346,15 @@ impl DaqManager {
                 // Receive DTO packet from channel
                 let msg = {
                     let mut rx = dto_rx.lock().await;
-                    tokio::time::timeout(
-                        std::time::Duration::from_millis(100),
-                        rx.recv()
-                    ).await
+                    tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
                 };
 
                 match msg {
                     Ok(Some(msg)) => {
                         // Parse single DTO packet
-                        if let Some(data) = parse_dto_packet(&msg.payload, timestamp_size, &iden_field_type) {
+                        if let Some(data) =
+                            parse_dto_packet(&msg.payload, timestamp_size, &iden_field_type)
+                        {
                             // Get configuration for this DAQ list and ODT
                             let config = daq_config.read().await;
 
@@ -1311,23 +1363,25 @@ impl DaqManager {
                             // the concrete DAQ list + relative ODT.
                             let (resolved_daq_list, resolved_odt) = match data.daq_list {
                                 Some(dl) => (dl, data.odt),
-                                None => {
-                                    match config.resolve_absolute_odt(data.odt) {
-                                        Some((dl, odt)) => (dl, odt),
-                                        None => {
-                                            tracing::warn!(
+                                None => match config.resolve_absolute_odt(data.odt) {
+                                    Some((dl, odt)) => (dl, odt),
+                                    None => {
+                                        tracing::warn!(
                                                 "Cannot resolve absolute ODT {} (odt_count_per_list={:?})",
                                                 data.odt, config.odt_count_per_list
                                             );
-                                            continue;
-                                        }
+                                        continue;
                                     }
-                                }
+                                },
                             };
 
                             // Find entries for this ODT
-                            let entries: Vec<&OdtEntryConfig> = config.odt_entries.iter()
-                                .filter(|e| e.daq_list == resolved_daq_list && e.odt == resolved_odt)
+                            let entries: Vec<&OdtEntryConfig> = config
+                                .odt_entries
+                                .iter()
+                                .filter(|e| {
+                                    e.daq_list == resolved_daq_list && e.odt == resolved_odt
+                                })
                                 .collect();
 
                             if entries.is_empty() {
@@ -1336,8 +1390,13 @@ impl DaqManager {
                                 continue;
                             }
 
-                            tracing::trace!("Received DTO: daq_list={}, odt={}, data_len={}, entries={}",
-                                resolved_daq_list, resolved_odt, data.data.len(), entries.len());
+                            tracing::trace!(
+                                "Received DTO: daq_list={}, odt={}, data_len={}, entries={}",
+                                resolved_daq_list,
+                                resolved_odt,
+                                data.data.len(),
+                                entries.len()
+                            );
 
                             // Parse measurement data using configuration
                             let mut record = DaqRecord::new(0.0, 0);
@@ -1347,10 +1406,8 @@ impl DaqManager {
                                 if offset + entry.size <= data.data.len() {
                                     let raw_bytes = &data.data[offset..offset + entry.size];
                                     let is_float = entry.data_type.is_float();
-                                    let physical_value = entry.compu_method.bytes_to_display(
-                                        raw_bytes,
-                                        is_float
-                                    );
+                                    let physical_value =
+                                        entry.compu_method.bytes_to_display(raw_bytes, is_float);
                                     record.add_value(&entry.name, physical_value);
                                     record.add_raw_value(&entry.name, raw_bytes.to_vec());
                                 } else {
@@ -1372,7 +1429,9 @@ impl DaqManager {
                                         existing.timestamp_raw = record.timestamp_raw;
                                         for (name, value) in &record.values {
                                             existing.values.insert(name.clone(), *value);
-                                            existing.signal_timestamps.insert(name.clone(), display_timestamp_s);
+                                            existing
+                                                .signal_timestamps
+                                                .insert(name.clone(), display_timestamp_s);
                                         }
                                         for (name, raw) in &record.raw_values {
                                             existing.raw_values.insert(name.clone(), raw.clone());
@@ -1381,7 +1440,8 @@ impl DaqManager {
                                     None => {
                                         let mut r = record.clone();
                                         for name in r.values.keys() {
-                                            r.signal_timestamps.insert(name.clone(), display_timestamp_s);
+                                            r.signal_timestamps
+                                                .insert(name.clone(), display_timestamp_s);
                                         }
                                         *latest = Some(r);
                                     }
@@ -1414,13 +1474,16 @@ impl DaqManager {
                                     let signals = csv_event_signals.read().await;
                                     if let Some(signal_names) = signals.get(&resolved_daq_list) {
                                         let mut csv_guard = csv_writers.lock().await;
-                                        if let Some(writer) = csv_guard.get_mut(&resolved_daq_list) {
+                                        if let Some(writer) = csv_guard.get_mut(&resolved_daq_list)
+                                        {
                                             let mut csv_line = format!("{:.6}", rec_ts);
                                             for name in signal_names {
                                                 csv_line.push(',');
                                                 if let Some(value) = record.get_value(name) {
                                                     // Find data type from config entries
-                                                    let is_float = config.odt_entries.iter()
+                                                    let is_float = config
+                                                        .odt_entries
+                                                        .iter()
                                                         .find(|e| &e.name == name)
                                                         .map(|e| e.data_type.is_float())
                                                         .unwrap_or(false);
@@ -1442,25 +1505,40 @@ impl DaqManager {
                                 #[cfg(feature = "mf4-native")]
                                 {
                                     let event_groups = mf4_event_groups.read().await;
-                                    if let Some(eg) = event_groups.iter().find(|g| g.daq_list == resolved_daq_list) {
+                                    if let Some(eg) = event_groups
+                                        .iter()
+                                        .find(|g| g.daq_list == resolved_daq_list)
+                                    {
                                         let mut mf4_guard = mf4_writer.lock().await;
                                         if let Some(ref mut writer) = *mf4_guard {
                                             if let Err(e) = writer.start_record(eg.dg_index, 0) {
                                                 tracing::error!("MF4 start_record failed: {}", e);
                                             } else {
                                                 // Set time channel
-                                                if let Err(e) = writer.set_channel_value("time_s", rec_ts) {
+                                                if let Err(e) =
+                                                    writer.set_channel_value("time_s", rec_ts)
+                                                {
                                                     tracing::error!("MF4 set time failed: {}", e);
                                                 }
                                                 // Set signal channels (skip time_s at index 0)
                                                 for ch_name in eg.channel_names.iter().skip(1) {
-                                                    let v = record.get_value(ch_name).unwrap_or(0.0);
-                                                    if let Err(e) = writer.set_channel_value(ch_name, v) {
-                                                        tracing::error!("MF4 set {} failed: {}", ch_name, e);
+                                                    let v =
+                                                        record.get_value(ch_name).unwrap_or(0.0);
+                                                    if let Err(e) =
+                                                        writer.set_channel_value(ch_name, v)
+                                                    {
+                                                        tracing::error!(
+                                                            "MF4 set {} failed: {}",
+                                                            ch_name,
+                                                            e
+                                                        );
                                                     }
                                                 }
                                                 if let Err(e) = writer.flush_record() {
-                                                    tracing::error!("MF4 flush_record failed: {}", e);
+                                                    tracing::error!(
+                                                        "MF4 flush_record failed: {}",
+                                                        e
+                                                    );
                                                 }
                                             }
                                         }
@@ -1471,9 +1549,12 @@ impl DaqManager {
                                 {
                                     let mut mf4_guard = mf4_writer.lock().await;
                                     let cg_guard = mf4_cg_id.lock().await;
-                                    if let (Some(ref mut writer), Some(ref cg_id)) = (&mut *mf4_guard, &*cg_guard) {
+                                    if let (Some(ref mut writer), Some(ref cg_id)) =
+                                        (&mut *mf4_guard, &*cg_guard)
+                                    {
                                         let meas_info = recording_meas_info.read().await;
-                                        let mut mdf_values = Vec::with_capacity(meas_info.len() + 1);
+                                        let mut mdf_values =
+                                            Vec::with_capacity(meas_info.len() + 1);
                                         mdf_values.push(DecodedValue::Float(rec_ts));
                                         for (name, _) in meas_info.iter() {
                                             let v = record.get_value(name).unwrap_or(0.0);
@@ -1567,7 +1648,10 @@ impl DaqManager {
         if has_slave_timestamp {
             match slave.get_daq_clock().await {
                 Ok(base_ts) => {
-                    tracing::info!("Recording: got base timestamp from slave: {} ticks", base_ts);
+                    tracing::info!(
+                        "Recording: got base timestamp from slave: {} ticks",
+                        base_ts
+                    );
                     self.base_timestamp = Some(base_ts);
                     let tracker = TimestampTracker::new(
                         base_ts,
@@ -1599,17 +1683,26 @@ impl DaqManager {
             let config = self.daq_config.read().await;
             let mut event_map: std::collections::BTreeMap<u16, Vec<String>> =
                 std::collections::BTreeMap::new();
-            let mut seen_per_list: std::collections::HashMap<u16, std::collections::HashSet<String>> =
-                std::collections::HashMap::new();
+            let mut seen_per_list: std::collections::HashMap<
+                u16,
+                std::collections::HashSet<String>,
+            > = std::collections::HashMap::new();
             for entry in &config.odt_entries {
                 let seen = seen_per_list.entry(entry.daq_list).or_default();
                 if seen.insert(entry.name.clone()) {
-                    event_map.entry(entry.daq_list).or_default().push(entry.name.clone());
+                    event_map
+                        .entry(entry.daq_list)
+                        .or_default()
+                        .push(entry.name.clone());
                 }
             }
 
             let csv_base = self.csv_path.with_extension("");
-            let csv_ext = self.csv_path.extension().and_then(|e| e.to_str()).unwrap_or("csv");
+            let csv_ext = self
+                .csv_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("csv");
             let mut writers = self.csv_writers.lock().await;
             let mut signals = self.csv_event_signals.write().await;
             writers.clear();
@@ -1619,7 +1712,12 @@ impl DaqManager {
                 let csv_path = if event_map.len() == 1 {
                     self.csv_path.clone()
                 } else {
-                    PathBuf::from(format!("{}_event{}.{}", csv_base.display(), daq_list, csv_ext))
+                    PathBuf::from(format!(
+                        "{}_event{}.{}",
+                        csv_base.display(),
+                        daq_list,
+                        csv_ext
+                    ))
                 };
 
                 let mut file = OpenOptions::new()
@@ -1644,8 +1742,12 @@ impl DaqManager {
                 writers.insert(daq_list, std::io::BufWriter::new(csv_file));
                 signals.insert(daq_list, signal_names.clone());
 
-                tracing::info!("CSV: {} for event {} with {} signals",
-                    csv_path.display(), daq_list, signal_names.len());
+                tracing::info!(
+                    "CSV: {} for event {} with {} signals",
+                    csv_path.display(),
+                    daq_list,
+                    signal_names.len()
+                );
             }
         }
 
@@ -1670,11 +1772,14 @@ impl DaqManager {
 
                     for (dg_index, (&daq_list, entries)) in event_map.iter().enumerate() {
                         // Look up the real event name from available_events
-                        let event_channel = config.event_channel_per_list
+                        let event_channel = config
+                            .event_channel_per_list
                             .get(daq_list as usize)
                             .copied()
                             .unwrap_or(daq_list);
-                        let group_name = self.available_events.iter()
+                        let group_name = self
+                            .available_events
+                            .iter()
                             .find(|ev| ev.channel == event_channel)
                             .map(|ev| ev.name.clone())
                             .unwrap_or_else(|| format!("event_{}", daq_list));
@@ -1697,7 +1802,11 @@ impl DaqManager {
                             Ok(cg) => match StreamingDataGroup::new(cg) {
                                 Ok(dg) => {
                                     if let Err(e) = writer.add_data_group(dg) {
-                                        tracing::warn!("Failed to add DG for event {}: {}", daq_list, e);
+                                        tracing::warn!(
+                                            "Failed to add DG for event {}: {}",
+                                            daq_list,
+                                            e
+                                        );
                                         continue;
                                     }
                                     event_groups.push(Mf4EventGroup {
@@ -1705,12 +1814,22 @@ impl DaqManager {
                                         dg_index,
                                         channel_names,
                                     });
-                                    tracing::info!("MF4: DG {} for event {} with {} channels",
-                                        dg_index, daq_list, entries.len());
+                                    tracing::info!(
+                                        "MF4: DG {} for event {} with {} channels",
+                                        dg_index,
+                                        daq_list,
+                                        entries.len()
+                                    );
                                 }
-                                Err(e) => tracing::warn!("Failed to create DG for event {}: {}", daq_list, e),
+                                Err(e) => tracing::warn!(
+                                    "Failed to create DG for event {}: {}",
+                                    daq_list,
+                                    e
+                                ),
                             },
-                            Err(e) => tracing::warn!("Failed to build CG for event {}: {}", daq_list, e),
+                            Err(e) => {
+                                tracing::warn!("Failed to build CG for event {}: {}", daq_list, e)
+                            }
                         }
                     }
 
@@ -1755,8 +1874,16 @@ impl DaqManager {
         }
 
         self.recording.store(true, Ordering::SeqCst);
-        let csv_info = if self.csv_enabled { self.csv_path.display().to_string() } else { "(disabled)".to_string() };
-        let mf4_info = if self.mf4_enabled { self.mdf4_path.display().to_string() } else { "(disabled)".to_string() };
+        let csv_info = if self.csv_enabled {
+            self.csv_path.display().to_string()
+        } else {
+            "(disabled)".to_string()
+        };
+        let mf4_info = if self.mf4_enabled {
+            self.mdf4_path.display().to_string()
+        } else {
+            "(disabled)".to_string()
+        };
         tracing::info!("Recording started — CSV: {}, MF4: {}", csv_info, mf4_info);
         Ok(())
     }
@@ -1816,7 +1943,11 @@ impl DaqManager {
         *self.recording_ts_tracker.write().await = None;
         *self.recording_start_instant.write().await = None;
 
-        tracing::info!("Recording stopped. Data saved to {} and {}", self.csv_path.display(), self.mdf4_path.display());
+        tracing::info!(
+            "Recording stopped. Data saved to {} and {}",
+            self.csv_path.display(),
+            self.mdf4_path.display()
+        );
         Ok(())
     }
 
@@ -1833,8 +1964,12 @@ impl DaqManager {
             0.0
         };
 
-        let csv_size = std::fs::metadata(&self.csv_path).map(|m| m.len()).unwrap_or(0);
-        let mf4_size = std::fs::metadata(&self.mdf4_path).map(|m| m.len()).unwrap_or(0);
+        let csv_size = std::fs::metadata(&self.csv_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let mf4_size = std::fs::metadata(&self.mdf4_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
 
         (duration, csv_size, mf4_size)
     }
@@ -1885,7 +2020,9 @@ impl DaqManager {
         writer: &mut MdfWriter<mdf4_rs::writer::FileWriter>,
         measurements: &[(String, Option<String>)],
     ) -> Result<String, String> {
-        writer.init_mdf_file().map_err(|e| format!("MDF4 init: {}", e))?;
+        writer
+            .init_mdf_file()
+            .map_err(|e| format!("MDF4 init: {}", e))?;
 
         let cg_id = writer
             .add_channel_group(None, |_| {})
@@ -1899,8 +2036,12 @@ impl DaqManager {
                 ch.bit_count = 64;
             })
             .map_err(|e| format!("MDF4 add time channel: {}", e))?;
-        writer.set_time_channel(&time_ch).map_err(|e| format!("MDF4 set_time_channel: {}", e))?;
-        writer.set_channel_unit(&time_ch, "s").map_err(|e| format!("MDF4 set_channel_unit: {}", e))?;
+        writer
+            .set_time_channel(&time_ch)
+            .map_err(|e| format!("MDF4 set_time_channel: {}", e))?;
+        writer
+            .set_channel_unit(&time_ch, "s")
+            .map_err(|e| format!("MDF4 set_channel_unit: {}", e))?;
 
         // Signal channels (all f64 — physical values after COMPU_METHOD conversion)
         let mut prev_ch = time_ch;
@@ -1913,7 +2054,9 @@ impl DaqManager {
                 })
                 .map_err(|e| format!("MDF4 add channel '{}': {}", name, e))?;
             if let Some(u) = unit {
-                writer.set_channel_unit(&ch, u).map_err(|e| format!("MDF4 set unit: {}", e))?;
+                writer
+                    .set_channel_unit(&ch, u)
+                    .map_err(|e| format!("MDF4 set unit: {}", e))?;
             }
             prev_ch = ch;
         }
@@ -1963,13 +2106,16 @@ impl Default for DaqManager {
     }
 }
 
-
 /// Parse a single DTO packet from slave
 ///
 /// DTO packet payload format:
 /// - 1 byte: PID / identification start
 /// - N bytes: ODT data (including identification field and timestamp)
-fn parse_dto_packet(packet: &[u8], timestamp_size: u8, ind_field_type: &IdentificationFieldType) -> Option<DtoData> {
+fn parse_dto_packet(
+    packet: &[u8],
+    timestamp_size: u8,
+    ind_field_type: &IdentificationFieldType,
+) -> Option<DtoData> {
     if packet.is_empty() {
         tracing::error!("DTO packet too short: {} bytes", packet.len());
         return None;
@@ -2218,10 +2364,18 @@ mod tests {
 
         let alloc = mgr.calculate_odt_allocation(255).unwrap();
         // event 1 list: sel_idx 0, 1
-        let entries_ev1: Vec<usize> = alloc.daq_lists[0].odts[0].entries.iter().map(|e| e.measurement_idx).collect();
+        let entries_ev1: Vec<usize> = alloc.daq_lists[0].odts[0]
+            .entries
+            .iter()
+            .map(|e| e.measurement_idx)
+            .collect();
         assert_eq!(entries_ev1, vec![0, 1]);
         // event 2 list: sel_idx 2, 3
-        let entries_ev2: Vec<usize> = alloc.daq_lists[1].odts[0].entries.iter().map(|e| e.measurement_idx).collect();
+        let entries_ev2: Vec<usize> = alloc.daq_lists[1].odts[0]
+            .entries
+            .iter()
+            .map(|e| e.measurement_idx)
+            .collect();
         assert_eq!(entries_ev2, vec![2, 3]);
     }
 
@@ -2305,19 +2459,31 @@ mod tests {
         // Mix of U8 (1 byte), U16 (2 bytes), U32 (4 bytes)
         mgr.all_measurements = vec![
             Measurement {
-                name: "byte_sig".into(), address: 0x1000, address_ext: 0,
-                size: 1, data_type: A2lDataType::U8,
-                unit: None, compu_method: CompuMethod::Identical,
+                name: "byte_sig".into(),
+                address: 0x1000,
+                address_ext: 0,
+                size: 1,
+                data_type: A2lDataType::U8,
+                unit: None,
+                compu_method: CompuMethod::Identical,
             },
             Measurement {
-                name: "word_sig".into(), address: 0x1001, address_ext: 0,
-                size: 2, data_type: A2lDataType::U16,
-                unit: None, compu_method: CompuMethod::Identical,
+                name: "word_sig".into(),
+                address: 0x1001,
+                address_ext: 0,
+                size: 2,
+                data_type: A2lDataType::U16,
+                unit: None,
+                compu_method: CompuMethod::Identical,
             },
             Measurement {
-                name: "dword_sig".into(), address: 0x1003, address_ext: 0,
-                size: 4, data_type: A2lDataType::U32,
-                unit: None, compu_method: CompuMethod::Identical,
+                name: "dword_sig".into(),
+                address: 0x1003,
+                address_ext: 0,
+                size: 4,
+                data_type: A2lDataType::U32,
+                unit: None,
+                compu_method: CompuMethod::Identical,
             },
         ];
         mgr.selected_indices = vec![0, 1, 2];
@@ -2332,14 +2498,22 @@ mod tests {
         let mut mgr = DaqManager::new();
         mgr.all_measurements = vec![
             Measurement {
-                name: "ok_sig".into(), address: 0x1000, address_ext: 0,
-                size: 4, data_type: A2lDataType::U32,
-                unit: None, compu_method: CompuMethod::Identical,
+                name: "ok_sig".into(),
+                address: 0x1000,
+                address_ext: 0,
+                size: 4,
+                data_type: A2lDataType::U32,
+                unit: None,
+                compu_method: CompuMethod::Identical,
             },
             Measurement {
-                name: "big_sig".into(), address: 0x1004, address_ext: 0,
-                size: 8, data_type: A2lDataType::F64,
-                unit: None, compu_method: CompuMethod::Identical,
+                name: "big_sig".into(),
+                address: 0x1004,
+                address_ext: 0,
+                size: 8,
+                data_type: A2lDataType::F64,
+                unit: None,
+                compu_method: CompuMethod::Identical,
             },
         ];
         mgr.selected_indices = vec![0, 1];
@@ -2438,7 +2612,8 @@ mod tests {
     #[test]
     fn test_tracker_u32_wrap() {
         // u32, 1µs/tick, t0 = 0xFFFF_FF00 (near max)
-        let mut tracker = TimestampTracker::new(0xFFFF_FF00, 4, &TimestampUnit::DAQTIMESTAMPUNIT1US);
+        let mut tracker =
+            TimestampTracker::new(0xFFFF_FF00, 4, &TimestampUnit::DAQTIMESTAMPUNIT1US);
         // After wrap: raw = 0x100
         let t = tracker.elapsed_seconds(0x0000_0100);
         // expected: 0x200 = 512 ticks = 512µs = 0.000512s
@@ -2449,7 +2624,8 @@ mod tests {
     fn test_tracker_t0_truncation() {
         // GET_DAQ_CLOCK returns u32=0x0001_EA60 (125536), but DTO is u16
         // Truncated t0 = 0xEA60 = 60000
-        let mut tracker = TimestampTracker::new(0x0001_EA60, 2, &TimestampUnit::DAQTIMESTAMPUNIT1MS);
+        let mut tracker =
+            TimestampTracker::new(0x0001_EA60, 2, &TimestampUnit::DAQTIMESTAMPUNIT1MS);
         let t = tracker.elapsed_seconds(60100);
         assert!((t - 0.100).abs() < 1e-9, "expected 0.100, got {}", t);
     }

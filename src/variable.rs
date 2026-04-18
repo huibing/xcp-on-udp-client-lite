@@ -288,9 +288,7 @@ impl VariableSearchManager {
             // Add calibration parameters
             for param in slave.cal_manager.params() {
                 variables.push(DeviceVariable::from_calibration_param(
-                    slave_id,
-                    &info.name,
-                    param,
+                    slave_id, &info.name, param,
                 ));
             }
 
@@ -389,9 +387,7 @@ impl VariableSearchManager {
     /// Get filtered variables
     pub async fn get_filtered_variables(&self, filter: &VariableFilter) -> Vec<DeviceVariable> {
         let all = self.get_all_variables().await;
-        all.into_iter()
-            .filter(|var| filter.matches(var))
-            .collect()
+        all.into_iter().filter(|var| filter.matches(var)).collect()
     }
 
     /// Get variables by slave ID
@@ -477,10 +473,7 @@ impl VariableSummary {
     pub fn display(&self) -> String {
         format!(
             "Total: {} (CAL: {}, DAQ: {}) from {} slaves",
-            self.total_variables,
-            self.calibration_count,
-            self.measurement_count,
-            self.slave_count
+            self.total_variables, self.calibration_count, self.measurement_count, self.slave_count
         )
     }
 }
@@ -665,9 +658,24 @@ mod tests {
         let slave2 = SlaveId::new();
 
         let vars = vec![
-            DeviceVariable::new(slave1, "ECU1".to_string(), "var1".to_string(), VariableType::Calibration),
-            DeviceVariable::new(slave1, "ECU1".to_string(), "var2".to_string(), VariableType::Measurement),
-            DeviceVariable::new(slave2, "ECU2".to_string(), "var3".to_string(), VariableType::Calibration),
+            DeviceVariable::new(
+                slave1,
+                "ECU1".to_string(),
+                "var1".to_string(),
+                VariableType::Calibration,
+            ),
+            DeviceVariable::new(
+                slave1,
+                "ECU1".to_string(),
+                "var2".to_string(),
+                VariableType::Measurement,
+            ),
+            DeviceVariable::new(
+                slave2,
+                "ECU2".to_string(),
+                "var3".to_string(),
+                VariableType::Calibration,
+            ),
         ];
 
         let grouped = group_variables_by_slave(vars);
@@ -689,8 +697,18 @@ mod tests {
         let group = GroupedVariables {
             slave_id: SlaveId::new(),
             slave_name: "Test".to_string(),
-            calibrations: vec![DeviceVariable::new(SlaveId::new(), "Test".to_string(), "cal1".to_string(), VariableType::Calibration)],
-            measurements: vec![DeviceVariable::new(SlaveId::new(), "Test".to_string(), "meas1".to_string(), VariableType::Measurement)],
+            calibrations: vec![DeviceVariable::new(
+                SlaveId::new(),
+                "Test".to_string(),
+                "cal1".to_string(),
+                VariableType::Calibration,
+            )],
+            measurements: vec![DeviceVariable::new(
+                SlaveId::new(),
+                "Test".to_string(),
+                "meas1".to_string(),
+                VariableType::Measurement,
+            )],
         };
         assert_eq!(group.total(), 2);
         assert!(!group.is_empty());

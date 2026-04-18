@@ -6,8 +6,8 @@
 //! Usage: `cargo run -- daq-record --config daq_record.config.toml`
 
 use serde::Deserialize;
-use xcp_client::{A2lReader, DaqManager, XcpClient};
 use xcp_client::transport::TransportConfig;
+use xcp_client::{A2lReader, DaqManager, XcpClient};
 
 /// TOML config file structure
 #[derive(Debug, Deserialize)]
@@ -49,9 +49,7 @@ pub struct EventConfig {
 }
 
 /// Run the daq-record subcommand
-pub async fn run_daq_record(
-    config_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_daq_record(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Load config file
     let config_text = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read config file '{}': {}", config_path, e))?;
@@ -68,17 +66,29 @@ pub async fn run_daq_record(
     // Check that output files do not already exist
     if let Some(ref p) = csv_path {
         if std::path::Path::new(p).exists() {
-            return Err(format!("Output file '{}' already exists. Remove it or choose a different path.", p).into());
+            return Err(format!(
+                "Output file '{}' already exists. Remove it or choose a different path.",
+                p
+            )
+            .into());
         }
     }
     if let Some(ref p) = mf4_path {
         if std::path::Path::new(p).exists() {
-            return Err(format!("Output file '{}' already exists. Remove it or choose a different path.", p).into());
+            return Err(format!(
+                "Output file '{}' already exists. Remove it or choose a different path.",
+                p
+            )
+            .into());
         }
     }
 
-    if let Some(ref p) = csv_path { println!("  CSV output: {}", p); }
-    if let Some(ref p) = mf4_path { println!("  MF4 output: {}", p); }
+    if let Some(ref p) = csv_path {
+        println!("  CSV output: {}", p);
+    }
+    if let Some(ref p) = mf4_path {
+        println!("  MF4 output: {}", p);
+    }
 
     let a2l_path = &config.a2l;
 
@@ -90,8 +100,7 @@ pub async fn run_daq_record(
 
     // Load A2L file
     println!("Loading A2L file: {}", a2l_path);
-    let reader = A2lReader::load(a2l_path)
-        .map_err(|e| format!("Failed to load A2L: {}", e))?;
+    let reader = A2lReader::load(a2l_path).map_err(|e| format!("Failed to load A2L: {}", e))?;
 
     // Resolve slave address: config > A2L
     let slave_addr = config
@@ -111,7 +120,10 @@ pub async fn run_daq_record(
     if !events.is_empty() {
         println!("  {} DAQ events found in A2L:", events.len());
         for ev in &events {
-            println!("    channel {}: {} ({}ms cycle)", ev.channel, ev.name, ev.time_cycle);
+            println!(
+                "    channel {}: {} ({}ms cycle)",
+                ev.channel, ev.name, ev.time_cycle
+            );
         }
         daq_manager.set_available_events(events);
     }
@@ -120,9 +132,9 @@ pub async fn run_daq_record(
     if !event_channels.is_empty() && !event_channels.contains(&default_event_channel) {
         return Err(format!(
             "Default event_channel {} from config not found in A2L. Available event channels: {:?}",
-            default_event_channel,
-            event_channels
-        ).into());
+            default_event_channel, event_channels
+        )
+        .into());
     }
 
     let all_count = daq_manager.available_count();
@@ -143,7 +155,8 @@ pub async fn run_daq_record(
                     return Err(format!(
                         "Event channel {} not found in A2L. Available event channels: {:?}",
                         ec.channel, event_channels
-                    ).into());
+                    )
+                    .into());
                 }
                 for name in &ec.measurements {
                     if let Some(idx) = all_measurements.iter().position(|m| &m.name == name) {
@@ -188,7 +201,9 @@ pub async fn run_daq_record(
     // Connect to slave
     println!("\nConnecting to slave at {}...", slave_addr);
     let mut client = XcpClient::new();
-    let transport_config = TransportConfig::Udp { addr: slave_addr.clone() };
+    let transport_config = TransportConfig::Udp {
+        addr: slave_addr.clone(),
+    };
     let slave_id = client
         .connect_slave("daq-record-target", transport_config)
         .await
@@ -272,8 +287,12 @@ pub async fn run_daq_record(
     let (duration, csv_size, mf4_size) = daq_manager.recording_stats().await;
     println!("\n--- Recording Summary ---");
     println!("  Duration:  {:.1}s", duration);
-    if let Some(ref p) = csv_path { println!("  CSV file:  {} ({} bytes)", p, csv_size); }
-    if let Some(ref p) = mf4_path { println!("  MF4 file:  {} ({} bytes)", p, mf4_size); }
+    if let Some(ref p) = csv_path {
+        println!("  CSV file:  {} ({} bytes)", p, csv_size);
+    }
+    if let Some(ref p) = mf4_path {
+        println!("  MF4 file:  {} ({} bytes)", p, mf4_size);
+    }
     println!("\nRecording completed successfully.");
 
     Ok(())
@@ -308,7 +327,10 @@ measurements = ["temp"]
 "#;
         let config: DaqRecordConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.a2l, "abc.a2l");
-        assert_eq!(config.connection.unwrap().addr.unwrap(), "192.168.1.100:5555");
+        assert_eq!(
+            config.connection.unwrap().addr.unwrap(),
+            "192.168.1.100:5555"
+        );
         let output = config.output.unwrap();
         assert_eq!(output.mf4.unwrap(), "recording.mf4");
         assert_eq!(output.csv.unwrap(), "recording.csv");

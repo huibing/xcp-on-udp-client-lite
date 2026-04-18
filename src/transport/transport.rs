@@ -226,7 +226,9 @@ mod tests {
             addr: addr.to_string(),
         };
 
-        let transport = TransportFactory::create(&config).await.expect("tcp transport should connect");
+        let transport = TransportFactory::create(&config)
+            .await
+            .expect("tcp transport should connect");
         assert_eq!(transport.transport_type(), TransportType::Tcp);
         assert_eq!(transport.target_addr(), addr.to_string());
         transport.close().await.unwrap();

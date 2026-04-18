@@ -30,7 +30,7 @@ pub enum A2lDataType {
     F64Array(usize),
     BoolArray(usize),
     // Matrix types (row-major order)
-    U8Matrix(usize, usize),  // rows, cols
+    U8Matrix(usize, usize), // rows, cols
     U16Matrix(usize, usize),
     U32Matrix(usize, usize),
     U64Matrix(usize, usize),
@@ -55,13 +55,23 @@ impl A2lDataType {
             // Array types
             A2lDataType::U8Array(n) | A2lDataType::I8Array(n) | A2lDataType::BoolArray(n) => *n,
             A2lDataType::U16Array(n) | A2lDataType::I16Array(n) => *n * 2,
-            A2lDataType::U32Array(n) | A2lDataType::I32Array(n) | A2lDataType::F32Array(n) => *n * 4,
-            A2lDataType::U64Array(n) | A2lDataType::I64Array(n) | A2lDataType::F64Array(n) => *n * 8,
+            A2lDataType::U32Array(n) | A2lDataType::I32Array(n) | A2lDataType::F32Array(n) => {
+                *n * 4
+            }
+            A2lDataType::U64Array(n) | A2lDataType::I64Array(n) | A2lDataType::F64Array(n) => {
+                *n * 8
+            }
             // Matrix types
-            A2lDataType::U8Matrix(r, c) | A2lDataType::I8Matrix(r, c) | A2lDataType::BoolMatrix(r, c) => r * c,
+            A2lDataType::U8Matrix(r, c)
+            | A2lDataType::I8Matrix(r, c)
+            | A2lDataType::BoolMatrix(r, c) => r * c,
             A2lDataType::U16Matrix(r, c) | A2lDataType::I16Matrix(r, c) => r * c * 2,
-            A2lDataType::U32Matrix(r, c) | A2lDataType::I32Matrix(r, c) | A2lDataType::F32Matrix(r, c) => r * c * 4,
-            A2lDataType::U64Matrix(r, c) | A2lDataType::I64Matrix(r, c) | A2lDataType::F64Matrix(r, c) => r * c * 8,
+            A2lDataType::U32Matrix(r, c)
+            | A2lDataType::I32Matrix(r, c)
+            | A2lDataType::F32Matrix(r, c) => r * c * 4,
+            A2lDataType::U64Matrix(r, c)
+            | A2lDataType::I64Matrix(r, c)
+            | A2lDataType::F64Matrix(r, c) => r * c * 8,
         }
     }
 
@@ -158,10 +168,16 @@ pub struct DaqEvent {
 impl DaqEvent {
     pub fn cycle_time_ms(&self) -> f64 {
         let unit_ns: f64 = match self.time_unit {
-            0 => 1.0, 1 => 10.0, 2 => 100.0,
-            3 => 1_000.0, 4 => 10_000.0, 5 => 100_000.0,
-            6 => 1_000_000.0, 7 => 10_000_000.0,
-            8 => 100_000_000.0, 9 => 1_000_000_000.0,
+            0 => 1.0,
+            1 => 10.0,
+            2 => 100.0,
+            3 => 1_000.0,
+            4 => 10_000.0,
+            5 => 100_000.0,
+            6 => 1_000_000.0,
+            7 => 10_000_000.0,
+            8 => 100_000_000.0,
+            9 => 1_000_000_000.0,
             _ => 1_000_000.0,
         };
         self.time_cycle as f64 * unit_ns / 1_000_000.0
@@ -169,7 +185,12 @@ impl DaqEvent {
 
     pub fn display_label(&self) -> String {
         if self.time_cycle > 0 {
-            format!("Ch{}: {} ({:.1} ms)", self.channel, self.name, self.cycle_time_ms())
+            format!(
+                "Ch{}: {} ({:.1} ms)",
+                self.channel,
+                self.name,
+                self.cycle_time_ms()
+            )
         } else {
             format!("Ch{}: {}", self.channel, self.name)
         }

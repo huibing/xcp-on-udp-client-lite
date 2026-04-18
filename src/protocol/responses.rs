@@ -178,9 +178,7 @@ pub fn parse_daq_clock(data: &[u8]) -> Result<u64, String> {
     }
 
     // 6 bytes timestamp (little-endian)
-    let ts = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3], data[4], data[5], 0, 0
-    ]);
+    let ts = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], 0, 0]);
     Ok(ts)
 }
 
@@ -233,8 +231,8 @@ pub fn parse_cal_page_response(data: &[u8]) -> Result<u8, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::{ErrorCode, Response};
+    use super::*;
 
     #[test]
     fn test_parse_response_positive() {
@@ -268,7 +266,11 @@ mod tests {
         let data = vec![0xC0, 0x01, 0x00, 0x02, 0xAB, 0xCD];
         let response = parse_response(&data).unwrap();
         match response {
-            Response::Daq { daq_list, odt, data } => {
+            Response::Daq {
+                daq_list,
+                odt,
+                data,
+            } => {
                 assert_eq!(daq_list, 1);
                 assert_eq!(odt, 2);
                 assert_eq!(data, vec![0xAB, 0xCD]);

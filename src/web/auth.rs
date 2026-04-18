@@ -52,7 +52,10 @@ pub fn get_active_session_info() -> Option<(String, u64)> {
     let session = SESSION.read().unwrap();
     if session.token.is_some() {
         return Some((
-            session.client_ip.clone().unwrap_or_else(|| "unknown".to_string()),
+            session
+                .client_ip
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
             session.created_at,
         ));
     }
@@ -74,8 +77,8 @@ pub fn is_valid_session(token: &str) -> bool {
 pub fn try_create_session(client_ip: &str) -> Result<String, String> {
     // Check if there's already an active session
     if has_active_session() {
-        let (existing_ip, _created_at) = get_active_session_info()
-            .unwrap_or_else(|| ("unknown".to_string(), 0));
+        let (existing_ip, _created_at) =
+            get_active_session_info().unwrap_or_else(|| ("unknown".to_string(), 0));
         return Err(format!(
             "Another user is already connected from: {}. Please wait until they logout.",
             existing_ip
@@ -199,7 +202,10 @@ mod tests {
         let _first_token = try_create_session("192.168.2.10").unwrap();
 
         // Verify first session is valid
-        assert!(has_active_session(), "Should have active session after creation");
+        assert!(
+            has_active_session(),
+            "Should have active session after creation"
+        );
 
         // When: Second user from different IP tries to login
         let result = try_create_session("192.168.2.20");

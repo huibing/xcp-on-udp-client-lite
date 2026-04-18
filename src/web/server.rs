@@ -3,11 +3,11 @@
 //! Axum-based web server for XCP client web interface.
 //! Single-user access with simple session authentication.
 
+use axum::extract::DefaultBodyLimit;
 use axum::{
     routing::{get, post},
     Router,
 };
-use axum::extract::DefaultBodyLimit;
 use std::net::SocketAddr;
 use tower_http::trace::TraceLayer;
 
@@ -69,7 +69,10 @@ impl WebServer {
             .route("/api/connect", post(routes::connect_api))
             .route("/api/disconnect", get(routes::disconnect_api))
             // Device management
-            .route("/api/devices/connect-all", post(routes::connect_all_devices))
+            .route(
+                "/api/devices/connect-all",
+                post(routes::connect_all_devices),
+            )
             .route("/api/devices/connect", post(routes::connect_device))
             .route("/api/devices/disconnect", post(routes::disconnect_device))
             .route("/api/devices/remove", post(routes::remove_device))
@@ -78,13 +81,28 @@ impl WebServer {
             .route("/api/cal/available", get(routes::cal_available))
             .route("/api/cal/read/:device_id/:idx", get(routes::cal_read))
             .route("/cal/write/:device_id/:idx", get(routes::cal_write_page))
-            .route("/api/cal/write/:device_id/:idx", post(routes::cal_write_api))
+            .route(
+                "/api/cal/write/:device_id/:idx",
+                post(routes::cal_write_api),
+            )
             .route("/api/cal/pagemode", get(routes::get_page_mode))
-            .route("/api/cal/pagemode/:device_id", post(routes::switch_page_mode))
+            .route(
+                "/api/cal/pagemode/:device_id",
+                post(routes::switch_page_mode),
+            )
             .route("/api/cal/value/:device_id/:idx", get(routes::cal_value_api))
-            .route("/api/cal/write-element/:device_id/:idx", post(routes::cal_write_element_api))
-            .route("/api/cal/detail/:device_id/:idx", get(routes::cal_detail_api))
-            .route("/api/daq/detail/:device_id/:idx", get(routes::daq_detail_api))
+            .route(
+                "/api/cal/write-element/:device_id/:idx",
+                post(routes::cal_write_element_api),
+            )
+            .route(
+                "/api/cal/detail/:device_id/:idx",
+                get(routes::cal_detail_api),
+            )
+            .route(
+                "/api/daq/detail/:device_id/:idx",
+                get(routes::daq_detail_api),
+            )
             // DAQ
             .route("/daq", get(routes::daq_page))
             .route("/api/daq/available", get(routes::daq_available))
@@ -99,7 +117,10 @@ impl WebServer {
             .route("/api/daq/data", post(routes::daq_data))
             .route("/api/daq/events", get(routes::daq_events))
             .route("/api/daq/event", post(routes::daq_set_event))
-            .route("/api/daq/measurement-events", post(routes::daq_set_measurement_events))
+            .route(
+                "/api/daq/measurement-events",
+                post(routes::daq_set_measurement_events),
+            )
             .route("/api/daq/download/csv", get(routes::daq_download_csv))
             .route("/api/daq/download/mf4", get(routes::daq_download_mf4))
             // A2L
@@ -108,7 +129,10 @@ impl WebServer {
             // Checksum verification
             .route("/checksum", get(routes::checksum_page))
             .route("/api/hex/load/:device_id", post(routes::hex_load))
-            .route("/api/checksum/verify/:device_id", post(routes::checksum_verify))
+            .route(
+                "/api/checksum/verify/:device_id",
+                post(routes::checksum_verify),
+            )
             // State and middleware
             .layer(axum::middleware::from_fn(auth_middleware))
             .layer(TraceLayer::new_for_http())

@@ -39,10 +39,7 @@ pub fn set_mta(mta: Mta) -> Vec<u8> {
 /// Build UPLOAD command
 /// Request to read data from slave (uses current MTA)
 pub fn upload(length: u8) -> Vec<u8> {
-    vec![
-        CommandCode::Upload as u8,
-        length,
-    ]
+    vec![CommandCode::Upload as u8, length]
 }
 
 /// Build SHORT_UPLOAD command
@@ -111,10 +108,7 @@ pub fn short_download(mta: Mta, data: &[u8]) -> Vec<u8> {
 /// Build GET_ID command
 /// Get identification data from slave
 pub fn get_id(id_type: u8) -> Vec<u8> {
-    vec![
-        CommandCode::GetId as u8,
-        id_type,
-    ]
+    vec![CommandCode::GetId as u8, id_type]
 }
 
 /// Build GET_COMM_MODE_INFO command
@@ -222,10 +216,7 @@ pub fn start_stop_daq_list(mode: u8, daq_list: u16) -> Vec<u8> {
 /// Build START_STOP_SYNCH command
 /// Start or stop all DAQ lists synchronously
 pub fn start_stop_synch(mode: u8) -> Vec<u8> {
-    vec![
-        CommandCode::StartStopSynch as u8,
-        mode,
-    ]
+    vec![CommandCode::StartStopSynch as u8, mode]
 }
 
 /// Build GET_DAQ_CLOCK command
@@ -253,21 +244,12 @@ pub fn get_daq_resolution_info() -> Vec<u8> {
 /// # Returns
 /// Command packet without transport layer header
 pub fn get_cal_page(mode: u8, segment: u8) -> Vec<u8> {
-    vec![
-        CommandCode::GetCalPage as u8,
-        mode,
-        segment,
-    ]
+    vec![CommandCode::GetCalPage as u8, mode, segment]
 }
 
 /// Build SET_CAL_PAGE command
 pub fn set_cal_page(mode: u8, segment: u8, page: u8) -> Vec<u8> {
-    vec![
-        CommandCode::SetCalPage as u8,
-        mode,
-        segment,
-        page,
-    ]
+    vec![CommandCode::SetCalPage as u8, mode, segment, page]
 }
 
 /// Build BUILD_CHECKSUM command
@@ -319,7 +301,7 @@ mod tests {
         assert_eq!(cmd[1], 0x00);
         assert_eq!(cmd[2], 0x00);
         assert_eq!(cmd[3], 0x02); // extension
-        // Address in little-endian: 0x12345678 -> [0x78, 0x56, 0x34, 0x12]
+                                  // Address in little-endian: 0x12345678 -> [0x78, 0x56, 0x34, 0x12]
         assert_eq!(cmd[4], 0x78);
         assert_eq!(cmd[5], 0x56);
         assert_eq!(cmd[6], 0x34);
@@ -537,7 +519,7 @@ mod tests {
         assert_eq!(cmd[1], 0x00); // reserved
         assert_eq!(cmd[2], 0x00); // reserved
         assert_eq!(cmd[3], 0x00); // reserved
-        // Block size in little-endian at bytes 4-7
+                                  // Block size in little-endian at bytes 4-7
         assert_eq!(cmd[4], 0x00);
         assert_eq!(cmd[5], 0x10);
         assert_eq!(cmd[6], 0x00);
@@ -560,7 +542,7 @@ mod tests {
         assert_eq!(cmd.len(), 3);
         assert_eq!(cmd[0], CommandCode::GetCalPage as u8);
         assert_eq!(cmd[1], 0x02); // XCP access mode
-        assert_eq!(cmd[2], 0);     // Segment 0
+        assert_eq!(cmd[2], 0); // Segment 0
     }
 
     #[test]
@@ -570,7 +552,7 @@ mod tests {
         assert_eq!(cmd.len(), 4);
         assert_eq!(cmd[0], CommandCode::SetCalPage as u8);
         assert_eq!(cmd[1], 0x02); // XCP access mode
-        assert_eq!(cmd[2], 0);     // Segment 0
-        assert_eq!(cmd[3], 1);     // Page 1
+        assert_eq!(cmd[2], 0); // Segment 0
+        assert_eq!(cmd[3], 1); // Page 1
     }
 }

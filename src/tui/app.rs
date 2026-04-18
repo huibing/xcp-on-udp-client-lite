@@ -1,22 +1,22 @@
 //! Application state and logic
 
-use xcp_client::calibration::CalibrationValue;
-use xcp_client::protocol::ConnectInfo;
-use xcp_client::{CalibrationManager, DaqManager, XcpClient};
 use chrono::Local;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    Frame,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tui_input::backend::crossterm::EventHandler as InputEventHandler;
 use tui_input::Input;
+use xcp_client::calibration::CalibrationValue;
+use xcp_client::protocol::ConnectInfo;
+use xcp_client::{CalibrationManager, DaqManager, XcpClient};
 
 // Matrix theme colors
 const MATRIX_GREEN: Color = Color::Green;
@@ -237,7 +237,12 @@ pub enum InputAction {
 
 impl App {
     /// Create new application
-    pub fn new(client: XcpClient, cal_manager: CalibrationManager, daq_manager: DaqManager, a2l_path: String) -> Self {
+    pub fn new(
+        client: XcpClient,
+        cal_manager: CalibrationManager,
+        daq_manager: DaqManager,
+        a2l_path: String,
+    ) -> Self {
         Self {
             client: Arc::new(Mutex::new(client)),
             cal_manager,
@@ -415,7 +420,10 @@ impl App {
         Ok(true)
     }
 
-    async fn handle_connect_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn handle_connect_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         let addr_count = self.get_available_addresses().len();
 
         match key.code {
@@ -505,7 +513,8 @@ impl App {
 
         match self.search_context {
             SearchContext::Calibration => {
-                self.filtered_cal_indices = self.cal_manager
+                self.filtered_cal_indices = self
+                    .cal_manager
                     .params()
                     .iter()
                     .enumerate()
@@ -564,77 +573,143 @@ impl App {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{}, {}, {}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{}, {}, {}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
             CalibrationValue::U16Array(arr) => {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{}, {}, {}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{}, {}, {}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
             CalibrationValue::U32Array(arr) => {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{}, {}, {}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{}, {}, {}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
             CalibrationValue::U64Array(arr) => {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{}, {}, {}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{}, {}, {}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
             CalibrationValue::I8Array(arr) => {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{}, {}, {}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{}, {}, {}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
             CalibrationValue::I16Array(arr) => {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{}, {}, {}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{}, {}, {}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
             CalibrationValue::I32Array(arr) => {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{}, {}, {}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{}, {}, {}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
             CalibrationValue::I64Array(arr) => {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{}, {}, {}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{}, {}, {}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
             CalibrationValue::F32Array(arr) => {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{:.2}, {:.2}, {:.2}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{:.2}, {:.2}, {:.2}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
             CalibrationValue::F64Array(arr) => {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{:.2}, {:.2}, {:.2}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{:.2}, {:.2}, {:.2}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
             CalibrationValue::BoolArray(arr) => {
                 if arr.len() <= 3 {
                     format!("{:?}", arr)
                 } else {
-                    format!("[{}, {}, {}, ...] len={}", arr[0], arr[1], arr[2], arr.len())
+                    format!(
+                        "[{}, {}, {}, ...] len={}",
+                        arr[0],
+                        arr[1],
+                        arr[2],
+                        arr.len()
+                    )
                 }
             }
 
@@ -707,7 +782,10 @@ impl App {
     }
 
     /// Get filtered DAQ measurement indices
-    async fn handle_param_list_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn handle_param_list_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         // Handle search input mode - all character input goes to search box
         if self.is_searching {
             match key.code {
@@ -776,7 +854,10 @@ impl App {
         Ok(true)
     }
 
-    async fn handle_param_detail_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn handle_param_detail_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         match key.code {
             KeyCode::Char('r') => {
                 self.read_param().await?;
@@ -797,7 +878,10 @@ impl App {
         Ok(true)
     }
 
-    async fn handle_combined_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn handle_combined_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         // Use selected variable lists for display
         let cal_indices = self.selected_cal_params.clone();
         let param_count = cal_indices.len();
@@ -815,50 +899,52 @@ impl App {
                 };
             }
             // Navigation depends on which panel is focused
-            KeyCode::Up | KeyCode::Char('k') => {
-                match self.combined_focus {
-                    CombinedFocus::Calibration => {
-                        if let Some(pos) = cal_indices.iter().position(|&i| i == self.param_selected) {
-                            if pos > 0 {
-                                self.param_selected = cal_indices[pos - 1];
-                            }
-                        } else if !cal_indices.is_empty() {
-                            self.param_selected = cal_indices[0];
+            KeyCode::Up | KeyCode::Char('k') => match self.combined_focus {
+                CombinedFocus::Calibration => {
+                    if let Some(pos) = cal_indices.iter().position(|&i| i == self.param_selected) {
+                        if pos > 0 {
+                            self.param_selected = cal_indices[pos - 1];
                         }
-                    }
-                    CombinedFocus::DaqSelection => {
-                        if let Some(pos) = daq_indices.iter().position(|&i| i == self.daq_meas_selected) {
-                            if pos > 0 {
-                                self.daq_meas_selected = daq_indices[pos - 1];
-                            }
-                        } else if !daq_indices.is_empty() {
-                            self.daq_meas_selected = daq_indices[0];
-                        }
+                    } else if !cal_indices.is_empty() {
+                        self.param_selected = cal_indices[0];
                     }
                 }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                match self.combined_focus {
-                    CombinedFocus::Calibration => {
-                        if let Some(pos) = cal_indices.iter().position(|&i| i == self.param_selected) {
-                            if pos < param_count.saturating_sub(1) {
-                                self.param_selected = cal_indices[pos + 1];
-                            }
-                        } else if !cal_indices.is_empty() {
-                            self.param_selected = cal_indices[0];
+                CombinedFocus::DaqSelection => {
+                    if let Some(pos) = daq_indices
+                        .iter()
+                        .position(|&i| i == self.daq_meas_selected)
+                    {
+                        if pos > 0 {
+                            self.daq_meas_selected = daq_indices[pos - 1];
                         }
-                    }
-                    CombinedFocus::DaqSelection => {
-                        if let Some(pos) = daq_indices.iter().position(|&i| i == self.daq_meas_selected) {
-                            if pos < daq_count.saturating_sub(1) {
-                                self.daq_meas_selected = daq_indices[pos + 1];
-                            }
-                        } else if !daq_indices.is_empty() {
-                            self.daq_meas_selected = daq_indices[0];
-                        }
+                    } else if !daq_indices.is_empty() {
+                        self.daq_meas_selected = daq_indices[0];
                     }
                 }
-            }
+            },
+            KeyCode::Down | KeyCode::Char('j') => match self.combined_focus {
+                CombinedFocus::Calibration => {
+                    if let Some(pos) = cal_indices.iter().position(|&i| i == self.param_selected) {
+                        if pos < param_count.saturating_sub(1) {
+                            self.param_selected = cal_indices[pos + 1];
+                        }
+                    } else if !cal_indices.is_empty() {
+                        self.param_selected = cal_indices[0];
+                    }
+                }
+                CombinedFocus::DaqSelection => {
+                    if let Some(pos) = daq_indices
+                        .iter()
+                        .position(|&i| i == self.daq_meas_selected)
+                    {
+                        if pos < daq_count.saturating_sub(1) {
+                            self.daq_meas_selected = daq_indices[pos + 1];
+                        }
+                    } else if !daq_indices.is_empty() {
+                        self.daq_meas_selected = daq_indices[0];
+                    }
+                }
+            },
             // Space to toggle measurement selection when in DAQ panel
             KeyCode::Char(' ') => {
                 if self.combined_focus == CombinedFocus::DaqSelection && daq_count > 0 {
@@ -912,20 +998,26 @@ impl App {
             KeyCode::Char('d') => {
                 match self.combined_focus {
                     CombinedFocus::Calibration => {
-                        if let Some(pos) = cal_indices.iter().position(|&i| i == self.param_selected) {
+                        if let Some(pos) =
+                            cal_indices.iter().position(|&i| i == self.param_selected)
+                        {
                             self.selected_cal_params.remove(pos);
                             // Adjust selection
                             if self.selected_cal_params.is_empty() {
                                 self.param_selected = 0;
                             } else if pos >= self.selected_cal_params.len() {
-                                self.param_selected = self.selected_cal_params[self.selected_cal_params.len() - 1];
+                                self.param_selected =
+                                    self.selected_cal_params[self.selected_cal_params.len() - 1];
                             } else {
                                 self.param_selected = self.selected_cal_params[pos];
                             }
                         }
                     }
                     CombinedFocus::DaqSelection => {
-                        if let Some(pos) = daq_indices.iter().position(|&i| i == self.daq_meas_selected) {
+                        if let Some(pos) = daq_indices
+                            .iter()
+                            .position(|&i| i == self.daq_meas_selected)
+                        {
                             // Also deselect from DAQ manager
                             {
                                 let mut daq_manager = self.daq_manager.lock().await;
@@ -936,7 +1028,8 @@ impl App {
                             if self.selected_daq_meas.is_empty() {
                                 self.daq_meas_selected = 0;
                             } else if pos >= self.selected_daq_meas.len() {
-                                self.daq_meas_selected = self.selected_daq_meas[self.selected_daq_meas.len() - 1];
+                                self.daq_meas_selected =
+                                    self.selected_daq_meas[self.selected_daq_meas.len() - 1];
                             } else {
                                 self.daq_meas_selected = self.selected_daq_meas[pos];
                             }
@@ -960,13 +1053,15 @@ impl App {
                         let daq_manager = self.daq_manager.lock().await;
                         daq_manager.get_event_channel()
                     };
-                    self.event_select_cursor = events.iter()
+                    self.event_select_cursor = events
+                        .iter()
                         .position(|ev| ev.channel == current_channel)
                         .unwrap_or(0);
                     self.daq_events = events;
                     self.mode = AppMode::EventSelect;
                 } else {
-                    self.status = Some("No events available (load A2L with EVENT blocks)".to_string());
+                    self.status =
+                        Some("No events available (load A2L with EVENT blocks)".to_string());
                 }
             }
             _ => {}
@@ -974,7 +1069,10 @@ impl App {
         Ok(true)
     }
 
-    async fn handle_event_select_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn handle_event_select_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         match key.code {
             KeyCode::Esc => {
                 self.mode = AppMode::CombinedView;
@@ -1008,7 +1106,10 @@ impl App {
         Ok(true)
     }
 
-    async fn handle_input_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn handle_input_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         match key.code {
             KeyCode::Esc => {
                 self.mode = self.prev_mode.unwrap_or(AppMode::Menu);
@@ -1045,7 +1146,10 @@ impl App {
         Ok(true)
     }
 
-    async fn handle_select_a2l_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn handle_select_a2l_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         match key.code {
             KeyCode::Esc => {
                 self.mode = AppMode::Menu;
@@ -1070,7 +1174,10 @@ impl App {
         Ok(true)
     }
 
-    async fn handle_search_dialog_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn handle_search_dialog_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         match key.code {
             KeyCode::Esc => {
                 // Cancel and return to CombinedView without saving selections
@@ -1125,7 +1232,9 @@ impl App {
                                 self.filtered_cal_indices.clone()
                             };
                             if let Some(&idx) = indices.get(self.param_selected) {
-                                if let Some(pos) = self.search_dialog_selected.iter().position(|&i| i == idx) {
+                                if let Some(pos) =
+                                    self.search_dialog_selected.iter().position(|&i| i == idx)
+                                {
                                     self.search_dialog_selected.remove(pos);
                                 } else {
                                     self.search_dialog_selected.push(idx);
@@ -1140,7 +1249,9 @@ impl App {
                                 self.filtered_daq_indices.clone()
                             };
                             if let Some(&idx) = indices.get(self.daq_meas_selected) {
-                                if let Some(pos) = self.search_dialog_selected.iter().position(|&i| i == idx) {
+                                if let Some(pos) =
+                                    self.search_dialog_selected.iter().position(|&i| i == idx)
+                                {
                                     self.search_dialog_selected.remove(pos);
                                 } else {
                                     self.search_dialog_selected.push(idx);
@@ -1254,21 +1365,24 @@ impl App {
                 self.a2l_path = path.to_string();
 
                 // Store slave addresses from A2L (excluding default 127.0.0.1:5555 if present)
-                self.a2l_slave_addrs = slave_addrs.into_iter()
+                self.a2l_slave_addrs = slave_addrs
+                    .into_iter()
                     .filter(|addr| addr != "127.0.0.1:5555")
                     .collect();
                 self.slave_addr_selected = 0;
 
-                let meas_count = {
-                    self.daq_manager.lock().await.selected_count()
-                };
+                let meas_count = { self.daq_manager.lock().await.selected_count() };
                 let addr_info = if self.a2l_slave_addrs.is_empty() {
                     String::new()
                 } else {
                     format!(", {} addr", self.a2l_slave_addrs.len())
                 };
-                self.status = Some(format!("Loaded A2L: {} chars, {} meas{}",
-                    self.cal_manager.params().len(), meas_count, addr_info));
+                self.status = Some(format!(
+                    "Loaded A2L: {} chars, {} meas{}",
+                    self.cal_manager.params().len(),
+                    meas_count,
+                    addr_info
+                ));
             }
             Err(e) => {
                 self.error = Some(format!("Failed to load A2L: {}", e));
@@ -1289,16 +1403,15 @@ impl App {
         match HexImage::from_file(path) {
             Ok(image) => {
                 let total_bytes = image.total_bytes();
-                let range_info = image.address_range().map(|(lo, hi)| {
-                    format!(" [0x{:08X}..0x{:08X}]", lo, hi)
-                }).unwrap_or_default();
+                let range_info = image
+                    .address_range()
+                    .map(|(lo, hi)| format!(" [0x{:08X}..0x{:08X}]", lo, hi))
+                    .unwrap_or_default();
 
                 self.hex_image = Some(image);
                 self.hex_path = path.to_string();
                 self.checksum_report = None; // Clear old report
-                self.status = Some(format!(
-                    "HEX loaded: {} bytes{}", total_bytes, range_info
-                ));
+                self.status = Some(format!("HEX loaded: {} bytes{}", total_bytes, range_info));
             }
             Err(e) => {
                 self.error = Some(format!("Failed to load HEX: {}", e));
@@ -1309,8 +1422,8 @@ impl App {
     }
 
     async fn run_checksum_verification(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        use xcp_client::A2lReader;
         use xcp_client::checksum::verify_segments;
+        use xcp_client::A2lReader;
 
         if !self.connected {
             self.error = Some("Not connected to slave".to_string());
@@ -1334,7 +1447,9 @@ impl App {
         let a2l_path = self.a2l_path.clone();
         let segments = match tokio::task::spawn_blocking(move || {
             A2lReader::load(&a2l_path).map(|r| r.get_memory_segments())
-        }).await? {
+        })
+        .await?
+        {
             Ok(segs) => segs,
             Err(e) => {
                 self.error = Some(format!("Failed to load A2L: {}", e));
@@ -1379,7 +1494,10 @@ impl App {
         Ok(())
     }
 
-    async fn handle_checksum_result_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn handle_checksum_result_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.mode = AppMode::Menu;
@@ -1392,9 +1510,11 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(ref report) = self.checksum_report {
                     // Total lines = segments + chunk sub-rows
-                    let total_lines: usize = report.results.iter().map(|r| {
-                        1 + r.chunks.as_ref().map_or(0, |c| c.len())
-                    }).sum();
+                    let total_lines: usize = report
+                        .results
+                        .iter()
+                        .map(|r| 1 + r.chunks.as_ref().map_or(0, |c| c.len()))
+                        .sum();
                     if self.checksum_scroll < total_lines.saturating_sub(1) {
                         self.checksum_scroll += 1;
                     }
@@ -1408,7 +1528,9 @@ impl App {
         Ok(true)
     }
 
-    fn convert_characteristic(ch: xcp_client::A2lCharacteristic) -> Option<xcp_client::CalibrationParam> {
+    fn convert_characteristic(
+        ch: xcp_client::A2lCharacteristic,
+    ) -> Option<xcp_client::CalibrationParam> {
         use xcp_client::{CalibrationParam, CalibrationType};
 
         let data_type = match ch.data_type {
@@ -1438,16 +1560,34 @@ impl App {
             xcp_client::A2lDataType::BoolArray(n) => CalibrationType::BoolArray(n),
             // Matrix types
             xcp_client::A2lDataType::U8Matrix(rows, cols) => CalibrationType::U8Matrix(rows, cols),
-            xcp_client::A2lDataType::U16Matrix(rows, cols) => CalibrationType::U16Matrix(rows, cols),
-            xcp_client::A2lDataType::U32Matrix(rows, cols) => CalibrationType::U32Matrix(rows, cols),
-            xcp_client::A2lDataType::U64Matrix(rows, cols) => CalibrationType::U64Matrix(rows, cols),
+            xcp_client::A2lDataType::U16Matrix(rows, cols) => {
+                CalibrationType::U16Matrix(rows, cols)
+            }
+            xcp_client::A2lDataType::U32Matrix(rows, cols) => {
+                CalibrationType::U32Matrix(rows, cols)
+            }
+            xcp_client::A2lDataType::U64Matrix(rows, cols) => {
+                CalibrationType::U64Matrix(rows, cols)
+            }
             xcp_client::A2lDataType::I8Matrix(rows, cols) => CalibrationType::I8Matrix(rows, cols),
-            xcp_client::A2lDataType::I16Matrix(rows, cols) => CalibrationType::I16Matrix(rows, cols),
-            xcp_client::A2lDataType::I32Matrix(rows, cols) => CalibrationType::I32Matrix(rows, cols),
-            xcp_client::A2lDataType::I64Matrix(rows, cols) => CalibrationType::I64Matrix(rows, cols),
-            xcp_client::A2lDataType::F32Matrix(rows, cols) => CalibrationType::F32Matrix(rows, cols),
-            xcp_client::A2lDataType::F64Matrix(rows, cols) => CalibrationType::F64Matrix(rows, cols),
-            xcp_client::A2lDataType::BoolMatrix(rows, cols) => CalibrationType::BoolMatrix(rows, cols),
+            xcp_client::A2lDataType::I16Matrix(rows, cols) => {
+                CalibrationType::I16Matrix(rows, cols)
+            }
+            xcp_client::A2lDataType::I32Matrix(rows, cols) => {
+                CalibrationType::I32Matrix(rows, cols)
+            }
+            xcp_client::A2lDataType::I64Matrix(rows, cols) => {
+                CalibrationType::I64Matrix(rows, cols)
+            }
+            xcp_client::A2lDataType::F32Matrix(rows, cols) => {
+                CalibrationType::F32Matrix(rows, cols)
+            }
+            xcp_client::A2lDataType::F64Matrix(rows, cols) => {
+                CalibrationType::F64Matrix(rows, cols)
+            }
+            xcp_client::A2lDataType::BoolMatrix(rows, cols) => {
+                CalibrationType::BoolMatrix(rows, cols)
+            }
         };
 
         let mut param = CalibrationParam::new(&ch.name, ch.address, ch.address_ext, data_type)
@@ -1540,7 +1680,11 @@ impl App {
         Ok(())
     }
 
-    async fn write_param(&mut self, idx: usize, value: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn write_param(
+        &mut self,
+        idx: usize,
+        value: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let client = self.client.clone();
         let params = self.cal_manager.params().to_vec();
         let param = params[idx].clone();
@@ -1595,7 +1739,11 @@ impl App {
             }
         };
         let xcp_slave_guard = xcp_slave.lock().await;
-        let result = daq_manager.lock().await.start(&*xcp_slave_guard, 1000).await;
+        let result = daq_manager
+            .lock()
+            .await
+            .start(&*xcp_slave_guard, 1000)
+            .await;
         drop(xcp_slave_guard);
         drop(client_guard);
 
@@ -1678,7 +1826,11 @@ impl App {
         // Create main layout
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(3),
+            ])
             .split(area);
 
         // Header
@@ -1720,25 +1872,38 @@ impl App {
         let height = (self.daq_events.len() as u16 + 4).min(area.height.saturating_sub(4));
         let x = area.x + (area.width.saturating_sub(width)) / 2;
         let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let dialog_area = Rect { x, y, width, height };
+        let dialog_area = Rect {
+            x,
+            y,
+            width,
+            height,
+        };
 
         frame.render_widget(Clear, dialog_area);
 
-        let items: Vec<ListItem> = self.daq_events.iter().enumerate().map(|(i, ev)| {
-            let label = ev.display_label();
-            let style = if i == self.event_select_cursor {
-                Style::default().fg(MATRIX_BRIGHT_GREEN).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(MATRIX_GREEN)
-            };
-            ListItem::new(label).style(style)
-        }).collect();
+        let items: Vec<ListItem> = self
+            .daq_events
+            .iter()
+            .enumerate()
+            .map(|(i, ev)| {
+                let label = ev.display_label();
+                let style = if i == self.event_select_cursor {
+                    Style::default()
+                        .fg(MATRIX_BRIGHT_GREEN)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(MATRIX_GREEN)
+                };
+                ListItem::new(label).style(style)
+            })
+            .collect();
 
-        let list = List::new(items)
-            .block(Block::default()
+        let list = List::new(items).block(
+            Block::default()
                 .borders(Borders::ALL)
                 .title(" Select Event Channel [↑↓ navigate, Enter select, Esc cancel] ")
-                .border_style(Style::default().fg(MATRIX_GREEN)));
+                .border_style(Style::default().fg(MATRIX_GREEN)),
+        );
 
         frame.render_widget(list, dialog_area);
     }
@@ -1751,7 +1916,11 @@ impl App {
         };
 
         let header = Paragraph::new(title)
-            .style(Style::default().fg(MATRIX_BRIGHT_GREEN).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(MATRIX_BRIGHT_GREEN)
+                    .add_modifier(Modifier::BOLD),
+            )
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -1829,13 +1998,12 @@ impl App {
             })
             .collect();
 
-        let menu = List::new(items)
-            .block(
-                Block::default()
-                    .title(" Menu ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(MATRIX_GREEN)),
-            );
+        let menu = List::new(items).block(
+            Block::default()
+                .title(" Menu ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(MATRIX_GREEN)),
+        );
 
         frame.render_widget(menu, area);
     }
@@ -1863,13 +2031,12 @@ impl App {
             })
             .collect();
 
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(" Select Slave Address ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(MATRIX_GREEN)),
-            );
+        let list = List::new(items).block(
+            Block::default()
+                .title(" Select Slave Address ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(MATRIX_GREEN)),
+        );
 
         frame.render_widget(list, area);
     }
@@ -1958,7 +2125,10 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled("Address: ", Style::default().fg(Color::Cyan)),
-                Span::raw(format!("0x{:08X} (ext: {})", param.address, param.address_ext)),
+                Span::raw(format!(
+                    "0x{:08X} (ext: {})",
+                    param.address, param.address_ext
+                )),
             ]),
             Line::from(""),
         ];
@@ -1992,13 +2162,12 @@ impl App {
             Span::raw("r: read, w: write, q: back"),
         ]));
 
-        let detail = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .title(" Parameter Detail ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(MATRIX_GREEN)),
-            );
+        let detail = Paragraph::new(lines).block(
+            Block::default()
+                .title(" Parameter Detail ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(MATRIX_GREEN)),
+        );
 
         frame.render_widget(detail, area);
     }
@@ -2044,9 +2213,9 @@ impl App {
         frame.render_widget(prompt, input_area[0]);
 
         let help = Paragraph::new(
-            "Enter path to A2L file (e.g., hello_xcp.a2l)\nPress Enter to load, Esc to cancel"
+            "Enter path to A2L file (e.g., hello_xcp.a2l)\nPress Enter to load, Esc to cancel",
         )
-            .style(Style::default().fg(Color::Gray));
+        .style(Style::default().fg(Color::Gray));
 
         frame.render_widget(help, input_area[1]);
     }
@@ -2137,15 +2306,16 @@ impl App {
                     .map(|(pos, i, param)| {
                         let is_cursor = pos == self.param_selected;
                         let is_checked = self.search_dialog_selected.contains(&i);
-                        let style = if is_cursor && self.search_dialog_focus == SearchDialogFocus::List {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else if is_checked {
-                            Style::default().fg(MATRIX_BRIGHT_GREEN)
-                        } else {
-                            Style::default()
-                        };
+                        let style =
+                            if is_cursor && self.search_dialog_focus == SearchDialogFocus::List {
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD)
+                            } else if is_checked {
+                                Style::default().fg(MATRIX_BRIGHT_GREEN)
+                            } else {
+                                Style::default()
+                            };
                         let marker = if is_checked { "[x]" } else { "[ ]" };
                         let text = format!(
                             "  {} {:<28} {:<8} 0x{:06X}",
@@ -2158,7 +2328,12 @@ impl App {
                     })
                     .collect();
 
-                (items, self.search_dialog_selected.len(), indices.len(), params.len())
+                (
+                    items,
+                    self.search_dialog_selected.len(),
+                    indices.len(),
+                    params.len(),
+                )
             }
             SearchContext::Daq => {
                 if let Ok(daq_manager) = self.daq_manager.try_lock() {
@@ -2176,7 +2351,9 @@ impl App {
                         .map(|(pos, i, m)| {
                             let is_cursor = pos == self.daq_meas_selected;
                             let is_checked = self.search_dialog_selected.contains(&i);
-                            let style = if is_cursor && self.search_dialog_focus == SearchDialogFocus::List {
+                            let style = if is_cursor
+                                && self.search_dialog_focus == SearchDialogFocus::List
+                            {
                                 Style::default()
                                     .fg(Color::Yellow)
                                     .add_modifier(Modifier::BOLD)
@@ -2196,7 +2373,12 @@ impl App {
                         })
                         .collect();
 
-                    (items, self.search_dialog_selected.len(), indices.len(), all.len())
+                    (
+                        items,
+                        self.search_dialog_selected.len(),
+                        indices.len(),
+                        all.len(),
+                    )
                 } else {
                     (vec![], 0, 0, 0)
                 }
@@ -2215,13 +2397,12 @@ impl App {
             )
         };
 
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(list_title)
-                    .borders(Borders::ALL)
-                    .border_style(list_border_style),
-            );
+        let list = List::new(items).block(
+            Block::default()
+                .title(list_title)
+                .borders(Borders::ALL)
+                .border_style(list_border_style),
+        );
 
         frame.render_widget(list, chunks[1]);
     }
@@ -2246,9 +2427,10 @@ impl App {
 
         // Show placeholder if no variables selected
         let items: Vec<ListItem> = if indices.is_empty() {
-            vec![ListItem::new(
-                "  Press '/' to search and add calibration parameters"
-            ).style(Style::default().fg(Color::Gray))]
+            vec![
+                ListItem::new("  Press '/' to search and add calibration parameters")
+                    .style(Style::default().fg(Color::Gray)),
+            ]
         } else {
             indices
                 .iter()
@@ -2262,7 +2444,9 @@ impl App {
                         Style::default()
                     };
                     // Get cached value if available
-                    let value_str = self.cal_values.get(&param.name)
+                    let value_str = self
+                        .cal_values
+                        .get(&param.name)
                         .map(|v| self.format_cal_value_short(v))
                         .unwrap_or_else(|| "-".to_string());
                     let text = format!(
@@ -2302,13 +2486,20 @@ impl App {
         // Get measurement info + active event channel
         let (selected_names, daq_running_count, available_count, all_measurements, event_channel) =
             if let Ok(daq_manager) = self.daq_manager.try_lock() {
-                let names: Vec<String> = daq_manager.selected_measurements()
+                let names: Vec<String> = daq_manager
+                    .selected_measurements()
                     .iter()
                     .map(|m| m.name.clone())
                     .collect();
                 let all = daq_manager.all_measurements().to_vec();
                 let ch = daq_manager.get_event_channel();
-                (names, daq_manager.selected_count(), daq_manager.available_count(), all, ch)
+                (
+                    names,
+                    daq_manager.selected_count(),
+                    daq_manager.available_count(),
+                    all,
+                    ch,
+                )
             } else {
                 (vec![], 0, 0, vec![], 0u16)
             };
@@ -2338,12 +2529,20 @@ impl App {
                 ev.short_name.chars().take(12).collect::<String>(),
                 ev.cycle_time_ms()
             ),
-            Some(ev) => format!("ch{} {}", ev.channel, ev.short_name.chars().take(12).collect::<String>()),
+            Some(ev) => format!(
+                "ch{} {}",
+                ev.channel,
+                ev.short_name.chars().take(12).collect::<String>()
+            ),
             None => format!("ch{}", event_channel),
         };
         let status_text = format!(
             " Status: {} | Mode: {} | Event: {} | Acquiring: {}/{} | e: change event ",
-            if self.daq_running { "RUNNING" } else { "STOPPED" },
+            if self.daq_running {
+                "RUNNING"
+            } else {
+                "STOPPED"
+            },
             view_mode_str,
             event_status,
             daq_running_count,
@@ -2351,7 +2550,9 @@ impl App {
         );
         let status = Paragraph::new(status_text)
             .style(if self.daq_running {
-                Style::default().fg(MATRIX_BRIGHT_GREEN).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(MATRIX_BRIGHT_GREEN)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Red)
             })
@@ -2366,7 +2567,13 @@ impl App {
         let cycle_ms = active_event.map(|e| e.cycle_time_ms()).unwrap_or(0.0);
         match self.daq_display_mode {
             DaqDisplayMode::Text => {
-                self.render_daq_text_view(frame, chunks[1], &selected_names, daq_running_count, cycle_ms);
+                self.render_daq_text_view(
+                    frame,
+                    chunks[1],
+                    &selected_names,
+                    daq_running_count,
+                    cycle_ms,
+                );
             }
             DaqDisplayMode::Chart => {
                 self.render_daq_chart_view(frame, chunks[1], &selected_names);
@@ -2387,44 +2594,50 @@ impl App {
 
         // Event list panel
         if let Some(ev_area) = event_panel_area {
-            let ev_items: Vec<ListItem> = self.daq_events.iter().map(|ev| {
-                let is_active = ev.channel == event_channel;
-                let label = if ev.time_cycle > 0 {
-                    format!(
-                        "{} {} ({:.0}ms)",
-                        if is_active { "▶" } else { " " },
-                        ev.short_name.chars().take(12).collect::<String>(),
-                        ev.cycle_time_ms()
-                    )
-                } else {
-                    format!(
-                        "{} {}",
-                        if is_active { "▶" } else { " " },
-                        ev.short_name.chars().take(12).collect::<String>()
-                    )
-                };
-                let style = if is_active {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(MATRIX_GREEN)
-                };
-                ListItem::new(label).style(style)
-            }).collect();
+            let ev_items: Vec<ListItem> = self
+                .daq_events
+                .iter()
+                .map(|ev| {
+                    let is_active = ev.channel == event_channel;
+                    let label = if ev.time_cycle > 0 {
+                        format!(
+                            "{} {} ({:.0}ms)",
+                            if is_active { "▶" } else { " " },
+                            ev.short_name.chars().take(12).collect::<String>(),
+                            ev.cycle_time_ms()
+                        )
+                    } else {
+                        format!(
+                            "{} {}",
+                            if is_active { "▶" } else { " " },
+                            ev.short_name.chars().take(12).collect::<String>()
+                        )
+                    };
+                    let style = if is_active {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(MATRIX_GREEN)
+                    };
+                    ListItem::new(label).style(style)
+                })
+                .collect();
 
-            let ev_list = List::new(ev_items)
-                .block(Block::default()
+            let ev_list = List::new(ev_items).block(
+                Block::default()
                     .title(" Events (e: select) ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(MATRIX_GREEN)));
+                    .border_style(Style::default().fg(MATRIX_GREEN)),
+            );
             frame.render_widget(ev_list, ev_area);
         }
 
         // Measurement selection panel
         let indices = &self.selected_daq_meas;
         let meas_items: Vec<ListItem> = if indices.is_empty() {
-            vec![ListItem::new(
-                "  Press '/' to search and add measurements"
-            ).style(Style::default().fg(Color::Gray))]
+            vec![ListItem::new("  Press '/' to search and add measurements")
+                .style(Style::default().fg(Color::Gray))]
         } else {
             indices
                 .iter()
@@ -2468,35 +2681,51 @@ impl App {
             available_count
         );
 
-        let list = List::new(meas_items)
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(border_style),
-            );
+        let list = List::new(meas_items).block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(border_style),
+        );
 
         frame.render_widget(list, meas_area);
     }
 
-    fn render_daq_text_view(&self, frame: &mut Frame, area: Rect, selected_names: &[String], selected_count: usize, cycle_ms: f64) {
+    fn render_daq_text_view(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        selected_names: &[String],
+        selected_count: usize,
+        cycle_ms: f64,
+    ) {
         let mut data_lines: Vec<Line> = vec![];
 
         // Show latest values for each selected measurement
         if let Some(last_sample) = self.daq_samples.last() {
             for name in selected_names {
-                let value = last_sample.get(name)
+                let value = last_sample
+                    .get(name)
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "N/A".to_string());
                 data_lines.push(Line::from(vec![
-                    Span::styled(format!("{:<18}", name.chars().take(18).collect::<String>()), Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("{:<18}", name.chars().take(18).collect::<String>()),
+                        Style::default().fg(Color::Yellow),
+                    ),
                     Span::raw(value),
                 ]));
             }
         } else if selected_count > 0 {
-            data_lines.push(Line::styled("Waiting for data...", Style::default().fg(Color::Gray)));
+            data_lines.push(Line::styled(
+                "Waiting for data...",
+                Style::default().fg(Color::Gray),
+            ));
         } else {
-            data_lines.push(Line::styled("No measurements selected", Style::default().fg(Color::Gray)));
+            data_lines.push(Line::styled(
+                "No measurements selected",
+                Style::default().fg(Color::Gray),
+            ));
         }
 
         // Show recent samples history (last 2)
@@ -2508,7 +2737,11 @@ impl App {
                 let mut values = vec![];
                 for name in selected_names {
                     if let Some(v) = sample.get(name) {
-                        values.push(format!("{}: {}", name.split('_').next_back().unwrap_or(name), v));
+                        values.push(format!(
+                            "{}: {}",
+                            name.split('_').next_back().unwrap_or(name),
+                            v
+                        ));
                     }
                 }
                 data_lines.push(Line::from(format!("  [{}] {}", i + 1, values.join(", "))));
@@ -2516,7 +2749,10 @@ impl App {
         }
 
         let live_title = if cycle_ms > 0.0 {
-            format!(" Live Data @ {:.0}ms (s: start/stop, c: clear, t: chart) ", cycle_ms)
+            format!(
+                " Live Data @ {:.0}ms (s: start/stop, c: clear, t: chart) ",
+                cycle_ms
+            )
         } else {
             " Live Data (s: start/stop, c: clear, t: chart) ".to_string()
         };
@@ -2531,7 +2767,6 @@ impl App {
     }
 
     fn render_daq_chart_view(&self, frame: &mut Frame, area: Rect, selected_names: &[String]) {
-
         if selected_names.is_empty() {
             let msg = Paragraph::new("No measurements selected")
                 .style(Style::default().fg(Color::Gray))
@@ -2637,9 +2872,10 @@ impl App {
         // For simplicity, show max 3 measurements overlaid
         for (m_idx, name) in selected_names.iter().take(3).enumerate() {
             let color = colors[m_idx % colors.len()];
-            let mut line_spans: Vec<Span> = vec![
-                Span::styled(format!("{:<10} ", name.chars().take(10).collect::<String>()), Style::default().fg(color)),
-            ];
+            let mut line_spans: Vec<Span> = vec![Span::styled(
+                format!("{:<10} ", name.chars().take(10).collect::<String>()),
+                Style::default().fg(color),
+            )];
 
             for sample in &self.daq_samples[start_idx..] {
                 let ch = if let Some(v) = sample.get(name) {
@@ -2668,15 +2904,25 @@ impl App {
         // Add value range info
         chart_lines.push(Line::from(""));
         chart_lines.push(Line::from(vec![
-            Span::styled(format!("Min: {:.2} ", min_val), Style::default().fg(Color::Gray)),
-            Span::styled(format!("Max: {:.2} ", max_val), Style::default().fg(Color::Gray)),
-            Span::styled(format!("Samples: {}", samples_to_show), Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("Min: {:.2} ", min_val),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled(
+                format!("Max: {:.2} ", max_val),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled(
+                format!("Samples: {}", samples_to_show),
+                Style::default().fg(Color::Gray),
+            ),
         ]));
 
-        let chart = Paragraph::new(chart_lines)
-            .block(Block::default()
+        let chart = Paragraph::new(chart_lines).block(
+            Block::default()
                 .title(" Chart View (s: start/stop, c: clear, t: text) ")
-                .borders(Borders::ALL));
+                .borders(Borders::ALL),
+        );
 
         frame.render_widget(chart, area);
     }
@@ -2692,11 +2938,7 @@ impl App {
             .split(area);
 
         let error = Paragraph::new(error_text)
-            .style(
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
             .wrap(ratatui::widgets::Wrap { trim: true })
             .block(
                 Block::default()
@@ -2754,33 +2996,61 @@ impl App {
         let summary_text = vec![
             Line::from(vec![
                 Span::styled("Total: ", Style::default().fg(MATRIX_GREEN)),
-                Span::styled(format!("{}", report.total_segments()), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{}", report.total_segments()),
+                    Style::default().fg(Color::White),
+                ),
                 Span::raw("  "),
                 Span::styled("Pass: ", Style::default().fg(Color::Green)),
-                Span::styled(format!("{}", report.passed()), Style::default().fg(Color::Green)),
+                Span::styled(
+                    format!("{}", report.passed()),
+                    Style::default().fg(Color::Green),
+                ),
                 Span::raw("  "),
                 Span::styled("Fail: ", Style::default().fg(Color::Red)),
-                Span::styled(format!("{}", report.failed()), Style::default().fg(if report.failed() > 0 { Color::Red } else { Color::White })),
+                Span::styled(
+                    format!("{}", report.failed()),
+                    Style::default().fg(if report.failed() > 0 {
+                        Color::Red
+                    } else {
+                        Color::White
+                    }),
+                ),
                 Span::raw("  "),
                 Span::styled("Skip: ", Style::default().fg(Color::Yellow)),
-                Span::styled(format!("{}", report.skipped()), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{}", report.skipped()),
+                    Style::default().fg(Color::Yellow),
+                ),
                 Span::raw("  "),
                 Span::styled("Error: ", Style::default().fg(Color::Magenta)),
-                Span::styled(format!("{}", report.errors()), Style::default().fg(if report.errors() > 0 { Color::Magenta } else { Color::White })),
+                Span::styled(
+                    format!("{}", report.errors()),
+                    Style::default().fg(if report.errors() > 0 {
+                        Color::Magenta
+                    } else {
+                        Color::White
+                    }),
+                ),
             ]),
             Line::from(Span::styled(
-                if all_ok { "✓ All segments verified OK" } else { "✗ Verification issues detected" },
-                Style::default().fg(summary_color).add_modifier(Modifier::BOLD),
+                if all_ok {
+                    "✓ All segments verified OK"
+                } else {
+                    "✗ Verification issues detected"
+                },
+                Style::default()
+                    .fg(summary_color)
+                    .add_modifier(Modifier::BOLD),
             )),
         ];
 
-        let summary = Paragraph::new(summary_text)
-            .block(
-                Block::default()
-                    .title(" Verification Summary ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(summary_color)),
-            );
+        let summary = Paragraph::new(summary_text).block(
+            Block::default()
+                .title(" Verification Summary ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(summary_color)),
+        );
         frame.render_widget(summary, chunks[0]);
 
         // Results list — build lines including chunk sub-rows for chunked segments
@@ -2808,20 +3078,40 @@ impl App {
             };
 
             let style = if line_idx == self.checksum_scroll {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(MATRIX_GREEN)
             };
 
             let line = Line::from(vec![
-                Span::styled(format!(" [{status_str}] "), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" [{status_str}] "),
+                    Style::default()
+                        .fg(status_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!("{:<20} ", r.name), style),
-                Span::styled(format!("0x{:08X} ", r.address), Style::default().fg(Color::Cyan)),
-                Span::styled(format!("{:>8} B ", r.size), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:<12} ", r.algorithm), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("0x{:08X} ", r.address),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("{:>8} B ", r.size),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{:<12} ", r.algorithm),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(
                     format!("M:0x{:08X} S:0x{:08X}", r.master_checksum, r.slave_checksum),
-                    if r.passed { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) },
+                    if r.passed {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::Red)
+                    },
                 ),
                 Span::styled(chunk_info, Style::default().fg(Color::Cyan)),
                 Span::styled(detail, Style::default().fg(status_color)),
@@ -2834,7 +3124,9 @@ impl App {
             if let Some(ref cks) = r.chunks {
                 for c in cks {
                     let chunk_style = if line_idx == self.checksum_scroll {
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::DarkGray)
                     };
@@ -2844,7 +3136,10 @@ impl App {
 
                     let chunk_line = Line::from(vec![
                         Span::styled("   ", Style::default()),
-                        Span::styled(format!(" [{chunk_status_str}] "), Style::default().fg(chunk_status_color)),
+                        Span::styled(
+                            format!(" [{chunk_status_str}] "),
+                            Style::default().fg(chunk_status_color),
+                        ),
                         Span::styled(format!("chunk +0x{:08X} ", c.offset), chunk_style),
                         Span::styled(format!("{:>8} B ", c.size), chunk_style),
                         Span::styled("             ", Style::default()),

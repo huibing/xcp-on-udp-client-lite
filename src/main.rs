@@ -1,15 +1,15 @@
 //! XCP Client - Terminal UI / Web UI Application
 
-mod tui;
 mod calibrate;
-mod verify;
 mod daq_record;
+mod tui;
+mod verify;
 
+use chrono::Local;
+use clap::{Parser, Subcommand};
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::time::Duration;
-use chrono::Local;
-use clap::{Parser, Subcommand};
 use tui::app::App;
 use tui::event::{Event, EventHandler};
 use tui::terminal::Tui;
@@ -155,23 +155,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("debug".parse()?)
-                .add_directive("a2lfile=error".parse()?),  // Suppress a2lfile warnings
+                .add_directive("a2lfile=error".parse()?), // Suppress a2lfile warnings
         )
         .with_ansi(false)
         .with_writer(move || log_file.try_clone().expect("Failed to clone log file"))
         .try_init()
         .ok();
 
-    tracing::info!("XCP Client started — mode: {}, args: {:?}", mode, std::env::args().collect::<Vec<_>>());
+    tracing::info!(
+        "XCP Client started — mode: {}, args: {:?}",
+        mode,
+        std::env::args().collect::<Vec<_>>()
+    );
 
     match cli.mode {
         Some(Mode::Web { host, port }) => {
             run_web_ui(&host, port).await?;
         }
-        Some(Mode::Calibrate { a2l, var, value, dcm, addr }) => {
+        Some(Mode::Calibrate {
+            a2l,
+            var,
+            value,
+            dcm,
+            addr,
+        }) => {
             calibrate::run_calibrate(&a2l, var, value, dcm, addr).await?;
         }
-        Some(Mode::Verify { a2l, hex, addr, max_block_size }) => {
+        Some(Mode::Verify {
+            a2l,
+            hex,
+            addr,
+            max_block_size,
+        }) => {
             verify::run_verify(&a2l, &hex, addr, max_block_size).await?;
         }
         Some(Mode::DaqRecord { config }) => {
@@ -207,18 +222,16 @@ async fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         match event_handler.next().await {
-            Ok(Event::Key(key)) => {
-                match app.handle_key(key).await {
-                    Ok(should_continue) => {
-                        if !should_continue {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        app.set_error(format!("Error: {}", e));
+            Ok(Event::Key(key)) => match app.handle_key(key).await {
+                Ok(should_continue) => {
+                    if !should_continue {
+                        break;
                     }
                 }
-            }
+                Err(e) => {
+                    app.set_error(format!("Error: {}", e));
+                }
+            },
             Ok(Event::Tick) => {
                 app.on_tick().await;
             }

@@ -1,8 +1,8 @@
 //! XCP Protocol Layer
 
-mod types;
 pub mod commands;
 mod responses;
+mod types;
 
 pub use commands::*;
 pub use responses::*;

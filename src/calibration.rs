@@ -1,6 +1,9 @@
 //! Calibration Parameter Management
 
-use crate::a2l::{A2lCharacteristic, A2lDataType, A2lMemorySegment, A2lReader, AxisInfo, CharacteristicType, StorageOrder, CompuMethod};
+use crate::a2l::{
+    A2lCharacteristic, A2lDataType, A2lMemorySegment, A2lReader, AxisInfo, CharacteristicType,
+    CompuMethod, StorageOrder,
+};
 use crate::client::XcpClient;
 use crate::protocol::Mta;
 use std::path::Path;
@@ -56,15 +59,27 @@ impl CalibrationType {
             CalibrationType::U32 | CalibrationType::I32 | CalibrationType::F32 => 4,
             CalibrationType::U64 | CalibrationType::I64 | CalibrationType::F64 => 8,
             // Array types
-            CalibrationType::U8Array(n) | CalibrationType::I8Array(n) | CalibrationType::BoolArray(n) => *n,
+            CalibrationType::U8Array(n)
+            | CalibrationType::I8Array(n)
+            | CalibrationType::BoolArray(n) => *n,
             CalibrationType::U16Array(n) | CalibrationType::I16Array(n) => *n * 2,
-            CalibrationType::U32Array(n) | CalibrationType::I32Array(n) | CalibrationType::F32Array(n) => *n * 4,
-            CalibrationType::U64Array(n) | CalibrationType::I64Array(n) | CalibrationType::F64Array(n) => *n * 8,
+            CalibrationType::U32Array(n)
+            | CalibrationType::I32Array(n)
+            | CalibrationType::F32Array(n) => *n * 4,
+            CalibrationType::U64Array(n)
+            | CalibrationType::I64Array(n)
+            | CalibrationType::F64Array(n) => *n * 8,
             // Matrix types
-            CalibrationType::U8Matrix(r, c) | CalibrationType::I8Matrix(r, c) | CalibrationType::BoolMatrix(r, c) => r * c,
+            CalibrationType::U8Matrix(r, c)
+            | CalibrationType::I8Matrix(r, c)
+            | CalibrationType::BoolMatrix(r, c) => r * c,
             CalibrationType::U16Matrix(r, c) | CalibrationType::I16Matrix(r, c) => r * c * 2,
-            CalibrationType::U32Matrix(r, c) | CalibrationType::I32Matrix(r, c) | CalibrationType::F32Matrix(r, c) => r * c * 4,
-            CalibrationType::U64Matrix(r, c) | CalibrationType::I64Matrix(r, c) | CalibrationType::F64Matrix(r, c) => r * c * 8,
+            CalibrationType::U32Matrix(r, c)
+            | CalibrationType::I32Matrix(r, c)
+            | CalibrationType::F32Matrix(r, c) => r * c * 4,
+            CalibrationType::U64Matrix(r, c)
+            | CalibrationType::I64Matrix(r, c)
+            | CalibrationType::F64Matrix(r, c) => r * c * 8,
         }
     }
 
@@ -206,7 +221,12 @@ fn format_matrix<T: std::fmt::Debug>(mat: &[Vec<T>]) -> String {
 ///
 /// For ROW_DIR: matrix[r][c] = flat[r * cols + c]
 /// For COLUMN_DIR: matrix[r][c] = flat[c * rows + r]
-fn flat_to_matrix<T: Clone>(flat: &[T], rows: usize, cols: usize, order: StorageOrder) -> Vec<Vec<T>> {
+fn flat_to_matrix<T: Clone>(
+    flat: &[T],
+    rows: usize,
+    cols: usize,
+    order: StorageOrder,
+) -> Vec<Vec<T>> {
     let mut matrix = Vec::with_capacity(rows);
     match order {
         StorageOrder::RowDir => {
@@ -235,7 +255,12 @@ fn flat_to_matrix<T: Clone>(flat: &[T], rows: usize, cols: usize, order: Storage
 ///
 /// For ROW_DIR: flat[r * cols + c] = matrix[r][c]
 /// For COLUMN_DIR: flat[c * rows + r] = matrix[r][c]
-pub fn matrix_to_flat<T: Clone>(matrix: &[Vec<T>], rows: usize, cols: usize, order: StorageOrder) -> Vec<T> {
+pub fn matrix_to_flat<T: Clone>(
+    matrix: &[Vec<T>],
+    rows: usize,
+    cols: usize,
+    order: StorageOrder,
+) -> Vec<T> {
     let mut flat = Vec::with_capacity(rows * cols);
     match order {
         StorageOrder::RowDir => {
@@ -386,8 +411,15 @@ impl CalibrationParam {
 
     /// Serialize parameter metadata to JSON (without value).
     /// Used for API responses that need parameter info but not the current value.
-    pub fn to_json(&self, device_id: &str, device_name: &str, idx: usize, connected: bool) -> serde_json::Value {
-        let axis_info: Vec<serde_json::Value> = self.axis_info.iter().map(|axis| axis.to_json()).collect();
+    pub fn to_json(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        idx: usize,
+        connected: bool,
+    ) -> serde_json::Value {
+        let axis_info: Vec<serde_json::Value> =
+            self.axis_info.iter().map(|axis| axis.to_json()).collect();
         serde_json::json!({
             "device_id": device_id,
             "device_name": device_name,
@@ -411,8 +443,15 @@ impl CalibrationParam {
 
     /// Serialize full parameter details for info dialog.
     /// Includes all metadata with better formatting for display.
-    pub fn to_detail_json(&self, device_id: &str, device_name: &str, idx: usize, connected: bool) -> serde_json::Value {
-        let axis_info: Vec<serde_json::Value> = self.axis_info.iter().map(|axis| axis.to_json()).collect();
+    pub fn to_detail_json(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        idx: usize,
+        connected: bool,
+    ) -> serde_json::Value {
+        let axis_info: Vec<serde_json::Value> =
+            self.axis_info.iter().map(|axis| axis.to_json()).collect();
         let axis_values = self.get_static_axis_values();
 
         serde_json::json!({
@@ -495,21 +534,23 @@ impl CalibrationManager {
             .filter_map(|ch| Self::convert_characteristic(&reader, ch))
             .collect();
 
-        Ok(Self { params, memory_segments, supports_short_download })
+        Ok(Self {
+            params,
+            memory_segments,
+            supports_short_download,
+        })
     }
 
     /// Convert A2L characteristic to CalibrationParam
-    fn convert_characteristic(reader: &A2lReader, ch: A2lCharacteristic) -> Option<CalibrationParam> {
+    fn convert_characteristic(
+        reader: &A2lReader,
+        ch: A2lCharacteristic,
+    ) -> Option<CalibrationParam> {
         let data_type = Self::convert_data_type(&ch.data_type)?;
 
-        let mut param = CalibrationParam::new(
-            &ch.name,
-            ch.address,
-            ch.address_ext,
-            data_type,
-        )
-        .with_description(&ch.description)
-        .with_range(ch.min, ch.max);
+        let mut param = CalibrationParam::new(&ch.name, ch.address, ch.address_ext, data_type)
+            .with_description(&ch.description)
+            .with_range(ch.min, ch.max);
 
         if let Some(unit) = ch.unit {
             param = param.with_unit(&unit);
@@ -589,55 +630,54 @@ impl CalibrationManager {
     }
 
     /// Read parameter value from XCP slave
-    pub async fn read_value(&self, client: &XcpClient, param: &CalibrationParam) -> Result<CalibrationValue, String> {
+    pub async fn read_value(
+        &self,
+        client: &XcpClient,
+        param: &CalibrationParam,
+    ) -> Result<CalibrationValue, String> {
         let mta = param.mta();
         let size = param.data_type.size();
 
         // Read data (handle large reads)
         let data = if size <= 255 {
-            client.read_memory(mta, size as u8).await.map_err(|e| e.to_string())?
+            client
+                .read_memory(mta, size as u8)
+                .await
+                .map_err(|e| e.to_string())?
         } else {
-            client.read_u8_array(mta, size).await.map_err(|e| e.to_string())?
+            client
+                .read_u8_array(mta, size)
+                .await
+                .map_err(|e| e.to_string())?
         };
 
         // Parse based on type
         let value = match &param.data_type {
             CalibrationType::U8 => CalibrationValue::U8(data.first().copied().unwrap_or(0)),
-            CalibrationType::U16 => {
-                CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]]))
-            }
+            CalibrationType::U16 => CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]])),
             CalibrationType::U32 => {
                 CalibrationValue::U32(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
             }
-            CalibrationType::U64 => {
-                CalibrationValue::U64(u64::from_le_bytes([
-                    data[0], data[1], data[2], data[3],
-                    data[4], data[5], data[6], data[7],
-                ]))
-            }
+            CalibrationType::U64 => CalibrationValue::U64(u64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ])),
             CalibrationType::I8 => CalibrationValue::I8(data[0] as i8),
-            CalibrationType::I16 => {
-                CalibrationValue::I16(i16::from_le_bytes([data[0], data[1]]))
-            }
+            CalibrationType::I16 => CalibrationValue::I16(i16::from_le_bytes([data[0], data[1]])),
             CalibrationType::I32 => {
                 CalibrationValue::I32(i32::from_le_bytes([data[0], data[1], data[2], data[3]]))
             }
-            CalibrationType::I64 => {
-                CalibrationValue::I64(i64::from_le_bytes([
-                    data[0], data[1], data[2], data[3],
-                    data[4], data[5], data[6], data[7],
-                ]))
-            }
+            CalibrationType::I64 => CalibrationValue::I64(i64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ])),
             CalibrationType::F32 => {
                 CalibrationValue::F32(f32::from_le_bytes([data[0], data[1], data[2], data[3]]))
             }
-            CalibrationType::F64 => {
-                CalibrationValue::F64(f64::from_le_bytes([
-                    data[0], data[1], data[2], data[3],
-                    data[4], data[5], data[6], data[7],
-                ]))
+            CalibrationType::F64 => CalibrationValue::F64(f64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ])),
+            CalibrationType::Bool => {
+                CalibrationValue::Bool(data.first().copied().unwrap_or(0) != 0)
             }
-            CalibrationType::Bool => CalibrationValue::Bool(data.first().copied().unwrap_or(0) != 0),
             // Array types
             CalibrationType::U8Array(n) => {
                 CalibrationValue::U8Array(data.iter().take(*n).copied().collect())
@@ -763,7 +803,12 @@ impl CalibrationManager {
                 let flat: Vec<u16> = (0..total)
                     .map(|i| u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]))
                     .collect();
-                CalibrationValue::U16Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
+                CalibrationValue::U16Matrix(flat_to_matrix(
+                    &flat,
+                    *rows,
+                    *cols,
+                    param.storage_order,
+                ))
             }
             CalibrationType::U32Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -777,7 +822,12 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                CalibrationValue::U32Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
+                CalibrationValue::U32Matrix(flat_to_matrix(
+                    &flat,
+                    *rows,
+                    *cols,
+                    param.storage_order,
+                ))
             }
             CalibrationType::U64Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -795,7 +845,12 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                CalibrationValue::U64Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
+                CalibrationValue::U64Matrix(flat_to_matrix(
+                    &flat,
+                    *rows,
+                    *cols,
+                    param.storage_order,
+                ))
             }
             CalibrationType::I8Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -807,7 +862,12 @@ impl CalibrationManager {
                 let flat: Vec<i16> = (0..total)
                     .map(|i| i16::from_le_bytes([data[i * 2], data[i * 2 + 1]]))
                     .collect();
-                CalibrationValue::I16Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
+                CalibrationValue::I16Matrix(flat_to_matrix(
+                    &flat,
+                    *rows,
+                    *cols,
+                    param.storage_order,
+                ))
             }
             CalibrationType::I32Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -821,7 +881,12 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                CalibrationValue::I32Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
+                CalibrationValue::I32Matrix(flat_to_matrix(
+                    &flat,
+                    *rows,
+                    *cols,
+                    param.storage_order,
+                ))
             }
             CalibrationType::I64Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -839,7 +904,12 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                CalibrationValue::I64Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
+                CalibrationValue::I64Matrix(flat_to_matrix(
+                    &flat,
+                    *rows,
+                    *cols,
+                    param.storage_order,
+                ))
             }
             CalibrationType::F32Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -853,7 +923,12 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                CalibrationValue::F32Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
+                CalibrationValue::F32Matrix(flat_to_matrix(
+                    &flat,
+                    *rows,
+                    *cols,
+                    param.storage_order,
+                ))
             }
             CalibrationType::F64Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -871,12 +946,22 @@ impl CalibrationManager {
                         ])
                     })
                     .collect();
-                CalibrationValue::F64Matrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
+                CalibrationValue::F64Matrix(flat_to_matrix(
+                    &flat,
+                    *rows,
+                    *cols,
+                    param.storage_order,
+                ))
             }
             CalibrationType::BoolMatrix(rows, cols) => {
                 let total = rows * cols;
                 let flat: Vec<bool> = data.iter().take(total).map(|&b| b != 0).collect();
-                CalibrationValue::BoolMatrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
+                CalibrationValue::BoolMatrix(flat_to_matrix(
+                    &flat,
+                    *rows,
+                    *cols,
+                    param.storage_order,
+                ))
             }
         };
 
@@ -897,134 +982,207 @@ impl CalibrationManager {
             (CalibrationType::U8, CalibrationValue::U8(v)) => {
                 client.write_u8(mta, *v).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::U16, CalibrationValue::U16(v)) => {
-                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
-            }
+            (CalibrationType::U16, CalibrationValue::U16(v)) => client
+                .write_memory(mta, &v.to_le_bytes())
+                .await
+                .map_err(|e| e.to_string())?,
             (CalibrationType::U32, CalibrationValue::U32(v)) => {
                 client.write_u32(mta, *v).await.map_err(|e| e.to_string())?
             }
-            (CalibrationType::U64, CalibrationValue::U64(v)) => {
-                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
-            }
-            (CalibrationType::I8, CalibrationValue::I8(v)) => {
-                client.write_u8(mta, *v as u8).await.map_err(|e| e.to_string())?
-            }
-            (CalibrationType::I16, CalibrationValue::I16(v)) => {
-                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
-            }
-            (CalibrationType::I32, CalibrationValue::I32(v)) => {
-                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
-            }
-            (CalibrationType::I64, CalibrationValue::I64(v)) => {
-                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
-            }
-            (CalibrationType::F32, CalibrationValue::F32(v)) => {
-                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
-            }
-            (CalibrationType::F64, CalibrationValue::F64(v)) => {
-                client.write_memory(mta, &v.to_le_bytes()).await.map_err(|e| e.to_string())?
-            }
-            (CalibrationType::Bool, CalibrationValue::Bool(v)) => {
-                client.write_u8(mta, if *v { 1 } else { 0 }).await.map_err(|e| e.to_string())?
-            }
+            (CalibrationType::U64, CalibrationValue::U64(v)) => client
+                .write_memory(mta, &v.to_le_bytes())
+                .await
+                .map_err(|e| e.to_string())?,
+            (CalibrationType::I8, CalibrationValue::I8(v)) => client
+                .write_u8(mta, *v as u8)
+                .await
+                .map_err(|e| e.to_string())?,
+            (CalibrationType::I16, CalibrationValue::I16(v)) => client
+                .write_memory(mta, &v.to_le_bytes())
+                .await
+                .map_err(|e| e.to_string())?,
+            (CalibrationType::I32, CalibrationValue::I32(v)) => client
+                .write_memory(mta, &v.to_le_bytes())
+                .await
+                .map_err(|e| e.to_string())?,
+            (CalibrationType::I64, CalibrationValue::I64(v)) => client
+                .write_memory(mta, &v.to_le_bytes())
+                .await
+                .map_err(|e| e.to_string())?,
+            (CalibrationType::F32, CalibrationValue::F32(v)) => client
+                .write_memory(mta, &v.to_le_bytes())
+                .await
+                .map_err(|e| e.to_string())?,
+            (CalibrationType::F64, CalibrationValue::F64(v)) => client
+                .write_memory(mta, &v.to_le_bytes())
+                .await
+                .map_err(|e| e.to_string())?,
+            (CalibrationType::Bool, CalibrationValue::Bool(v)) => client
+                .write_u8(mta, if *v { 1 } else { 0 })
+                .await
+                .map_err(|e| e.to_string())?,
             // Array types
-            (CalibrationType::U8Array(_), CalibrationValue::U8Array(v)) => {
-                client.write_u8_array(mta, v).await.map_err(|e| e.to_string())?
-            }
+            (CalibrationType::U8Array(_), CalibrationValue::U8Array(v)) => client
+                .write_u8_array(mta, v)
+                .await
+                .map_err(|e| e.to_string())?,
             (CalibrationType::U16Array(_), CalibrationValue::U16Array(v)) => {
                 let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::U32Array(_), CalibrationValue::U32Array(v)) => {
                 let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::U64Array(_), CalibrationValue::U64Array(v)) => {
                 let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::I8Array(_), CalibrationValue::I8Array(v)) => {
                 let flat: Vec<u8> = v.iter().map(|&x| x as u8).collect();
-                client.write_u8_array(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_u8_array(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::I16Array(_), CalibrationValue::I16Array(v)) => {
                 let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::I32Array(_), CalibrationValue::I32Array(v)) => {
                 let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::I64Array(_), CalibrationValue::I64Array(v)) => {
                 let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::F32Array(_), CalibrationValue::F32Array(v)) => {
                 let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::F64Array(_), CalibrationValue::F64Array(v)) => {
                 let flat: Vec<u8> = v.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::BoolArray(_), CalibrationValue::BoolArray(v)) => {
                 let flat: Vec<u8> = v.iter().map(|&x| if x { 1 } else { 0 }).collect();
-                client.write_u8_array(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_u8_array(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             // Matrix types
             (CalibrationType::U8Matrix(rows, cols), CalibrationValue::U8Matrix(mat)) => {
                 let flat: Vec<u8> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
-                client.write_u8_array(mta, &flat).await.map_err(|e| e.to_string())?
+                client
+                    .write_u8_array(mta, &flat)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::U16Matrix(rows, cols), CalibrationValue::U16Matrix(mat)) => {
                 let flat: Vec<u16> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::U32Matrix(rows, cols), CalibrationValue::U32Matrix(mat)) => {
                 let flat: Vec<u32> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::U64Matrix(rows, cols), CalibrationValue::U64Matrix(mat)) => {
                 let flat: Vec<u64> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::I8Matrix(rows, cols), CalibrationValue::I8Matrix(mat)) => {
                 let flat: Vec<i8> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().map(|&x| x as u8).collect();
-                client.write_u8_array(mta, &bytes).await.map_err(|e| e.to_string())?
+                client
+                    .write_u8_array(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::I16Matrix(rows, cols), CalibrationValue::I16Matrix(mat)) => {
                 let flat: Vec<i16> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::I32Matrix(rows, cols), CalibrationValue::I32Matrix(mat)) => {
                 let flat: Vec<i32> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::I64Matrix(rows, cols), CalibrationValue::I64Matrix(mat)) => {
                 let flat: Vec<i64> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::F32Matrix(rows, cols), CalibrationValue::F32Matrix(mat)) => {
                 let flat: Vec<f32> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::F64Matrix(rows, cols), CalibrationValue::F64Matrix(mat)) => {
                 let flat: Vec<f64> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().flat_map(|&x| x.to_le_bytes()).collect();
-                client.write_memory(mta, &bytes).await.map_err(|e| e.to_string())?
+                client
+                    .write_memory(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             (CalibrationType::BoolMatrix(rows, cols), CalibrationValue::BoolMatrix(mat)) => {
                 let flat: Vec<bool> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().map(|&x| if x { 1 } else { 0 }).collect();
-                client.write_u8_array(mta, &bytes).await.map_err(|e| e.to_string())?
+                client
+                    .write_u8_array(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
             }
             _ => return Err(format!("Type mismatch for parameter {}", param.name)),
         }
@@ -1036,7 +1194,11 @@ impl CalibrationManager {
     ///
     /// For enum types, this will convert enum text to raw value using COMPU_METHOD.
     /// For numeric types, this will parse the string directly.
-    pub fn parse_value(&self, param: &CalibrationParam, input: &str) -> Result<CalibrationValue, String> {
+    pub fn parse_value(
+        &self,
+        param: &CalibrationParam,
+        input: &str,
+    ) -> Result<CalibrationValue, String> {
         // For enum types, convert display text to raw value first
         let numeric_input = if param.is_enum() {
             // Use CompuMethod to convert enum text to raw value
@@ -1088,7 +1250,9 @@ impl CalibrationManager {
                 Ok(CalibrationValue::F64(v))
             }
             CalibrationType::Bool => {
-                let v: bool = numeric_input.parse().map_err(|_| "Invalid BOOL value (true/false)")?;
+                let v: bool = numeric_input
+                    .parse()
+                    .map_err(|_| "Invalid BOOL value (true/false)")?;
                 Ok(CalibrationValue::Bool(v))
             }
             CalibrationType::U8Array(n) => {
@@ -1096,10 +1260,10 @@ impl CalibrationManager {
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<u8>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::U8Array(arr.map_err(|_| "Invalid U8 value")?))
+                let arr: Result<Vec<u8>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::U8Array(
+                    arr.map_err(|_| "Invalid U8 value")?,
+                ))
             }
             CalibrationType::U8Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -1107,9 +1271,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<u8>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<u8>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid U8 value")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1123,100 +1285,100 @@ impl CalibrationManager {
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<u16>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::U16Array(arr.map_err(|_| "Invalid U16 value")?))
+                let arr: Result<Vec<u16>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::U16Array(
+                    arr.map_err(|_| "Invalid U16 value")?,
+                ))
             }
             CalibrationType::U32Array(n) => {
                 let values: Vec<&str> = input.split(',').collect();
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<u32>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::U32Array(arr.map_err(|_| "Invalid U32 value")?))
+                let arr: Result<Vec<u32>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::U32Array(
+                    arr.map_err(|_| "Invalid U32 value")?,
+                ))
             }
             CalibrationType::U64Array(n) => {
                 let values: Vec<&str> = input.split(',').collect();
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<u64>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::U64Array(arr.map_err(|_| "Invalid U64 value")?))
+                let arr: Result<Vec<u64>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::U64Array(
+                    arr.map_err(|_| "Invalid U64 value")?,
+                ))
             }
             CalibrationType::I8Array(n) => {
                 let values: Vec<&str> = input.split(',').collect();
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<i8>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::I8Array(arr.map_err(|_| "Invalid I8 value")?))
+                let arr: Result<Vec<i8>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::I8Array(
+                    arr.map_err(|_| "Invalid I8 value")?,
+                ))
             }
             CalibrationType::I16Array(n) => {
                 let values: Vec<&str> = input.split(',').collect();
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<i16>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::I16Array(arr.map_err(|_| "Invalid I16 value")?))
+                let arr: Result<Vec<i16>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::I16Array(
+                    arr.map_err(|_| "Invalid I16 value")?,
+                ))
             }
             CalibrationType::I32Array(n) => {
                 let values: Vec<&str> = input.split(',').collect();
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<i32>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::I32Array(arr.map_err(|_| "Invalid I32 value")?))
+                let arr: Result<Vec<i32>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::I32Array(
+                    arr.map_err(|_| "Invalid I32 value")?,
+                ))
             }
             CalibrationType::I64Array(n) => {
                 let values: Vec<&str> = input.split(',').collect();
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<i64>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::I64Array(arr.map_err(|_| "Invalid I64 value")?))
+                let arr: Result<Vec<i64>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::I64Array(
+                    arr.map_err(|_| "Invalid I64 value")?,
+                ))
             }
             CalibrationType::F32Array(n) => {
                 let values: Vec<&str> = input.split(',').collect();
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<f32>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::F32Array(arr.map_err(|_| "Invalid F32 value")?))
+                let arr: Result<Vec<f32>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::F32Array(
+                    arr.map_err(|_| "Invalid F32 value")?,
+                ))
             }
             CalibrationType::F64Array(n) => {
                 let values: Vec<&str> = input.split(',').collect();
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<f64>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::F64Array(arr.map_err(|_| "Invalid F64 value")?))
+                let arr: Result<Vec<f64>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::F64Array(
+                    arr.map_err(|_| "Invalid F64 value")?,
+                ))
             }
             CalibrationType::BoolArray(n) => {
                 let values: Vec<&str> = input.split(',').collect();
                 if values.len() != *n {
                     return Err(format!("Expected {} values, got {}", n, values.len()));
                 }
-                let arr: Result<Vec<bool>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
-                Ok(CalibrationValue::BoolArray(arr.map_err(|_| "Invalid BOOL value (true/false)")?))
+                let arr: Result<Vec<bool>, _> = values.iter().map(|s| s.trim().parse()).collect();
+                Ok(CalibrationValue::BoolArray(
+                    arr.map_err(|_| "Invalid BOOL value (true/false)")?,
+                ))
             }
             CalibrationType::U16Matrix(rows, cols) => {
                 let total = rows * cols;
@@ -1224,9 +1386,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<u16>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<u16>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid U16 value")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1241,9 +1401,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<u32>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<u32>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid U32 value")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1258,9 +1416,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<u64>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<u64>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid U64 value")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1275,9 +1431,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<i8>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<i8>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid I8 value")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1292,9 +1446,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<i16>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<i16>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid I16 value")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1309,9 +1461,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<i32>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<i32>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid I32 value")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1326,9 +1476,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<i64>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<i64>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid I64 value")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1343,9 +1491,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<f32>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<f32>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid F32 value")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1360,9 +1506,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<f64>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<f64>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid F64 value")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1377,9 +1521,7 @@ impl CalibrationManager {
                 if values.len() != total {
                     return Err(format!("Expected {} values, got {}", total, values.len()));
                 }
-                let flat: Result<Vec<bool>, _> = values.iter()
-                    .map(|s| s.trim().parse())
-                    .collect();
+                let flat: Result<Vec<bool>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid BOOL value (true/false)")?;
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1516,7 +1658,12 @@ impl CalibrationManager {
     /// Check if write access is allowed for a characteristic at the given address
     ///
     /// This combines segment lookup with page write permission check
-    pub fn is_write_allowed_for_address(&self, address: u32, address_ext: u8, current_page: u8) -> bool {
+    pub fn is_write_allowed_for_address(
+        &self,
+        address: u32,
+        address_ext: u8,
+        current_page: u8,
+    ) -> bool {
         if let Some(segment) = self.find_segment_for_address(address, address_ext) {
             self.is_page_write_allowed(segment, current_page)
         } else {
@@ -1681,21 +1828,39 @@ mod tests {
         let manager = CalibrationManager::new();
 
         let param_u8 = CalibrationParam::new("u8_test", 0x1000, 0x00, CalibrationType::U8);
-        assert_eq!(manager.parse_value(&param_u8, "255").unwrap().format(), "255");
+        assert_eq!(
+            manager.parse_value(&param_u8, "255").unwrap().format(),
+            "255"
+        );
         assert!(manager.parse_value(&param_u8, "256").is_err()); // overflow
 
         let param_u32 = CalibrationParam::new("u32_test", 0x1000, 0x00, CalibrationType::U32);
-        assert_eq!(manager.parse_value(&param_u32, "12345").unwrap().format(), "12345");
+        assert_eq!(
+            manager.parse_value(&param_u32, "12345").unwrap().format(),
+            "12345"
+        );
 
         let param_i32 = CalibrationParam::new("i32_test", 0x1000, 0x00, CalibrationType::I32);
-        assert_eq!(manager.parse_value(&param_i32, "-100").unwrap().format(), "-100");
+        assert_eq!(
+            manager.parse_value(&param_i32, "-100").unwrap().format(),
+            "-100"
+        );
 
         let param_f32 = CalibrationParam::new("f32_test", 0x1000, 0x00, CalibrationType::F32);
-        assert_eq!(manager.parse_value(&param_f32, "3.14").unwrap().format(), "3.140000");
+        assert_eq!(
+            manager.parse_value(&param_f32, "3.14").unwrap().format(),
+            "3.140000"
+        );
 
         let param_bool = CalibrationParam::new("bool_test", 0x1000, 0x00, CalibrationType::Bool);
-        assert_eq!(manager.parse_value(&param_bool, "true").unwrap().format(), "true");
-        assert_eq!(manager.parse_value(&param_bool, "false").unwrap().format(), "false");
+        assert_eq!(
+            manager.parse_value(&param_bool, "true").unwrap().format(),
+            "true"
+        );
+        assert_eq!(
+            manager.parse_value(&param_bool, "false").unwrap().format(),
+            "false"
+        );
     }
 
     #[test]
@@ -1722,7 +1887,8 @@ mod tests {
     fn test_parse_value_matrix() {
         let manager = CalibrationManager::new();
 
-        let param = CalibrationParam::new("mat_test", 0x1000, 0x00, CalibrationType::U16Matrix(2, 3));
+        let param =
+            CalibrationParam::new("mat_test", 0x1000, 0x00, CalibrationType::U16Matrix(2, 3));
         let value = manager.parse_value(&param, "1, 2, 3, 4, 5, 6").unwrap();
         match value {
             CalibrationValue::U16Matrix(mat) => {
@@ -1748,7 +1914,9 @@ mod tests {
         // Check segment names
         let segments = manager.get_memory_segments();
         assert!(segments.iter().any(|s| s.name == "segment_0_type_data"));
-        assert!(segments.iter().any(|s| s.name == "segment_1_type_offline_data"));
+        assert!(segments
+            .iter()
+            .any(|s| s.name == "segment_1_type_offline_data"));
         assert!(segments.iter().any(|s| s.name == "segment_2_type_code"));
     }
 
@@ -1759,12 +1927,21 @@ mod tests {
         // Segment 0:
         // - Page 0: XCP_WRITE_ACCESS_NOT_ALLOWED
         // - Page 1: XCP_WRITE_ACCESS_WITH_ECU_ONLY
-        assert!(!manager.is_page_write_allowed(0, 0), "Page 0 should not allow write");
-        assert!(manager.is_page_write_allowed(0, 1), "Page 1 should allow write");
+        assert!(
+            !manager.is_page_write_allowed(0, 0),
+            "Page 0 should not allow write"
+        );
+        assert!(
+            manager.is_page_write_allowed(0, 1),
+            "Page 1 should allow write"
+        );
 
         // Segment 2 (CODE segment):
         // - Page 0: XCP_WRITE_ACCESS_NOT_ALLOWED
-        assert!(!manager.is_page_write_allowed(2, 0), "CODE segment page 0 should not allow write");
+        assert!(
+            !manager.is_page_write_allowed(2, 0),
+            "CODE segment page 0 should not allow write"
+        );
     }
 
     #[test]
@@ -1793,18 +1970,30 @@ mod tests {
 
         // Segment 0: has pages 0 (no write) and 1 (write allowed)
         // -> segment allows calibration
-        assert!(manager.is_segment_calibration_allowed(0), "Segment 0 should allow calibration");
+        assert!(
+            manager.is_segment_calibration_allowed(0),
+            "Segment 0 should allow calibration"
+        );
 
         // Segment 1: has pages 0 (no write) and 1 (write allowed)
         // -> segment allows calibration
-        assert!(manager.is_segment_calibration_allowed(1), "Segment 1 should allow calibration");
+        assert!(
+            manager.is_segment_calibration_allowed(1),
+            "Segment 1 should allow calibration"
+        );
 
         // Segment 2 (CODE): has only page 0 (no write)
         // -> segment does NOT allow calibration
-        assert!(!manager.is_segment_calibration_allowed(2), "Segment 2 (CODE) should NOT allow calibration");
+        assert!(
+            !manager.is_segment_calibration_allowed(2),
+            "Segment 2 (CODE) should NOT allow calibration"
+        );
 
         // Non-existent segment
-        assert!(!manager.is_segment_calibration_allowed(99), "Non-existent segment should not allow calibration");
+        assert!(
+            !manager.is_segment_calibration_allowed(99),
+            "Non-existent segment should not allow calibration"
+        );
     }
 
     #[test]
@@ -1824,7 +2013,10 @@ mod tests {
         // Segment 2 (CODE): No pages with write
         // -> should return None
         let page = manager.find_write_allowed_page(2);
-        assert_eq!(page, None, "Should not find any write-allowed page for CODE segment");
+        assert_eq!(
+            page, None,
+            "Should not find any write-allowed page for CODE segment"
+        );
 
         // Non-existent segment
         let page = manager.find_write_allowed_page(99);
@@ -1838,17 +2030,29 @@ mod tests {
         // Segment 0: Page 0 no write (read-only), Page 1 has write
         // -> should find page 0 as read-only
         let page = manager.find_read_only_page(0);
-        assert_eq!(page, Some(0), "Should find page 0 as read-only for segment 0");
+        assert_eq!(
+            page,
+            Some(0),
+            "Should find page 0 as read-only for segment 0"
+        );
 
         // Segment 1: Page 0 no write, Page 1 has write
         // -> should find page 0 as read-only
         let page = manager.find_read_only_page(1);
-        assert_eq!(page, Some(0), "Should find page 0 as read-only for segment 1");
+        assert_eq!(
+            page,
+            Some(0),
+            "Should find page 0 as read-only for segment 1"
+        );
 
         // Segment 2 (CODE): Page 0 no write
         // -> should find page 0 as read-only
         let page = manager.find_read_only_page(2);
-        assert_eq!(page, Some(0), "Should find page 0 as read-only for CODE segment");
+        assert_eq!(
+            page,
+            Some(0),
+            "Should find page 0 as read-only for CODE segment"
+        );
 
         // Non-existent segment
         let page = manager.find_read_only_page(99);
@@ -1887,7 +2091,8 @@ mod tests {
 
     #[test]
     fn test_calibration_param_with_axis_info() {
-        let mut param = CalibrationParam::new("curve_param", 0x2000, 0, CalibrationType::F32Array(10));
+        let mut param =
+            CalibrationParam::new("curve_param", 0x2000, 0, CalibrationType::F32Array(10));
 
         // Add axis info
         let axis = crate::a2l::AxisInfo {
@@ -1921,7 +2126,8 @@ mod tests {
 
     #[test]
     fn test_calibration_param_axis_requires_memory_read() {
-        let mut param = CalibrationParam::new("map_param", 0x3000, 0, CalibrationType::F32Matrix(5, 10));
+        let mut param =
+            CalibrationParam::new("map_param", 0x3000, 0, CalibrationType::F32Matrix(5, 10));
 
         // Add axis that requires memory read
         let axis = crate::a2l::AxisInfo {
@@ -1977,11 +2183,7 @@ mod tests {
 
     #[test]
     fn test_matrix_to_flat_row_dir() {
-        let matrix = vec![
-            vec![1u32, 2, 3],
-            vec![4, 5, 6],
-            vec![7, 8, 9],
-        ];
+        let matrix = vec![vec![1u32, 2, 3], vec![4, 5, 6], vec![7, 8, 9]];
 
         let flat = matrix_to_flat(&matrix, 3, 3, StorageOrder::RowDir);
         assert_eq!(flat, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
@@ -1989,11 +2191,7 @@ mod tests {
 
     #[test]
     fn test_matrix_to_flat_column_dir() {
-        let matrix = vec![
-            vec![1u32, 2, 3],
-            vec![4, 5, 6],
-            vec![7, 8, 9],
-        ];
+        let matrix = vec![vec![1u32, 2, 3], vec![4, 5, 6], vec![7, 8, 9]];
 
         let flat = matrix_to_flat(&matrix, 3, 3, StorageOrder::ColumnDir);
         assert_eq!(flat, vec![1, 4, 7, 2, 5, 8, 3, 6, 9]);
@@ -2001,10 +2199,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_row_dir() {
-        let original = vec![
-            vec![1.0f32, 2.0, 3.0],
-            vec![4.0, 5.0, 6.0],
-        ];
+        let original = vec![vec![1.0f32, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
 
         let flat = matrix_to_flat(&original, 2, 3, StorageOrder::RowDir);
         let recovered = flat_to_matrix(&flat, 2, 3, StorageOrder::RowDir);
@@ -2014,10 +2209,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_column_dir() {
-        let original = vec![
-            vec![1.0f32, 2.0, 3.0],
-            vec![4.0, 5.0, 6.0],
-        ];
+        let original = vec![vec![1.0f32, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
 
         let flat = matrix_to_flat(&original, 2, 3, StorageOrder::ColumnDir);
         let recovered = flat_to_matrix(&flat, 2, 3, StorageOrder::ColumnDir);
@@ -2048,7 +2240,10 @@ mod tests {
             .expect("Failed to load calibration manager");
 
         // Find my_params.counter_on (uses BOOL enum)
-        let counter_on = manager.params().iter().find(|p| p.name == "my_params.counter_on");
+        let counter_on = manager
+            .params()
+            .iter()
+            .find(|p| p.name == "my_params.counter_on");
         assert!(counter_on.is_some(), "Should find my_params.counter_on");
 
         let param = counter_on.unwrap();
@@ -2058,7 +2253,10 @@ mod tests {
         assert_eq!(param.format_value(1), "true");
 
         // Find my_params.op_mode (uses OP_MODE enum with 5 states)
-        let op_mode = manager.params().iter().find(|p| p.name == "my_params.op_mode");
+        let op_mode = manager
+            .params()
+            .iter()
+            .find(|p| p.name == "my_params.op_mode");
         assert!(op_mode.is_some(), "Should find my_params.op_mode");
 
         let op_param = op_mode.unwrap();
@@ -2069,7 +2267,10 @@ mod tests {
         assert_eq!(op_param.parse_display("MODE_ON").unwrap(), 1);
 
         // Find my_params.state (uses STATE enum with 4 states)
-        let state = manager.params().iter().find(|p| p.name == "my_params.state");
+        let state = manager
+            .params()
+            .iter()
+            .find(|p| p.name == "my_params.state");
         assert!(state.is_some(), "Should find my_params.state");
 
         let state_param = state.unwrap();

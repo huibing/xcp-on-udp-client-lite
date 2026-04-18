@@ -340,7 +340,8 @@ pub async fn verify_segments(
                         Err(e) => {
                             tracing::warn!(
                                 "Failed to save page state for segment {}: {:?}",
-                                xcp_info.segment_number, e
+                                xcp_info.segment_number,
+                                e
                             );
                         }
                     }
@@ -416,10 +417,7 @@ pub async fn verify_segments(
                 master_checksum: 0,
                 slave_checksum: 0,
                 passed: false,
-                status: SegmentStatus::Skipped(format!(
-                    "No HEX data at 0x{:08X}",
-                    segment.address
-                )),
+                status: SegmentStatus::Skipped(format!("No HEX data at 0x{:08X}", segment.address)),
                 chunks: None,
             });
             continue;
@@ -473,12 +471,15 @@ pub async fn verify_segments(
         if let Err(e) = slave.set_cal_page(*seg_num, *original_page, 0x03).await {
             tracing::warn!(
                 "Failed to restore page {} for segment {}: {:?}",
-                original_page, seg_num, e
+                original_page,
+                seg_num,
+                e
             );
         } else {
             tracing::info!(
                 "Restored segment {} to original page {}",
-                seg_num, original_page
+                seg_num,
+                original_page
             );
         }
     }
@@ -523,8 +524,16 @@ async fn verify_segment_on_slave(
     }
 
     // Build checksum on slave, handling block size splitting
-    match slave_build_checksum(slave, address, size, address_extension, algorithm, hex_data, max_block_size)
-        .await
+    match slave_build_checksum(
+        slave,
+        address,
+        size,
+        address_extension,
+        algorithm,
+        hex_data,
+        max_block_size,
+    )
+    .await
     {
         Ok(slave_result) => {
             // Verify the returned checksum type matches expected
@@ -536,7 +545,8 @@ async fn verify_segment_on_slave(
                 );
             }
 
-            let passed = slave_result.combined_master_checksum == slave_result.combined_slave_checksum
+            let passed = slave_result.combined_master_checksum
+                == slave_result.combined_slave_checksum
                 && slave_result.all_chunks_passed;
             SegmentResult {
                 name: name.to_string(),
@@ -983,8 +993,11 @@ mod tests {
 
         // Each chunk CRC should be different from the full-data CRC
         let full_crc = checksum_crc32(&data);
-        assert_ne!(meta_crc32(&[crc1, crc2]), full_crc,
-            "CRC-of-CRCs should differ from CRC of whole data (CRC is not composable)");
+        assert_ne!(
+            meta_crc32(&[crc1, crc2]),
+            full_crc,
+            "CRC-of-CRCs should differ from CRC of whole data (CRC is not composable)"
+        );
 
         // But if both sides compute the same per-chunk CRCs, meta-CRC matches
         let master_meta = meta_crc32(&[crc1, crc2]);
@@ -1017,7 +1030,10 @@ mod tests {
             .wrapping_add(c2 as u8)
             .wrapping_add(c3 as u8)
             .wrapping_add(c4 as u8) as u32;
-        assert_eq!(combined, full, "ADD_11 should be composable via wrapping u8 add");
+        assert_eq!(
+            combined, full,
+            "ADD_11 should be composable via wrapping u8 add"
+        );
     }
 
     #[test]
@@ -1028,7 +1044,10 @@ mod tests {
         let c1 = checksum_add_12(&data[0..16]);
         let c2 = checksum_add_12(&data[16..32]);
         let combined = ((c1 as u16).wrapping_add(c2 as u16)) as u32;
-        assert_eq!(combined, full, "ADD_12 should be composable via wrapping u16 add");
+        assert_eq!(
+            combined, full,
+            "ADD_12 should be composable via wrapping u16 add"
+        );
     }
 
     #[test]
@@ -1039,7 +1058,10 @@ mod tests {
         let c1 = checksum_add_14(&data[0..16]);
         let c2 = checksum_add_14(&data[16..32]);
         let combined = c1.wrapping_add(c2);
-        assert_eq!(combined, full, "ADD_14 should be composable via wrapping u32 add");
+        assert_eq!(
+            combined, full,
+            "ADD_14 should be composable via wrapping u32 add"
+        );
     }
 
     #[test]
@@ -1051,7 +1073,10 @@ mod tests {
         let c1 = checksum_add_22(&data[0..16]);
         let c2 = checksum_add_22(&data[16..32]);
         let combined = ((c1 as u16).wrapping_add(c2 as u16)) as u32;
-        assert_eq!(combined, full, "ADD_22 should be composable via wrapping u16 add");
+        assert_eq!(
+            combined, full,
+            "ADD_22 should be composable via wrapping u16 add"
+        );
     }
 
     #[test]
@@ -1062,7 +1087,10 @@ mod tests {
         let c1 = checksum_add_24(&data[0..16]);
         let c2 = checksum_add_24(&data[16..32]);
         let combined = c1.wrapping_add(c2);
-        assert_eq!(combined, full, "ADD_24 should be composable via wrapping u32 add");
+        assert_eq!(
+            combined, full,
+            "ADD_24 should be composable via wrapping u32 add"
+        );
     }
 
     #[test]
@@ -1076,7 +1104,10 @@ mod tests {
         let c3 = checksum_add_44(&data[16..24]);
         let c4 = checksum_add_44(&data[24..32]);
         let combined = c1.wrapping_add(c2).wrapping_add(c3).wrapping_add(c4);
-        assert_eq!(combined, full, "ADD_44 should be composable via wrapping u32 add");
+        assert_eq!(
+            combined, full,
+            "ADD_44 should be composable via wrapping u32 add"
+        );
     }
 
     #[test]
@@ -1140,48 +1171,50 @@ mod tests {
     #[test]
     fn test_verification_report_all_skipped() {
         let report = VerificationReport {
-            results: vec![
-                SegmentResult {
-                    name: "seg0".to_string(),
-                    address: 0x1000,
-                    size: 256,
-                    algorithm: "N/A".to_string(),
-                    page: None,
-                    master_checksum: 0,
-                    slave_checksum: 0,
-                    passed: false,
-                    status: SegmentStatus::Skipped("No algorithm".to_string()),
-                    chunks: None,
-                },
-            ],
+            results: vec![SegmentResult {
+                name: "seg0".to_string(),
+                address: 0x1000,
+                size: 256,
+                algorithm: "N/A".to_string(),
+                page: None,
+                master_checksum: 0,
+                slave_checksum: 0,
+                passed: false,
+                status: SegmentStatus::Skipped("No algorithm".to_string()),
+                chunks: None,
+            }],
         };
         assert_eq!(report.total_segments(), 1);
         assert_eq!(report.passed(), 0);
         assert_eq!(report.failed(), 0);
         assert_eq!(report.skipped(), 1);
-        assert!(report.all_passed(), "All-skipped should count as all_passed (no failures or errors)");
+        assert!(
+            report.all_passed(),
+            "All-skipped should count as all_passed (no failures or errors)"
+        );
     }
 
     #[test]
     fn test_verification_report_with_errors() {
         let report = VerificationReport {
-            results: vec![
-                SegmentResult {
-                    name: "seg0".to_string(),
-                    address: 0x1000,
-                    size: 256,
-                    algorithm: "XCP_CRC_32".to_string(),
-                    page: None,
-                    master_checksum: 0,
-                    slave_checksum: 0,
-                    passed: false,
-                    status: SegmentStatus::Error("Timeout".to_string()),
-                    chunks: None,
-                },
-            ],
+            results: vec![SegmentResult {
+                name: "seg0".to_string(),
+                address: 0x1000,
+                size: 256,
+                algorithm: "XCP_CRC_32".to_string(),
+                page: None,
+                master_checksum: 0,
+                slave_checksum: 0,
+                passed: false,
+                status: SegmentStatus::Error("Timeout".to_string()),
+                chunks: None,
+            }],
         };
         assert_eq!(report.errors(), 1);
-        assert!(!report.all_passed(), "Should not be all_passed if there are errors");
+        assert!(
+            !report.all_passed(),
+            "Should not be all_passed if there are errors"
+        );
     }
 
     #[test]
@@ -1199,8 +1232,20 @@ mod tests {
                     passed: true,
                     status: SegmentStatus::Pass,
                     chunks: Some(vec![
-                        ChunkResult { offset: 0, size: 1024, master_checksum: 0xAA, slave_checksum: 0xAA, passed: true },
-                        ChunkResult { offset: 1024, size: 1024, master_checksum: 0xBB, slave_checksum: 0xBB, passed: true },
+                        ChunkResult {
+                            offset: 0,
+                            size: 1024,
+                            master_checksum: 0xAA,
+                            slave_checksum: 0xAA,
+                            passed: true,
+                        },
+                        ChunkResult {
+                            offset: 1024,
+                            size: 1024,
+                            master_checksum: 0xBB,
+                            slave_checksum: 0xBB,
+                            passed: true,
+                        },
                     ]),
                 },
                 SegmentResult {
@@ -1214,8 +1259,20 @@ mod tests {
                     passed: false,
                     status: SegmentStatus::Fail,
                     chunks: Some(vec![
-                        ChunkResult { offset: 0, size: 1024, master_checksum: 0xCC, slave_checksum: 0xCC, passed: true },
-                        ChunkResult { offset: 1024, size: 1024, master_checksum: 0xDD, slave_checksum: 0xEE, passed: false },
+                        ChunkResult {
+                            offset: 0,
+                            size: 1024,
+                            master_checksum: 0xCC,
+                            slave_checksum: 0xCC,
+                            passed: true,
+                        },
+                        ChunkResult {
+                            offset: 1024,
+                            size: 1024,
+                            master_checksum: 0xDD,
+                            slave_checksum: 0xEE,
+                            passed: false,
+                        },
                     ]),
                 },
             ],
@@ -1231,7 +1288,13 @@ mod tests {
         assert!(first.chunks.as_ref().unwrap().iter().all(|c| c.passed));
 
         let second = &report.results[1];
-        let failing_chunks: Vec<_> = second.chunks.as_ref().unwrap().iter().filter(|c| !c.passed).collect();
+        let failing_chunks: Vec<_> = second
+            .chunks
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|c| !c.passed)
+            .collect();
         assert_eq!(failing_chunks.len(), 1);
         assert_eq!(failing_chunks[0].offset, 1024);
     }
@@ -1276,10 +1339,7 @@ mod tests {
         let data = test_pattern();
 
         // 2 chunks
-        let meta_2 = meta_crc32(&[
-            checksum_crc32(&data[0..16]),
-            checksum_crc32(&data[16..32]),
-        ]);
+        let meta_2 = meta_crc32(&[checksum_crc32(&data[0..16]), checksum_crc32(&data[16..32])]);
 
         // 4 chunks
         let meta_4 = meta_crc32(&[
@@ -1289,7 +1349,10 @@ mod tests {
             checksum_crc32(&data[24..32]),
         ]);
 
-        assert_ne!(meta_2, meta_4, "Different chunk sizes should produce different meta-CRCs");
+        assert_ne!(
+            meta_2, meta_4,
+            "Different chunk sizes should produce different meta-CRCs"
+        );
     }
 
     #[test]

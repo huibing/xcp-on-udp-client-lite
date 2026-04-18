@@ -71,7 +71,6 @@ pub struct MessageRouter {
 
     /// Running flag
     running: Arc<std::sync::atomic::AtomicBool>,
-
 }
 
 impl MessageRouter {
@@ -116,7 +115,8 @@ impl MessageRouter {
             return;
         }
 
-        self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let running = self.running.clone();
         let cto_tx = self.cto_tx.clone();
@@ -193,7 +193,8 @@ impl MessageRouter {
 
     /// Stop the router
     pub async fn stop(&self) {
-        self.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
 
         let mut task_guard = self.router_task.lock().await;
         if let Some(handle) = task_guard.take() {
