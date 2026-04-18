@@ -15,7 +15,7 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 - **CLI Subcommands**: Non-interactive `calibrate`, `verify`, and `daq-record` for CI/automation
 - **Web UI**: Browser-based interface with multi-slave management
 - **TUI**: Interactive terminal UI for single-device debugging
-- **Transport Abstraction**: UDP support with CAN reserved for future extension
+- **Transport Abstraction**: UDP and TCP support with CAN reserved for future extension
 
 ## Supported Data Types
 
@@ -34,15 +34,18 @@ main.rs (Application Entry)
     │
 lib.rs → client.rs (XcpClient - Multi-Slave Manager)
     │
-    ├── protocol/          # XCP Protocol Layer
-    │   ├── types.rs       # Command codes, error codes, MTA, ConnectInfo
-    │   ├── commands.rs    # Command builders
-    │   └── responses.rs   # Response parsers
+    ├── protocol.rs        # XCP Protocol Layer entrypoint
+    │   └── protocol/
+    │       ├── types.rs       # Command codes, error codes, MTA, ConnectInfo
+    │       ├── commands.rs    # Command builders
+    │       └── responses.rs   # Response parsers
     │
-    ├── transport/         # Transport Abstraction Layer
-    │   ├── transport.rs   # Transport trait and factory
-    │   ├── udp.rs         # UDP transport (XCP-on-UDP/IP)
-    │   └── can.rs         # CAN transport (reserved)
+    ├── transport.rs       # Transport Abstraction Layer entrypoint
+    │   └── transport/
+    │       ├── transport.rs   # Transport trait and factory
+    │       ├── udp.rs         # UDP transport (XCP-on-UDP/IP)
+    │       ├── tcp.rs         # TCP transport (XCP-on-TCP/IP)
+    │       └── can.rs         # CAN transport (reserved)
     │
     ├── slave.rs           # XcpSlave - Individual slave context
     ├── calibration.rs     # Calibration parameter management
@@ -54,20 +57,23 @@ lib.rs → client.rs (XcpClient - Multi-Slave Manager)
     ├── verify.rs          # CLI verify subcommand
     ├── daq_record.rs      # CLI daq-record subcommand
     │
-    ├── a2l/               # A2L description file support
-    │   ├── reader.rs      # A2L file parser
-    │   ├── types.rs       # A2L data types
-    │   └── compute_method.rs  # COMPU_METHOD conversion
+    ├── a2l.rs             # A2L description file support entrypoint
+    │   └── a2l/
+    │       ├── reader.rs      # A2L file parser
+    │       ├── types.rs       # A2L data types
+    │       └── compute_method.rs  # COMPU_METHOD conversion
     │
-    ├── tui/               # Terminal UI (single-device mode)
-    │   └── app.rs         # Ratatui-based interactive CLI
+    ├── tui.rs             # Terminal UI entrypoint
+    │   └── tui/
+    │       └── app.rs         # Ratatui-based interactive CLI
     │
-    └── web/               # Web UI (multi-device mode)
-        ├── server.rs      # Axum HTTP server
-        ├── auth.rs        # Session authentication
-        ├── routes.rs      # HTTP route handlers
-        ├── state.rs       # Multi-slave state management
-        └── templates.rs   # HTML templates
+    └── web.rs             # Web UI entrypoint
+        └── web/
+            ├── server.rs      # Axum HTTP server
+            ├── auth.rs        # Session authentication
+            ├── routes.rs      # HTTP route handlers
+            ├── state.rs       # Multi-slave state management
+            └── templates.rs   # HTML templates
 ```
 
 ## Requirements
@@ -86,6 +92,28 @@ cargo build --release
 ```
 
 ## Usage
+
+### Transport Configuration
+
+The transport abstraction currently supports:
+
+- **UDP**: datagram-based XCP-on-Ethernet transport
+- **TCP**: stream-based XCP-on-Ethernet transport with the same 16-bit `LEN` and 16-bit packet counter header as UDP
+- **CAN**: reserved skeleton only
+
+Library code can select the transport explicitly:
+
+```rust
+use xcp_client::transport::TransportConfig;
+
+let udp = TransportConfig::Udp {
+    addr: "127.0.0.1:5555".to_string(),
+};
+
+let tcp = TransportConfig::Tcp {
+    addr: "127.0.0.1:5555".to_string(),
+};
+```
 
 ### Run Web UI
 
@@ -419,7 +447,7 @@ cargo test test_name -- --nocapture
 
 ### Test Coverage
 
-- **Transport Layer**: UDP transport, message routing
+- **Transport Layer**: UDP transport, TCP transport, message routing
 - **Protocol Layer**: Command builders, response parsers
 - **Slave Management**: Multi-slave connection, state management
 - **Calibration**: Parameter read/write, A2L parsing
@@ -510,5 +538,5 @@ Contributions are welcome! Please feel free to submit pull requests.
 - ✅ Each slave has independent A2L data
 - ✅ Device-associated variable display
 - ✅ Web UI multi-slave management
-- ✅ Transport abstraction layer (UDP/CAN)
+- ✅ Transport abstraction layer (UDP/TCP/CAN)
 - ✅ Backward-compatible single-device API

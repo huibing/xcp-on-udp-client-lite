@@ -214,13 +214,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_transport_factory_tcp_not_implemented() {
+    async fn test_transport_factory_tcp_connects() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+        });
+
         let config = TransportConfig::Tcp {
-            addr: "127.0.0.1:5555".to_string(),
+            addr: addr.to_string(),
         };
 
-        let transport = TransportFactory::create(&config).await.expect("tcp skeleton should be constructible");
+        let transport = TransportFactory::create(&config).await.expect("tcp transport should connect");
         assert_eq!(transport.transport_type(), TransportType::Tcp);
-        assert_eq!(transport.target_addr(), "127.0.0.1:5555");
+        assert_eq!(transport.target_addr(), addr.to_string());
+        transport.close().await.unwrap();
+        server.await.unwrap();
     }
 }
