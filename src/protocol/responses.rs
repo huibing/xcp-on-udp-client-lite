@@ -1,67 +1,44 @@
 //! XCP Response Parsers
 //!
-//! Responses include a 4-byte XCP on Ethernet transport layer header:
-//! [LEN_L, LEN_H, COUNTER_L, COUNTER_H, response_data...]
-//! where LEN = size of response_data, COUNTER = echoed from command (2 bytes, little-endian)
+//! Response parsing in this module is transport-agnostic.
+//! Callers must pass a pure XCP payload with any transport framing already removed.
 
 use super::types::{ConnectInfo, ErrorCode, Response};
 
-/// Transport layer header parsed result
-pub struct TlHeader {
-    /// Length of the XCP response packet (after header)
-    pub length: usize,
-    /// Counter echoed from the command (for request/response matching)
-    pub counter: u16,
-}
-
-/// Parse transport layer header
-/// Returns header info and payload starts at index 4
-fn parse_tl_header(data: &[u8]) -> Result<TlHeader, String> {
-    if data.len() < 4 {
-        return Err("Response too short for TL header".to_string());
-    }
-    let length = data[0] as usize | ((data[1] as usize) << 8);
-    let counter = data[2] as u16 | ((data[3] as u16) << 8);
-    Ok(TlHeader { length, counter })
-}
-
 /// Parse XCP response packet
-/// Returns the parsed response along with the counter from the header
+/// Expects a pure XCP payload where the first byte is the PID.
 pub fn parse_response(data: &[u8]) -> Result<Response, String> {
-    let _header = parse_tl_header(data)?;
-    let payload_start = 4; // Header is always 4 bytes
-
-    if data.len() < payload_start + 1 {
+    if data.is_empty() {
         return Err("Response too short".to_string());
     }
 
-    let pid = data[payload_start];
+    let pid = data[0];
 
     match pid {
         0xFF => {
             // Positive response: RES
-            let res_data = data[payload_start + 1..].to_vec();
+            let res_data = data[1..].to_vec();
             // Note: response data includes the command code echo, so actual data starts at +1
             Ok(Response::Res(res_data))
         }
         0xFE => {
             // Negative response: ERR
-            if data.len() < payload_start + 2 {
+            if data.len() < 2 {
                 return Err("Error response too short".to_string());
             }
             // ERR format: [pid, error_code, ...]
-            let err_code = data[payload_start + 1];
+            let err_code = data[1];
             Ok(Response::Err(ErrorCode::from(err_code)))
         }
         0xFD => {
             // EV (Event) packet - same format as DAQ
             // PID, DAQ list number (2 bytes), ODT number (1 byte), data
-            if data.len() < payload_start + 4 {
+            if data.len() < 4 {
                 return Err("EV packet too short".to_string());
             }
-            let daq_list = u16::from_le_bytes([data[payload_start + 1], data[payload_start + 2]]);
-            let odt = data[payload_start + 3];
-            let daq_data = data[payload_start + 4..].to_vec();
+            let daq_list = u16::from_le_bytes([data[1], data[2]]);
+            let odt = data[3];
+            let daq_data = data[4..].to_vec();
             Ok(Response::Daq {
                 daq_list,
                 odt,
@@ -75,12 +52,12 @@ pub fn parse_response(data: &[u8]) -> Result<Response, String> {
         // DAQ packets: PID < 0xFC (0x00 - 0xFB)
         _ if pid < 0xFC => {
             // DAQ packet: PID, DAQ list number (2 bytes), ODT number (1 byte), data
-            if data.len() < payload_start + 4 {
+            if data.len() < 4 {
                 return Err("DAQ packet too short".to_string());
             }
-            let daq_list = u16::from_le_bytes([data[payload_start + 1], data[payload_start + 2]]);
-            let odt = data[payload_start + 3];
-            let daq_data = data[payload_start + 4..].to_vec();
+            let daq_list = u16::from_le_bytes([data[1], data[2]]);
+            let odt = data[3];
+            let daq_data = data[4..].to_vec();
             Ok(Response::Daq {
                 daq_list,
                 odt,
@@ -91,17 +68,21 @@ pub fn parse_response(data: &[u8]) -> Result<Response, String> {
     }
 }
 
-/// Parse XCP response packet with counter
-/// Returns the parsed response along with the counter from the header
-pub fn parse_response_with_counter(data: &[u8]) -> Result<(Response, u16), String> {
-    let header = parse_tl_header(data)?;
-    let response = parse_response(data)?;
-    Ok((response, header.counter))
+/// Parse a negative response and return both the error code and its parameter bytes.
+pub fn parse_error_response(data: &[u8]) -> Result<(ErrorCode, Vec<u8>), String> {
+    if data.len() < 2 {
+        return Err("Error response too short".to_string());
+    }
+    if data[0] != 0xFE {
+        return Err(format!("Not an ERR packet: 0x{:02X}", data[0]));
+    }
+
+    Ok((ErrorCode::from(data[1]), data[2..].to_vec()))
 }
 
 /// Parse CONNECT response
 pub fn parse_connect_response(data: &[u8]) -> Result<ConnectInfo, String> {
-    // Response format (after TL header) per XCP Protocol Specification:
+    // Response format per XCP spec payload:
     // BYTE 0: resource
     // BYTE 1: comm_mode_basic
     // BYTE 2: max_cto (1 byte!)
@@ -124,7 +105,7 @@ pub fn parse_connect_response(data: &[u8]) -> Result<ConnectInfo, String> {
 /// Parse GET_ID response
 /// Returns (length, data) where data is the ID string
 pub fn parse_get_id_response(data: &[u8]) -> Result<(u32, String), String> {
-    // Response format (after TL header):
+    // Response format:
     // [mode, 0, 0, length_l, length_m, length_h, 0, ...upload_data]
     if data.len() < 7 {
         return Err("GET_ID response too short".to_string());
@@ -165,7 +146,7 @@ pub struct DaqProcessorInfo {
 
 /// Parse DAQ resolution info response
 pub fn parse_daq_resolution_info(data: &[u8]) -> Result<DaqResolutionInfo, String> {
-    if data.len() < 6 {
+    if data.len() < 7 {
         return Err("DAQ resolution info response too short".to_string());
     }
 
@@ -256,34 +237,9 @@ mod tests {
     use super::super::types::{ErrorCode, Response};
 
     #[test]
-    fn test_parse_tl_header_valid() {
-        // TL header: len=10, counter=42
-        let data = vec![0x0A, 0x00, 0x2A, 0x00, 0xFF];
-        let header = parse_tl_header(&data).unwrap();
-        assert_eq!(header.length, 10);
-        assert_eq!(header.counter, 42);
-    }
-
-    #[test]
-    fn test_parse_tl_header_too_short() {
-        let data = vec![0x01, 0x02, 0x03];
-        assert!(parse_tl_header(&data).is_err());
-    }
-
-    #[test]
-    fn test_parse_tl_header_large_values() {
-        // len=65535 (max u16), counter=65535
-        let data = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x00];
-        let header = parse_tl_header(&data).unwrap();
-        assert_eq!(header.length, 65535);
-        assert_eq!(header.counter, 65535);
-    }
-
-    #[test]
     fn test_parse_response_positive() {
-        // TL header: len=4, counter=1
         // Payload: PID=0xFF (RES), data=[0x01, 0x02, 0x03]
-        let data = vec![0x04, 0x00, 0x01, 0x00, 0xFF, 0x01, 0x02, 0x03];
+        let data = vec![0xFF, 0x01, 0x02, 0x03];
         let response = parse_response(&data).unwrap();
         match response {
             Response::Res(res_data) => {
@@ -295,9 +251,8 @@ mod tests {
 
     #[test]
     fn test_parse_response_error() {
-        // TL header: len=2, counter=1
         // Payload: PID=0xFE (ERR), error_code=0x21 (CommandSyntax)
-        let data = vec![0x02, 0x00, 0x01, 0x00, 0xFE, 0x21];
+        let data = vec![0xFE, 0x21];
         let response = parse_response(&data).unwrap();
         match response {
             Response::Err(err_code) => {
@@ -309,9 +264,8 @@ mod tests {
 
     #[test]
     fn test_parse_response_daq() {
-        // TL header: len=6, counter=1
         // Payload: PID=0xC0, daq_list=0x0001, odt=0x02, data=[0xAB, 0xCD]
-        let data = vec![0x06, 0x00, 0x01, 0x00, 0xC0, 0x01, 0x00, 0x02, 0xAB, 0xCD];
+        let data = vec![0xC0, 0x01, 0x00, 0x02, 0xAB, 0xCD];
         let response = parse_response(&data).unwrap();
         match response {
             Response::Daq { daq_list, odt, data } => {
@@ -326,7 +280,7 @@ mod tests {
     #[test]
     fn test_parse_response_serv_packet() {
         // SERV packet (0xFC) should return not implemented error
-        let data = vec![0x01, 0x00, 0x01, 0x00, 0xFC];
+        let data = vec![0xFC];
         let result = parse_response(&data);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not implemented"));
@@ -334,30 +288,23 @@ mod tests {
 
     #[test]
     fn test_parse_response_too_short() {
-        // Only TL header, no payload
-        let data = vec![0x00, 0x00, 0x01, 0x00];
+        let data = vec![];
         assert!(parse_response(&data).is_err());
     }
 
     #[test]
     fn test_parse_response_error_too_short() {
         // ERR response with no error code
-        let data = vec![0x01, 0x00, 0x01, 0x00, 0xFE];
+        let data = vec![0xFE];
         assert!(parse_response(&data).is_err());
     }
 
     #[test]
-    fn test_parse_response_with_counter() {
-        // TL header: len=1, counter=12345
-        let data = vec![0x01, 0x00, 0x39, 0x30, 0xFF];
-        let (response, counter) = parse_response_with_counter(&data).unwrap();
-        assert_eq!(counter, 12345);
-        match response {
-            Response::Res(res_data) => {
-                assert!(res_data.is_empty()); // No data after PID
-            }
-            _ => panic!("Expected Res response"),
-        }
+    fn test_parse_error_response_with_parameters() {
+        let data = vec![0xFE, 0x22, 0x02, 0x00, 0x40, 0x00, 0x00, 0x00];
+        let (err, params) = parse_error_response(&data).unwrap();
+        assert_eq!(err, ErrorCode::ParameterOutOfRange);
+        assert_eq!(params, vec![0x02, 0x00, 0x40, 0x00, 0x00, 0x00]);
     }
 
     #[test]

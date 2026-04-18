@@ -612,6 +612,14 @@ mod tests {
     }
 
     #[test]
+    fn test_transport_config_tcp_creation() {
+        let config = TransportConfig::Tcp {
+            addr: "127.0.0.1:5555".to_string(),
+        };
+        assert_eq!(config.transport_type(), crate::transport::TransportType::Tcp);
+    }
+
+    #[test]
     fn test_slave_info_creation() {
         let info = SlaveInfo {
             id: SlaveId::new(),

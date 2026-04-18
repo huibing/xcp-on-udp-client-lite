@@ -10,9 +10,9 @@ pub mod reader;
 pub mod types;
 
 // Re-export commonly used types
-pub use compute_method::{CompuMethod, CompuVtabEntry, CompuMethodFactory};
+pub use compute_method::{CompuMethod, CompuMethodFactory, CompuVtabEntry};
 pub use reader::{
-    A2lReader, A2lCharacteristic, A2lMeasurement, A2lMemorySegment,
-    AxisInfo, AxisPointSource, XcpChecksum, XcpSegmentInfo, XcpPage,
+    A2lCharacteristic, A2lMeasurement, A2lMemorySegment, A2lReader, AxisInfo, AxisPointSource,
+    XcpChecksum, XcpPage, XcpSegmentInfo,
 };
-pub use types::{A2lDataType, CharacteristicType, StorageOrder, DaqEvent};
+pub use types::{A2lDataType, CharacteristicType, DaqEvent, StorageOrder};

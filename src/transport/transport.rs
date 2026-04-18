@@ -1,6 +1,6 @@
 //! Transport abstraction layer for XCP
 //!
-//! Provides a unified interface for different transport protocols (UDP, CAN, etc.)
+//! Provides a unified interface for different transport protocols (UDP, TCP, CAN, etc.)
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TransportType {
     Udp,
+    Tcp,
     Can,
 }
 
@@ -17,6 +18,7 @@ impl TransportType {
     pub fn as_str(&self) -> &'static str {
         match self {
             TransportType::Udp => "UDP",
+            TransportType::Tcp => "TCP",
             TransportType::Can => "CAN",
         }
     }
@@ -27,6 +29,7 @@ impl TransportType {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TransportConfig {
     Udp { addr: String },
+    Tcp { addr: String },
     Can { channel: String, can_id: u32 },
 }
 
@@ -34,6 +37,7 @@ impl TransportConfig {
     pub fn transport_type(&self) -> TransportType {
         match self {
             TransportConfig::Udp { .. } => TransportType::Udp,
+            TransportConfig::Tcp { .. } => TransportType::Tcp,
             TransportConfig::Can { .. } => TransportType::Can,
         }
     }
@@ -42,6 +46,7 @@ impl TransportConfig {
     pub fn addr_string(&self) -> String {
         match self {
             TransportConfig::Udp { addr } => addr.clone(),
+            TransportConfig::Tcp { addr } => addr.clone(),
             TransportConfig::Can { channel, can_id } => {
                 format!("{}:{:03X}", channel, can_id)
             }
@@ -89,10 +94,10 @@ pub trait Transport: Send + Sync {
     /// Send a command and wait for response
     async fn send_command(&self, command: &[u8]) -> Result<Vec<u8>, TransportError>;
 
-    /// Receive a packet (blocking)
+    /// Receive one normalized XCP payload packet (blocking)
     async fn recv_packet(&self) -> Result<Vec<u8>, TransportError>;
 
-    /// Try to receive a packet with timeout
+    /// Try to receive one normalized XCP payload packet with timeout
     async fn try_recv_packet(&self, timeout_ms: u64) -> Result<Option<Vec<u8>>, TransportError>;
 
     /// Close the connection
@@ -103,9 +108,6 @@ pub trait Transport: Send + Sync {
 
     /// Get target address string (for logging/display)
     fn target_addr(&self) -> String;
-
-    /// Get current packet counter
-    fn current_counter(&self) -> u16;
 }
 
 /// Transport factory for creating transport instances
@@ -117,6 +119,10 @@ impl TransportFactory {
         match config {
             TransportConfig::Udp { addr } => {
                 let transport = super::udp::UdpTransport::connect(addr).await?;
+                Ok(Arc::new(transport))
+            }
+            TransportConfig::Tcp { addr } => {
+                let transport = super::tcp::TcpTransport::connect(addr).await?;
                 Ok(Arc::new(transport))
             }
             TransportConfig::Can { .. } => Err(TransportError::NotImplemented(
@@ -133,6 +139,7 @@ mod tests {
     #[test]
     fn test_transport_type_as_str() {
         assert_eq!(TransportType::Udp.as_str(), "UDP");
+        assert_eq!(TransportType::Tcp.as_str(), "TCP");
         assert_eq!(TransportType::Can.as_str(), "CAN");
     }
 
@@ -156,6 +163,15 @@ mod tests {
     }
 
     #[test]
+    fn test_transport_config_tcp() {
+        let config = TransportConfig::Tcp {
+            addr: "127.0.0.1:5555".to_string(),
+        };
+        assert_eq!(config.transport_type(), TransportType::Tcp);
+        assert_eq!(config.addr_string(), "127.0.0.1:5555");
+    }
+
+    #[test]
     fn test_transport_error_display() {
         let err = TransportError::InvalidAddress("test".to_string());
         assert!(err.to_string().contains("Invalid address"));
@@ -171,8 +187,11 @@ mod tests {
     #[test]
     fn test_transport_type_equality() {
         assert_eq!(TransportType::Udp, TransportType::Udp);
+        assert_eq!(TransportType::Tcp, TransportType::Tcp);
         assert_eq!(TransportType::Can, TransportType::Can);
+        assert_ne!(TransportType::Udp, TransportType::Tcp);
         assert_ne!(TransportType::Udp, TransportType::Can);
+        assert_ne!(TransportType::Tcp, TransportType::Can);
     }
 
     #[test]
@@ -189,7 +208,19 @@ mod tests {
         use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(TransportType::Udp);
+        set.insert(TransportType::Tcp);
         set.insert(TransportType::Can);
-        assert_eq!(set.len(), 2);
+        assert_eq!(set.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_transport_factory_tcp_not_implemented() {
+        let config = TransportConfig::Tcp {
+            addr: "127.0.0.1:5555".to_string(),
+        };
+
+        let transport = TransportFactory::create(&config).await.expect("tcp skeleton should be constructible");
+        assert_eq!(transport.transport_type(), TransportType::Tcp);
+        assert_eq!(transport.target_addr(), "127.0.0.1:5555");
     }
 }

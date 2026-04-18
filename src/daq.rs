@@ -1302,7 +1302,7 @@ impl DaqManager {
                 match msg {
                     Ok(Some(msg)) => {
                         // Parse single DTO packet
-                        if let Some(data) = parse_dto_packet(&msg.data, timestamp_size, &iden_field_type) {
+                        if let Some(data) = parse_dto_packet(&msg.payload, timestamp_size, &iden_field_type) {
                             // Get configuration for this DAQ list and ODT
                             let config = daq_config.read().await;
 
@@ -1966,25 +1966,16 @@ impl Default for DaqManager {
 
 /// Parse a single DTO packet from slave
 ///
-/// DTO packet format (XCP on Ethernet):
-/// - 4 bytes: Transport header [LEN_L, LEN_H, COUNTER_L, COUNTER_H]
-/// - 1 byte: PID (DAQ list number | 0xC0)
+/// DTO packet payload format:
+/// - 1 byte: PID / identification start
 /// - N bytes: ODT data (including identification field and timestamp)
 fn parse_dto_packet(packet: &[u8], timestamp_size: u8, ind_field_type: &IdentificationFieldType) -> Option<DtoData> {
-    // Minimum size: 4 (header) + 1 (PID) = 5 bytes
-    if packet.len() < 5 {
+    if packet.is_empty() {
         tracing::error!("DTO packet too short: {} bytes", packet.len());
         return None;
     }
 
     let mut cur = Cursor::new(packet);
-
-    // Parse XCP header: [LEN_L, LEN_H, COUNTER_L, COUNTER_H]
-    let mut buf = [0u8; 2];
-    cur.read_exact(&mut buf).ok()?;
-    let len = u16::from_le_bytes(buf) as usize;
-    cur.read_exact(&mut buf).ok()?;
-    let _counter = u16::from_le_bytes(buf);
 
     // Parse identification field based on type
     let (daq_list, odt, pid_size) = match ind_field_type {
@@ -2040,11 +2031,8 @@ fn parse_dto_packet(packet: &[u8], timestamp_size: u8, ind_field_type: &Identifi
         }
     };
 
-    // Calculate and read ODT data
-    // len = identification field size + timestamp size + data size
-    let data_len = len.saturating_sub(pid_size).saturating_sub(timestamp_size as usize);
-    let mut data = vec![0u8; data_len];
-    cur.read_exact(&mut data).ok()?;
+    let mut data = Vec::with_capacity(packet.len().saturating_sub(pid_size));
+    cur.read_to_end(&mut data).ok()?;
 
     Some(DtoData {
         daq_list,
@@ -2511,10 +2499,9 @@ mod tests {
 
     #[test]
     fn test_parse_dto_packet() {
-        // Valid DTO packet: header + ODT (0x00) + data (AbosulteODT mode)
+        // Valid DTO payload: ODT (0x00) + data (AbosulteODT mode)
         // Note: In AbosulteODT mode, the ODT number is absolute, daq_list is None
-        // XCP header: len=5, counter=1, then ODT=0x00, then 4 bytes data
-        let packet = [0x05, 0x00, 0x01, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04];
+        let packet = [0x00, 0x01, 0x02, 0x03, 0x04];
         let result = parse_dto_packet(&packet, 0, &IdentificationFieldType::AbosulteODT);
         assert!(result.is_some());
         let data = result.unwrap();
@@ -2523,17 +2510,16 @@ mod tests {
         assert_eq!(data.data, vec![0x01, 0x02, 0x03, 0x04]);
 
         // Test with RelativeODT mode - includes DAQ list
-        // Format: header + ODT (1 byte) + DAQ list (1 byte) + data
-        // XCP header: len=6, counter=2, then ODT=0x01, DAQ=0x01, then 4 bytes data
-        let packet = [0x06, 0x00, 0x02, 0x00, 0x01, 0x01, 0xAA, 0xBB, 0xCC, 0xDD];
+        // Format: ODT (1 byte) + DAQ list (1 byte) + data
+        let packet = [0x01, 0x01, 0xAA, 0xBB, 0xCC, 0xDD];
         let result = parse_dto_packet(&packet, 0, &IdentificationFieldType::RelatetiveODTBYTE);
         assert!(result.is_some());
         let data = result.unwrap();
         assert_eq!(data.daq_list, Some(1));
         assert_eq!(data.odt, 0x01);
 
-        // Packet too short (less than 5 bytes)
-        let packet = [0x01, 0x00, 0x01, 0x00];
+        // Packet too short (missing PID/data payload bytes)
+        let packet = [];
         let result = parse_dto_packet(&packet, 0, &IdentificationFieldType::AbosulteODT);
         assert!(result.is_none());
     }

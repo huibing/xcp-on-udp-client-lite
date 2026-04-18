@@ -93,11 +93,6 @@ impl Transport for CanTransport {
     fn target_addr(&self) -> String {
         format!("{}:0x{:03X}", self.channel, self.can_id)
     }
-
-    fn current_counter(&self) -> u16 {
-        // CAN doesn't use packet counters like UDP
-        0
-    }
 }
 
 /// Create a CAN transport from configuration

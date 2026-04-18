@@ -7,7 +7,8 @@ use crate::a2l::A2lMemorySegment;
 use crate::calibration::CalibrationManager;
 use crate::daq::DaqManager;
 use crate::protocol::{
-    commands, parse_connect_response, parse_get_id_response, parse_response, parse_checksum,
+    commands, parse_checksum, parse_checksum_error, parse_connect_response, parse_error_response,
+    parse_get_id_response, parse_response,
     ConnectInfo, ErrorCode,
     Mta, Response,
 };
@@ -208,7 +209,6 @@ impl XcpSlave {
 
         // Create message router
         let router = Arc::new(MessageRouter::new(100));
-        router.reset_counter().await;
 
         let cto_rx = router.get_cto_receiver();
         let _dto_rx = router.get_dto_receiver();
@@ -294,8 +294,8 @@ impl XcpSlave {
         match timeout(Duration::from_secs(1), rx.recv()).await {
             Ok(Some(msg)) => {
                 // Check for negative response
-                if let Ok(Response::Err(err_code)) = parse_response(&msg.data) {
-                    let cmd_code = command.get(4).copied().unwrap_or(0xFF);
+                if let Ok(Response::Err(err_code)) = parse_response(&msg.payload) {
+                    let cmd_code = command.first().copied().unwrap_or(0xFF);
                     tracing::error!(
                         "XCP Negative Response from {}: cmd=0x{:02X}, err={:?}",
                         self.info.name,
@@ -303,7 +303,7 @@ impl XcpSlave {
                         err_code
                     );
                 }
-                Ok(msg.data)
+                Ok(msg.payload)
             }
             Ok(None) => Err(SlaveError::NotConnected),
             Err(_) => Err(SlaveError::ResponseTimeout),
@@ -1161,16 +1161,9 @@ impl XcpSlave {
             .await?;
 
         // Check for ERR_OUT_OF_RANGE with max_block_size before normal parsing.
-        // Raw response format: [TL header (4)] [PID (1)] [error_code (1)] [params...]
-        // For BUILD_CHECKSUM error: params = [alignment (2)] [max_block_size (4)]
-        if response.len() >= 6 && response[4] == 0xFE {
-            let err_code = response[5];
-            if err_code == 0x22 && response.len() >= 12 {
-                let _alignment = u16::from_le_bytes([response[6], response[7]]);
-                let slave_max_block = u32::from_le_bytes([
-                    response[8], response[9], response[10], response[11],
-                ]);
-
+        // Error payload format: [alignment (2)] [max_block_size (4)].
+        if let Ok((ErrorCode::ParameterOutOfRange, params)) = parse_error_response(&response) {
+            if let Ok((_alignment, slave_max_block)) = parse_checksum_error(&params) {
                 if slave_max_block > 0 && slave_max_block < block_size {
                     tracing::info!(
                         "BUILD_CHECKSUM: slave returned max_block_size=0x{:X} (requested 0x{:X}), retrying with chunks",
