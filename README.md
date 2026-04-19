@@ -91,6 +91,33 @@ cargo build
 cargo build --release
 ```
 
+## Mock slave integration tests
+
+The repository now includes a localhost mock XCP slave for integration and end-to-end testing.
+
+- Test binary: `tests\mock_xcp_integration.rs`
+- Mock server: `tests\support\mock_slave\...`
+- Transport: **UDP only** for the first pass
+- Fixed bind: `127.0.0.1:5555`
+
+Run the mocked-slave suite serially:
+
+```bash
+cargo test --test mock_xcp_integration -- --test-threads=1
+```
+
+The suite covers:
+
+- raw XCP-on-UDP framing
+- client connect and `GET_ID`
+- calibration-page reads and writes over real UDP transport
+- chunked upload/download and `BUILD_CHECKSUM`
+- DAQ metadata queries and live DTO streaming into `DaqManager`
+
+The mock is an in-repo Rust test server, not a transport stub, so the repository exercises its real UDP transport, message router, slave API, and DAQ decoding path.
+
+TCP support is intentionally left as a follow-up extension for the mock server.
+
 ## Usage
 
 ### Transport Configuration
