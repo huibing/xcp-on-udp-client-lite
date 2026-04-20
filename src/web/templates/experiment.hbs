@@ -33,22 +33,60 @@
 .exp-title-bar input:hover { border-color: #555; }
 .exp-title-bar input:focus { border-color: #00ff88; outline: none; }
 
-/* Toolbar */
-.exp-toolbar {
+/* Body: sidebar + main */
+.exp-body {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+}
+
+/* Vertical Sidebar (VSCode Activity Bar) */
+.exp-sidebar {
+    display: flex;
+    flex-direction: column;
+    background: #1e1e2e;
+    border-right: 1px solid #333;
+    width: 48px;
+    min-width: 48px;
+    align-items: center;
+    padding: 0.5rem 0;
+    gap: 2px;
+    overflow-y: auto;
+}
+.exp-sidebar::-webkit-scrollbar { width: 3px; }
+.exp-sidebar::-webkit-scrollbar-thumb { background: #555; border-radius: 2px; }
+.exp-sidebar .sidebar-separator {
+    width: 28px;
+    height: 1px;
+    background: #444;
+    margin: 4px 0;
+}
+.exp-sb-btn {
+    width: 40px;
+    height: 40px;
     display: flex;
     align-items: center;
-    padding: 0.35rem 1rem;
-    background: #252535;
-    border-bottom: 1px solid #333;
-    gap: 0.25rem;
-    flex-wrap: wrap;
+    justify-content: center;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: #888;
+    cursor: pointer;
+    font-size: 1.1rem;
+    transition: all 0.15s;
+    position: relative;
 }
-.exp-toolbar .separator {
-    width: 1px;
-    height: 24px;
-    background: #444;
-    margin: 0 0.35rem;
-}
+.exp-sb-btn:hover { background: #3a3a4a; color: #fff; }
+.exp-sb-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.exp-sb-btn:disabled:hover { background: none; color: #888; }
+.exp-sb-btn.active { color: #00ff88; background: #00ff8818; }
+.exp-sb-btn.danger { color: #ff6666; }
+.exp-sb-btn.danger:hover { background: #4a2020; color: #ff4444; }
+.exp-sb-btn.recording { color: #ff4444; animation: pulse-rec 1.5s infinite; }
+@keyframes pulse-rec { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+a.exp-sb-btn { text-decoration: none; }
+
+/* Toolbar button (still used in modals and map cards) */
 .exp-tb-btn {
     background: none;
     border: 1px solid transparent;
@@ -70,22 +108,21 @@
 .exp-tb-btn.danger { color: #ff6666; }
 .exp-tb-btn.danger:hover { background: #4a2020; }
 .exp-tb-btn.recording { color: #ff4444; animation: pulse-rec 1.5s infinite; }
-@keyframes pulse-rec { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 /* Page mode toggle */
 .exp-pagemode {
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 0.3rem;
-    margin: 0 0.25rem;
+    gap: 2px;
 }
-.exp-pagemode label { color: #888; font-size: 0.8rem; cursor: pointer; }
+.exp-pagemode label { color: #666; font-size: 0.55rem; cursor: pointer; }
 .exp-pagemode .toggle {
     position: relative;
-    width: 40px;
-    height: 20px;
+    width: 32px;
+    height: 16px;
     background: #555;
-    border-radius: 10px;
+    border-radius: 8px;
     cursor: pointer;
     transition: background 0.3s;
 }
@@ -93,18 +130,18 @@
 .exp-pagemode .toggle::after {
     content: '';
     position: absolute;
-    width: 16px;
-    height: 16px;
+    width: 12px;
+    height: 12px;
     background: #fff;
     border-radius: 50%;
     top: 2px;
     left: 2px;
     transition: left 0.3s;
 }
-.exp-pagemode .toggle.working::after { left: 22px; }
+.exp-pagemode .toggle.working::after { left: 18px; }
 
-/* Main area with tabs */
-.exp-main {
+/* Right side: main area */
+.exp-right {
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -448,37 +485,39 @@
         <span id="expStateLabel" style="font-size: 0.8rem; color: #888;">IDLE</span>
     </div>
 
-    <!-- Toolbar -->
-    <div class="exp-toolbar">
-        <button class="exp-tb-btn" onclick="expConnect()" title="Connect to devices">🔌 Connect</button>
-        <div class="separator"></div>
-        <button class="exp-tb-btn" id="btnAddVars" onclick="expOpenVarModal()" title="Add variables to current tab">📋 Variables</button>
-        <div class="separator"></div>
-        <button class="exp-tb-btn" id="btnStart" onclick="expStart()" title="Start DAQ on all devices">▶ Start</button>
-        <button class="exp-tb-btn danger" id="btnRecord" onclick="expRecord()" title="Start MF4 recording" style="display:none;">⏺ Record</button>
-        <button class="exp-tb-btn danger" id="btnStop" onclick="expStop()" title="Stop DAQ and recording" style="display:none;">⏹ Stop</button>
-        <div class="separator"></div>
-        <div class="exp-pagemode">
-            <label>REF</label>
-            <div class="toggle" id="pageModeToggle" onclick="expTogglePageMode()" title="Switch Reference/Working page"></div>
-            <label>WRK</label>
+    <!-- Body: sidebar + main -->
+    <div class="exp-body">
+        <!-- Vertical Sidebar -->
+        <div class="exp-sidebar">
+            <button class="exp-sb-btn" onclick="expConnect()" title="Connect to devices">🔌</button>
+            <button class="exp-sb-btn" id="btnAddVars" onclick="expOpenVarModal()" title="Add variables to current tab">📋</button>
+            <div class="sidebar-separator"></div>
+            <button class="exp-sb-btn" id="btnStart" onclick="expStart()" title="Start DAQ on all devices">▶️</button>
+            <button class="exp-sb-btn danger" id="btnRecord" onclick="expRecord()" title="Start MF4 recording" style="display:none;">⏺</button>
+            <button class="exp-sb-btn danger" id="btnStop" onclick="expStop()" title="Stop DAQ and recording" style="display:none;">⏹</button>
+            <div class="sidebar-separator"></div>
+            <div class="exp-pagemode">
+                <label>R</label>
+                <div class="toggle" id="pageModeToggle" onclick="expTogglePageMode()" title="Switch Reference/Working page"></div>
+                <label>W</label>
+            </div>
+            <div class="sidebar-separator"></div>
+            <button class="exp-sb-btn" onclick="expConfig()" title="Experiment settings">⚙️</button>
+            <button class="exp-sb-btn" onclick="expSave()" title="Save experiment to JSON">💾</button>
+            <button class="exp-sb-btn" onclick="expLoad()" title="Load experiment from JSON">📂</button>
+            <div class="sidebar-separator"></div>
+            <button class="exp-sb-btn" onclick="expChecksum()" title="Verify checksum on all slaves">✓</button>
+            <button class="exp-sb-btn" onclick="expAddTab()" title="Add new tab">+</button>
+            <div style="flex:1;"></div>
+            <a href="/experiment/help" class="exp-sb-btn" title="Help &amp; user guide">❓</a>
         </div>
-        <div class="separator"></div>
-        <button class="exp-tb-btn" onclick="expConfig()" title="Experiment configuration">⚙ Config</button>
-        <button class="exp-tb-btn" onclick="expSave()" title="Save experiment to JSON file">💾 Save</button>
-        <button class="exp-tb-btn" onclick="expLoad()" title="Load experiment from JSON file">📂 Load</button>
-        <div class="separator"></div>
-        <button class="exp-tb-btn" onclick="expChecksum()" title="Verify checksum on all slaves">✓ Checksum</button>
-        <div class="separator"></div>
-        <a href="/experiment/help" class="exp-tb-btn" title="Help &amp; user guide" style="text-decoration:none;">? Help</a>
-    </div>
 
-    <!-- Main area: tab bar + tab content -->
-    <div class="exp-main">
-        <div class="exp-tab-bar" id="expTabBar">
-            <button class="exp-tab-add" onclick="expAddTab()" title="Add new tab">+</button>
+        <!-- Right side: tabs + content -->
+        <div class="exp-right">
+            <div class="exp-tab-bar" id="expTabBar">
+            </div>
+            <div class="exp-tab-content" id="expTabContent"></div>
         </div>
-        <div class="exp-tab-content" id="expTabContent"></div>
     </div>
 
     <!-- Status Bar -->
@@ -733,7 +772,6 @@ function expRenameTab(tabId, ev) {
 
 function expRenderTabs() {
     const bar = document.getElementById('expTabBar');
-    const addBtn = bar.querySelector('.exp-tab-add');
     bar.querySelectorAll('.exp-tab').forEach(function(el) { el.remove(); });
     ExpState.tabs.forEach(function(tab) {
         const el = document.createElement('div');
@@ -744,7 +782,7 @@ function expRenderTabs() {
         el.innerHTML =
             '<span class="tab-title">' + escapeHtml(tab.title) + '</span>' +
             '<span class="tab-close" onclick="expCloseTab(\'' + tab.id + '\', event)" title="Close tab">&times;</span>';
-        bar.insertBefore(el, addBtn);
+        bar.appendChild(el);
     });
 }
 
