@@ -494,6 +494,7 @@
                 </thead>
                 <tbody id="expVarList"></tbody>
             </table>
+            <div id="expLoadingIndicator" style="display:none; text-align:center; padding:1rem; color:#888;">Loading more...</div>
         </div>
         <div class="exp-modal-footer">
             <span id="expVarCount" style="flex:1; color:#888;">0 selected</span>
@@ -793,6 +794,10 @@ function expRemoveVar(tabId, deviceId, idx, kind) {
 
 // ===== Variable Selection Modal =====
 var expVarModalSelection = {};  // "kind:device_id:idx" -> true
+var expFilteredItems = [];
+var expDisplayedCount = 0;
+var expIsLoadingMore = false;
+var EXP_VAR_BATCH_SIZE = 500;
 
 function expOpenVarModal() {
     if (ExpState.mode !== 'idle') {
@@ -801,6 +806,9 @@ function expOpenVarModal() {
     }
     document.getElementById('expVarModal').style.display = 'flex';
     expVarModalSelection = {};
+    expFilteredItems = [];
+    expDisplayedCount = 0;
+    expIsLoadingMore = false;
     var tab = ExpState.tabs.find(function(t) { return t.id === ExpState.activeTabId; });
     if (tab) {
         tab.variables.forEach(function(v) {
@@ -808,6 +816,7 @@ function expOpenVarModal() {
         });
     }
     expPopulateVarModal();
+    expSetupVarScrollListener();
 }
 
 function expCloseVarModal() {
@@ -876,9 +885,24 @@ function expPopulateVarModal() {
         items = items.filter(function(v) { return v.device_id === deviceFilter; });
     }
 
-    var display = items.slice(0, 500);
+    expFilteredItems = items;
+    expDisplayedCount = 0;
+    tbody.innerHTML = '';
+
+    var firstBatch = expFilteredItems.slice(0, EXP_VAR_BATCH_SIZE);
+    tbody.innerHTML = expRenderVarRows(firstBatch);
+    expDisplayedCount = firstBatch.length;
+
+    var indicator = document.getElementById('expLoadingIndicator');
+    indicator.style.display = expDisplayedCount < expFilteredItems.length ? 'block' : 'none';
+
+    var count = Object.keys(expVarModalSelection).length;
+    document.getElementById('expVarCount').textContent = count + ' selected';
+}
+
+function expRenderVarRows(items) {
     var html = '';
-    display.forEach(function(v) {
+    items.forEach(function(v) {
         var key = v.kind + ':' + v.device_id + ':' + v.idx;
         var checked = expVarModalSelection[key] ? 'checked' : '';
         var kindLabel = v.kind === 'measurement' ? '📊 Meas' : '🔧 Cal';
@@ -893,15 +917,43 @@ function expPopulateVarModal() {
             '<td style="padding:0.5rem; font-family:monospace; font-size:0.8rem; color:#888;">' + escapeHtml(v.address) + '</td>' +
             '</tr>';
     });
-    if (items.length > 500) {
-        html += '<tr><td colspan="6" style="text-align:center; color:#888; padding:1rem;">Showing 500 of ' + items.length + ' — use search to narrow</td></tr>';
-    }
-    tbody.innerHTML = html;
-    var count = Object.keys(expVarModalSelection).length;
-    document.getElementById('expVarCount').textContent = count + ' selected';
+    return html;
 }
 
-function expFilterVars() { expPopulateVarModal(); }
+function expLoadMoreVars() {
+    if (expIsLoadingMore || expDisplayedCount >= expFilteredItems.length) return;
+    expIsLoadingMore = true;
+    var indicator = document.getElementById('expLoadingIndicator');
+    indicator.style.display = 'block';
+    setTimeout(function() {
+        var tbody = document.getElementById('expVarList');
+        var nextBatch = expFilteredItems.slice(expDisplayedCount, expDisplayedCount + EXP_VAR_BATCH_SIZE);
+        tbody.insertAdjacentHTML('beforeend', expRenderVarRows(nextBatch));
+        expDisplayedCount += nextBatch.length;
+        indicator.style.display = expDisplayedCount < expFilteredItems.length ? 'block' : 'none';
+        expIsLoadingMore = false;
+    }, 50);
+}
+
+function expSetupVarScrollListener() {
+    var modalBody = document.querySelector('#expVarModal .exp-modal-body');
+    if (!modalBody) return;
+    var fresh = modalBody.cloneNode(true);
+    modalBody.parentNode.replaceChild(fresh, modalBody);
+    var ref = document.querySelector('#expVarModal .exp-modal-body');
+    ref.addEventListener('scroll', function() {
+        if (ref.scrollTop + ref.clientHeight >= ref.scrollHeight - 100) {
+            if (!expIsLoadingMore && expDisplayedCount < expFilteredItems.length) {
+                expLoadMoreVars();
+            }
+        }
+    });
+}
+
+function expFilterVars() {
+    expPopulateVarModal();
+    expSetupVarScrollListener();
+}
 
 function expToggleVar(key) {
     if (expVarModalSelection[key]) {
@@ -909,7 +961,15 @@ function expToggleVar(key) {
     } else {
         expVarModalSelection[key] = true;
     }
-    expPopulateVarModal();
+    // Update row in-place instead of re-rendering
+    var cb = document.querySelector('#expVarList input[data-key="' + key + '"]');
+    if (cb) {
+        var isSelected = !!expVarModalSelection[key];
+        cb.checked = isSelected;
+        cb.closest('tr').className = isSelected ? 'selected-row' : '';
+    }
+    var count = Object.keys(expVarModalSelection).length;
+    document.getElementById('expVarCount').textContent = count + ' selected';
 }
 
 function expToggleVarCheckbox(key) { expToggleVar(key); }
@@ -918,10 +978,18 @@ function expToggleSelectAll() {
     var allChecked = document.getElementById('expSelectAll').checked;
     document.querySelectorAll('#expVarList input[type="checkbox"]').forEach(function(cb) {
         var key = cb.dataset.key;
-        if (allChecked) expVarModalSelection[key] = true;
-        else delete expVarModalSelection[key];
+        if (allChecked) {
+            expVarModalSelection[key] = true;
+            cb.checked = true;
+            cb.closest('tr').className = 'selected-row';
+        } else {
+            delete expVarModalSelection[key];
+            cb.checked = false;
+            cb.closest('tr').className = '';
+        }
     });
-    expPopulateVarModal();
+    var count = Object.keys(expVarModalSelection).length;
+    document.getElementById('expVarCount').textContent = count + ' selected';
 }
 
 function expApplyVarSelection() {
