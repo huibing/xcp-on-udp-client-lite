@@ -242,16 +242,17 @@
     top: 4px;
     right: 4px;
     display: flex;
-    gap: 2px;
+    gap: 6px;
     opacity: 0;
     transition: opacity 0.15s;
 }
 .exp-var-card:hover .card-actions { opacity: 1; }
 .exp-var-card .card-info-btn {
     cursor: pointer;
-    font-size: 0.7rem;
-    padding: 2px 4px;
+    font-size: 0.75rem;
+    padding: 2px 6px;
     border-radius: 3px;
+    color: #4488ff;
 }
 .exp-var-card .card-info-btn:hover { background: #4488ff33; }
 .exp-var-card.map-curve {
@@ -939,12 +940,13 @@ function expPopulateVarModal() {
     if (typeFilter !== 'measurement') {
         ExpState.allCalibrations.forEach(function(c) {
             var tn = c.type_name || c.type || '';
+            var ct = (c.characteristic_type || '').toUpperCase();
             items.push({
                 kind: 'calibration', device_id: c.device_id, device_name: c.device_name,
                 idx: c.idx, name: c.name, type: tn,
                 address: c.address_hex || (c.address ? ('0x' + Number(c.address).toString(16).toUpperCase().padStart(8, '0')) : ''),
-                unit: c.unit || '', connected: c.connected, calType: tn,
-                isMapCurve: tn.indexOf('Map') >= 0 || tn.indexOf('Curve') >= 0 || tn.indexOf('Matrix') >= 0 || tn.indexOf('Array') >= 0,
+                unit: c.unit || '', connected: c.connected, calType: c.characteristic_type || tn,
+                isMapCurve: ct === 'MAP' || ct === 'CURVE' || ct === 'VAL_BLK' || tn.indexOf('Matrix') >= 0 || tn.indexOf('Array') >= 0,
             });
         });
     }
@@ -1087,11 +1089,12 @@ function expApplyVarSelection() {
             source = ExpState.allCalibrations.find(function(c) { return c.device_id === device_id && c.idx === idx; });
             if (source) {
                 var typeName = source.type_name || source.type || '';
+                var charType = (source.characteristic_type || '').toUpperCase();
                 newVars.push({
                     kind: 'calibration', device_id: source.device_id, device_name: source.device_name,
                     idx: source.idx, name: source.name, type: typeName,
-                    unit: source.unit || '', calType: typeName,
-                    isMapCurve: typeName.indexOf('Map') >= 0 || typeName.indexOf('Curve') >= 0 || typeName.indexOf('Matrix') >= 0 || typeName.indexOf('Array') >= 0,
+                    unit: source.unit || '', calType: source.characteristic_type || typeName,
+                    isMapCurve: charType === 'MAP' || charType === 'CURVE' || charType === 'VAL_BLK' || typeName.indexOf('Matrix') >= 0 || typeName.indexOf('Array') >= 0,
                 });
             }
         }
