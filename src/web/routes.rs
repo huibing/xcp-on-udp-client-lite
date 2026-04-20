@@ -2247,18 +2247,55 @@ pub async fn daq_data(
     let filter_set: std::collections::HashSet<(String, String)> = filter_vars.into_iter().collect();
 
     let mut values: Vec<serde_json::Value> = Vec::new();
+    let mut seen_device_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Get values from all running slaves
+    // Check DeviceState DaqManagers first (experiment page starts DAQ here)
+    let devices = state.all_devices().await;
+    for device in &devices {
+        if !*device.daq_running.read().await {
+            continue;
+        }
+        let device_id = device
+            .slave_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| device.id.clone());
+
+        let daq_manager = device.daq_manager.read().await;
+        if let Some(r) = daq_manager.get_latest_sample().await {
+            seen_device_ids.insert(device_id.clone());
+            let device_name = device.display_name_or_custom().await;
+            for (k, v) in &r.values {
+                if filter_set.is_empty()
+                    || filter_set.contains(&(device_id.clone(), k.clone()))
+                {
+                    let updated_at =
+                        r.signal_timestamps.get(k).copied().unwrap_or(r.timestamp_s);
+                    values.push(json!({
+                        "device_id": device_id,
+                        "var_name": k,
+                        "display_name": device_name,
+                        "value": format!("{:.6}", v),
+                        "updated_at": format!("{:.6}", updated_at)
+                    }));
+                }
+            }
+        }
+    }
+
+    // Also check SlaveState DaqManagers (DAQ page starts DAQ here)
     let slaves = state.all_slaves().await;
     for slave in slaves {
+        let slave_device_id = slave.id.to_string();
+        if seen_device_ids.contains(&slave_device_id) {
+            continue; // Already got data from DeviceState
+        }
         if *slave.daq_running.read().await {
             let daq_manager = slave.daq_manager.read().await;
             if let Some(r) = daq_manager.get_latest_sample().await {
                 for (k, v) in &r.values {
-                    let device_id = slave.id.to_string();
-
-                    // Filter by selected variables if any
-                    if filter_set.is_empty() || filter_set.contains(&(device_id.clone(), k.clone()))
+                    let device_id = slave_device_id.clone();
+                    if filter_set.is_empty()
+                        || filter_set.contains(&(device_id.clone(), k.clone()))
                     {
                         let updated_at =
                             r.signal_timestamps.get(k).copied().unwrap_or(r.timestamp_s);
@@ -2275,11 +2312,25 @@ pub async fn daq_data(
         }
     }
 
-    // Compute the latest elapsed timestamp across all running slaves
+    // Compute the latest elapsed timestamp
     let mut latest_ts: f64 = 0.0;
+    for device in &devices {
+        if *device.daq_running.read().await {
+            let dm = device.daq_manager.read().await;
+            if let Some(r) = dm.get_latest_sample().await {
+                if r.timestamp_s > latest_ts {
+                    latest_ts = r.timestamp_s;
+                }
+            }
+        }
+    }
     {
         let slaves2 = state.all_slaves().await;
         for s in slaves2 {
+            let sid = s.id.to_string();
+            if seen_device_ids.contains(&sid) {
+                continue;
+            }
             if *s.daq_running.read().await {
                 let dm = s.daq_manager.read().await;
                 if let Some(r) = dm.get_latest_sample().await {
