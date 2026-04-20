@@ -1184,36 +1184,42 @@ function expStopDataPolling() {
 }
 
 function expPollData() {
-    var deviceIds = {};
+    // Collect all measurement variables across tabs to build a filter list
+    var varList = [];
+    var seen = {};
     ExpState.tabs.forEach(function(tab) {
         tab.variables.filter(function(v) { return v.kind === 'measurement'; }).forEach(function(v) {
-            deviceIds[v.device_id] = true;
+            var k = v.device_id + ':' + v.name;
+            if (!seen[k]) {
+                seen[k] = true;
+                varList.push({ device_id: v.device_id, name: v.name });
+            }
         });
     });
 
-    Object.keys(deviceIds).forEach(function(deviceId) {
-        fetch('/api/daq/data', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ device_id: deviceId }),
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.values) {
-                Object.keys(data.values).forEach(function(name) {
-                    ExpState.liveValues[deviceId + ':' + name] = data.values[name];
-                });
-                // Update live value displays without re-rendering entire content
-                document.querySelectorAll('[data-live-key]').forEach(function(el) {
-                    var key = el.dataset.liveKey;
-                    if (ExpState.liveValues[key] !== undefined) {
-                        el.textContent = formatValue(ExpState.liveValues[key]);
-                    }
-                });
-            }
-        })
-        .catch(function() {});
-    });
+    if (varList.length === 0) return;
+
+    fetch('/api/daq/data', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ variables: varList }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success && data.values && Array.isArray(data.values)) {
+            data.values.forEach(function(entry) {
+                var key = entry.device_id + ':' + entry.var_name;
+                ExpState.liveValues[key] = parseFloat(entry.value);
+            });
+            document.querySelectorAll('[data-live-key]').forEach(function(el) {
+                var key = el.dataset.liveKey;
+                if (ExpState.liveValues[key] !== undefined) {
+                    el.textContent = formatValue(ExpState.liveValues[key]);
+                }
+            });
+        }
+    })
+    .catch(function() {});
 }
 
 // ===== Status Polling =====
@@ -1563,6 +1569,15 @@ function expCloseConfig() {
 function expSaveConfig() {
     ExpState.config.mf4Pattern = document.getElementById('expMf4Pattern').value;
     ExpState.config.mf4Dir = document.getElementById('expMf4Dir').value;
+    // Apply any device renames from config inputs
+    var inputs = document.querySelectorAll('#expConfigDevices input[data-device-id]');
+    inputs.forEach(function(inp) {
+        var deviceId = inp.dataset.deviceId;
+        var newName = inp.value.trim();
+        if (newName) {
+            expRenameDevice(deviceId, newName);
+        }
+    });
     expCloseConfig();
     expToast('Configuration saved', 'success');
 }
@@ -1577,12 +1592,22 @@ function expRenameDevice(deviceId, newName) {
     .then(function(r) { return r.json(); })
     .then(function(data) {
         if (data.success) {
+            var trimmed = newName.trim();
+            // Update tab variable names
             ExpState.tabs.forEach(function(tab) {
                 tab.variables.forEach(function(v) {
-                    if (v.device_id === deviceId) v.device_name = newName.trim();
+                    if (v.device_id === deviceId) v.device_name = trimmed;
                 });
             });
+            // Update source lists so variable modal also reflects the new name
+            ExpState.allMeasurements.forEach(function(m) {
+                if (m.device_id === deviceId) m.device_name = trimmed;
+            });
+            ExpState.allCalibrations.forEach(function(c) {
+                if (c.device_id === deviceId) c.device_name = trimmed;
+            });
             expRenderTabContent();
+            expToast('Device renamed to "' + trimmed + '"', 'success');
         }
     })
     .catch(function() {});
