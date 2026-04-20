@@ -764,6 +764,7 @@ function expLoadStateFromStorage() {
     } else {
         expRenderTabs();
         expRenderTabContent();
+        expReadAllCalValues();
     }
     expStartStatusPolling();
     expRefreshVariables();
