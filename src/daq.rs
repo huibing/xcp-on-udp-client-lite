@@ -775,7 +775,13 @@ impl DaqManager {
     /// - DAQ lists: max 0xFFFF (65535)
     /// - Each entry: max max_odt_entry_size bytes (checked individually)
     /// Measurements are grouped by event channel: each event gets its own DAQ list(s).
-    fn calculate_odt_allocation(&self, max_odt_entry_size: u8) -> Result<DaqAllocation, String> {
+    fn calculate_odt_allocation(
+        &self,
+        max_odt_entry_size: u8,
+        odt_granularity: u8,
+        max_odt0_payload: usize,
+        max_odt_payload: usize,
+    ) -> Result<DaqAllocation, String> {
         const MAX_ODT_ENTRIES: usize = 255;
         const MAX_ODTS_PER_LIST: usize = 252;
         const MAX_DAQ_LISTS: usize = 0xFFFF;
@@ -800,6 +806,8 @@ impl DaqManager {
             }
         }
 
+        let granularity = std::cmp::max(1, odt_granularity as usize);
+
         // Group selected measurement indices by event channel
         let mut event_groups: std::collections::BTreeMap<u16, Vec<usize>> =
             std::collections::BTreeMap::new();
@@ -815,35 +823,53 @@ impl DaqManager {
         for (event_ch, measurement_indices) in &event_groups {
             let mut current_list: Vec<OdtAllocation> = Vec::new();
             let mut current_odt: Vec<OdtEntryAllocation> = Vec::new();
+            let mut current_odt_bytes: usize = 0;
 
             for &idx in measurement_indices {
-                // Check if current ODT is full (255 entries max)
-                if current_odt.len() >= MAX_ODT_ENTRIES && !current_odt.is_empty() {
+                let meas = &selected[idx];
+                let aligned_size = meas.size.div_ceil(granularity) * granularity;
+
+                // Determine the max payload for the current ODT
+                let is_odt0 = current_list.is_empty();
+                let max_payload = if is_odt0 {
+                    max_odt0_payload
+                } else {
+                    max_odt_payload
+                };
+
+                // Check if adding this measurement would overflow the ODT payload
+                let would_overflow = current_odt_bytes + aligned_size > max_payload;
+                let at_entry_limit = current_odt.len() >= MAX_ODT_ENTRIES;
+
+                if (would_overflow || at_entry_limit) && !current_odt.is_empty() {
+                    // Flush current ODT
                     current_list.push(OdtAllocation {
                         entries: current_odt,
                     });
                     current_odt = Vec::new();
-                }
+                    current_odt_bytes = 0;
 
-                // Check if we need a new DAQ list for this event group (252 ODTs max per list)
-                if current_list.len() >= MAX_ODTS_PER_LIST {
-                    daq_lists.push(DaqListAllocation { odts: current_list });
-                    event_channel_per_list.push(*event_ch);
-                    current_list = Vec::new();
-                }
+                    // Check if we need a new DAQ list (252 ODTs max per list)
+                    if current_list.len() >= MAX_ODTS_PER_LIST {
+                        daq_lists.push(DaqListAllocation { odts: current_list });
+                        event_channel_per_list.push(*event_ch);
+                        current_list = Vec::new();
+                    }
 
-                // Check DAQ list limit
-                if daq_lists.len() >= MAX_DAQ_LISTS {
-                    return Err(format!(
-                        "DAQ configuration exceeds maximum number of DAQ lists ({}). Please select fewer measurements.",
-                        MAX_DAQ_LISTS
-                    ));
+                    // Check DAQ list limit
+                    if daq_lists.len() >= MAX_DAQ_LISTS {
+                        return Err(format!(
+                            "DAQ configuration exceeds maximum number of DAQ lists ({}). Please select fewer measurements.",
+                            MAX_DAQ_LISTS
+                        ));
+                    }
                 }
 
                 // Add measurement to current ODT
                 current_odt.push(OdtEntryAllocation {
                     measurement_idx: idx,
                 });
+                current_odt_bytes += aligned_size;
             }
 
             // Flush remaining ODT/list for this event group
@@ -1060,11 +1086,38 @@ impl DaqManager {
         let max_odt_entry_size = daq_resolution.max_odt_entry_size_daq;
         let odt_granularity = daq_resolution.odt_entry_granularity_daq;
 
+        // Get max_dto from ConnectInfo for DTO payload limit
+        let max_dto = slave
+            .info
+            .connect_info
+            .as_ref()
+            .map(|c| c.max_dto)
+            .unwrap_or(8);
+
+        // Calculate DTO overhead: transport header (4 bytes) + PID + timestamp (ODT 0 only)
+        let pid_size: usize = match &identification_field_type {
+            IdentificationFieldType::AbosulteODT => 1,
+            IdentificationFieldType::RelatetiveODTBYTE => 2,
+            IdentificationFieldType::RelatetiveODTWORD => 3,
+            IdentificationFieldType::RelatetiveODTWORDAlign => 4,
+        };
+        let ts_size = self.timestamp_size.unwrap_or(0) as usize;
+        // max_dto is the XCP-level max DTO size (including PID/timestamp, excluding transport header)
+        // Usable data payload per ODT = max_dto - pid_size - timestamp_size (for ODT 0)
+        // For ODTs other than ODT 0, timestamp is not included, so payload = max_dto - pid_size
+        let max_odt0_payload = (max_dto as usize).saturating_sub(pid_size + ts_size);
+        let max_odt_payload = (max_dto as usize).saturating_sub(pid_size);
+
         tracing::info!("Configuring Dynamic DAQ...");
         tracing::info!(
-            "ODT entry limits: max_size={}, granularity={}",
+            "ODT entry limits: max_size={}, granularity={}, max_dto={}, pid_size={}, ts_size={}, max_odt0_payload={}, max_odt_payload={}",
             max_odt_entry_size,
-            odt_granularity
+            odt_granularity,
+            max_dto,
+            pid_size,
+            ts_size,
+            max_odt0_payload,
+            max_odt_payload
         );
 
         // Calculate ODT allocation based on slave limits
@@ -1074,7 +1127,12 @@ impl DaqManager {
         }
 
         // Calculate how many ODTs and DAQ lists we need
-        let allocation = self.calculate_odt_allocation(max_odt_entry_size)?;
+        let allocation = self.calculate_odt_allocation(
+            max_odt_entry_size,
+            odt_granularity,
+            max_odt0_payload,
+            max_odt_payload,
+        )?;
 
         tracing::info!("ODT allocation: {} DAQ lists", allocation.daq_list_count);
         for (list_idx, odt_count) in allocation.odt_count_per_list.iter().enumerate() {
@@ -2259,7 +2317,7 @@ mod tests {
     fn test_allocation_empty_selection() {
         let mut mgr = make_daq_manager(5);
         mgr.selected_indices.clear();
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 0);
         assert!(alloc.daq_lists.is_empty());
         assert!(alloc.event_channel_per_list.is_empty());
@@ -2269,7 +2327,7 @@ mod tests {
     fn test_allocation_single_event_all_signals() {
         // 5 signals, all on default event 0 → 1 DAQ list, 1 ODT, 5 entries
         let mgr = make_daq_manager(5);
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 1);
         assert_eq!(alloc.event_channel_per_list, vec![0]);
         assert_eq!(alloc.daq_lists.len(), 1);
@@ -2288,7 +2346,7 @@ mod tests {
         mgr.set_measurement_event(4, 2);
         mgr.set_measurement_event(5, 2);
 
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 2);
         // BTreeMap orders by key, so event 1 first, then event 2
         assert_eq!(alloc.event_channel_per_list, vec![1, 2]);
@@ -2309,7 +2367,7 @@ mod tests {
         mgr.set_measurement_event(6, 20);
         mgr.set_measurement_event(7, 20);
 
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 3);
         // BTreeMap: sorted by event channel → 5, 10, 20
         assert_eq!(alloc.event_channel_per_list, vec![5, 10, 20]);
@@ -2326,7 +2384,7 @@ mod tests {
         mgr.event_channel = 0;
         mgr.set_measurement_event(0, 3);
 
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 2);
         // event 0 (default, 3 signals), event 3 (1 signal)
         assert_eq!(alloc.event_channel_per_list, vec![0, 3]);
@@ -2348,7 +2406,7 @@ mod tests {
         });
         mgr.selected_indices = vec![0];
         // max_odt_entry_size = 8, signal is 16 → should fail
-        let result = mgr.calculate_odt_allocation(8);
+        let result = mgr.calculate_odt_allocation(8, 1, 65535, 65535);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("exceeds max ODT entry size"));
     }
@@ -2362,7 +2420,7 @@ mod tests {
         mgr.set_measurement_event(2, 2);
         mgr.set_measurement_event(3, 2);
 
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         // event 1 list: sel_idx 0, 1
         let entries_ev1: Vec<usize> = alloc.daq_lists[0].odts[0]
             .entries
@@ -2384,7 +2442,7 @@ mod tests {
     #[test]
     fn test_allocation_exactly_255_entries_one_odt() {
         let mgr = make_daq_manager(255);
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 1);
         assert_eq!(alloc.daq_lists[0].odts.len(), 1);
         assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 255);
@@ -2393,7 +2451,7 @@ mod tests {
     #[test]
     fn test_allocation_256_entries_spills_to_second_odt() {
         let mgr = make_daq_manager(256);
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 1);
         assert_eq!(alloc.daq_lists[0].odts.len(), 2);
         assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 255);
@@ -2403,7 +2461,7 @@ mod tests {
     #[test]
     fn test_allocation_510_entries_two_full_odts() {
         let mgr = make_daq_manager(510);
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 1);
         assert_eq!(alloc.daq_lists[0].odts.len(), 2);
         assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 255);
@@ -2413,7 +2471,7 @@ mod tests {
     #[test]
     fn test_allocation_single_measurement() {
         let mgr = make_daq_manager(1);
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 1);
         assert_eq!(alloc.daq_lists[0].odts.len(), 1);
         assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 1);
@@ -2431,7 +2489,7 @@ mod tests {
         mgr.set_measurement_event(256, 2);
         mgr.set_measurement_event(257, 2);
 
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 2);
         assert_eq!(alloc.event_channel_per_list, vec![1, 2]);
         // Event 1 list: 2 ODTs
@@ -2447,7 +2505,7 @@ mod tests {
     fn test_allocation_odt_count_per_list_accurate() {
         // 300 signals on event 0 → 1 list, 2 ODTs (255 + 45)
         let mgr = make_daq_manager(300);
-        let alloc = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.odt_count_per_list, vec![2]);
         assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 255);
         assert_eq!(alloc.daq_lists[0].odts[1].entries.len(), 45);
@@ -2488,7 +2546,7 @@ mod tests {
         ];
         mgr.selected_indices = vec![0, 1, 2];
 
-        let alloc = mgr.calculate_odt_allocation(4).unwrap();
+        let alloc = mgr.calculate_odt_allocation(4, 1, 65535, 65535).unwrap();
         assert_eq!(alloc.daq_list_count, 1);
         assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 3);
     }
@@ -2518,7 +2576,7 @@ mod tests {
         ];
         mgr.selected_indices = vec![0, 1];
         // max_odt_entry_size = 4, F64 is 8 → error
-        let result = mgr.calculate_odt_allocation(4);
+        let result = mgr.calculate_odt_allocation(4, 1, 65535, 65535);
         assert!(result.is_err());
     }
 
@@ -2662,15 +2720,69 @@ mod tests {
     fn test_event_reassignment_changes_allocation() {
         let mut mgr = make_daq_manager(4);
         // Initially all on default event 0 → 1 list
-        let alloc1 = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc1 = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc1.daq_list_count, 1);
 
         // Reassign half to event 5 → 2 lists
         mgr.set_measurement_event(0, 5);
         mgr.set_measurement_event(1, 5);
-        let alloc2 = mgr.calculate_odt_allocation(255).unwrap();
+        let alloc2 = mgr.calculate_odt_allocation(255, 1, 65535, 65535).unwrap();
         assert_eq!(alloc2.daq_list_count, 2);
         assert_eq!(alloc2.event_channel_per_list, vec![0, 5]);
+    }
+
+    #[test]
+    fn test_allocation_splits_odt_on_payload_overflow() {
+        // 10 U32 measurements (4 bytes each) = 40 bytes total
+        // With max_odt_payload=12, each ODT can hold 3 measurements (12 bytes)
+        // So we need ceil(10/3) = 4 ODTs
+        let mgr = make_daq_manager(10);
+        let alloc = mgr.calculate_odt_allocation(255, 1, 12, 12).unwrap();
+        assert_eq!(alloc.daq_list_count, 1);
+        // 10 measurements × 4 bytes = 40 bytes; 12 bytes per ODT → 4 ODTs (3+3+3+1)
+        assert_eq!(alloc.daq_lists[0].odts.len(), 4);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 3);
+        assert_eq!(alloc.daq_lists[0].odts[1].entries.len(), 3);
+        assert_eq!(alloc.daq_lists[0].odts[2].entries.len(), 3);
+        assert_eq!(alloc.daq_lists[0].odts[3].entries.len(), 1);
+    }
+
+    #[test]
+    fn test_allocation_odt0_smaller_payload_due_to_timestamp() {
+        // ODT 0 has smaller payload due to timestamp overhead
+        // max_odt0_payload=8 (fits 2×4-byte), max_odt_payload=12 (fits 3×4-byte)
+        // 8 measurements → ODT0: 2, ODT1: 3, ODT2: 3
+        let mgr = make_daq_manager(8);
+        let alloc = mgr.calculate_odt_allocation(255, 1, 8, 12).unwrap();
+        assert_eq!(alloc.daq_list_count, 1);
+        assert_eq!(alloc.daq_lists[0].odts.len(), 3);
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 2); // ODT 0 fits 2
+        assert_eq!(alloc.daq_lists[0].odts[1].entries.len(), 3); // ODT 1 fits 3
+        assert_eq!(alloc.daq_lists[0].odts[2].entries.len(), 3); // ODT 2 fits 3
+    }
+
+    #[test]
+    fn test_allocation_respects_granularity() {
+        // 2-byte measurements with granularity=4 → aligned to 4 bytes each
+        let mut mgr = DaqManager::new();
+        mgr.all_measurements = (0..5)
+            .map(|i| Measurement {
+                name: format!("sig_{}", i),
+                address: 0x1000 + i as u32 * 2,
+                address_ext: 0,
+                size: 2, // 2 bytes, but aligned to 4 with granularity=4
+                data_type: A2lDataType::U16,
+                unit: None,
+                compu_method: CompuMethod::default(),
+            })
+            .collect();
+        mgr.selected_indices = (0..5).collect();
+
+        // max payload=12, granularity=4 → each meas takes 4 bytes → 3 fit per ODT
+        let alloc = mgr.calculate_odt_allocation(255, 4, 12, 12).unwrap();
+        assert_eq!(alloc.daq_lists[0].odts.len(), 2); // 3 + 2
+        assert_eq!(alloc.daq_lists[0].odts[0].entries.len(), 3);
+        assert_eq!(alloc.daq_lists[0].odts[1].entries.len(), 2);
     }
 
     #[test]
