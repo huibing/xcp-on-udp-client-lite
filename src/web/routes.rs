@@ -4177,6 +4177,20 @@ pub async fn experiment_page(State(state): State<AppState>) -> Html<String> {
     ))
 }
 
+/// Serve experiment help page (GET /experiment/help)
+pub async fn experiment_help_page(State(state): State<AppState>) -> Html<String> {
+    let status = state.take_status().await;
+    let error = state.take_error().await;
+
+    let content = templates::experiment_help_page();
+    Html(templates::page(
+        "Experiment Help",
+        &content,
+        status.as_deref(),
+        error.as_deref(),
+    ))
+}
+
 /// Get all variables (measurements + calibration) from all devices (GET /api/experiment/variables)
 pub async fn experiment_variables(State(state): State<AppState>) -> impl IntoResponse {
     let mut measurements: Vec<serde_json::Value> = Vec::new();

@@ -411,6 +411,11 @@ impl TemplateEngine {
     pub fn experiment_page(&self) -> String {
         self.render("experiment", &json!({}))
     }
+
+    /// Render experiment help page
+    pub fn experiment_help_page(&self) -> String {
+        self.render("experiment_help", &json!({}))
+    }
 }
 
 impl Default for TemplateEngine {
@@ -544,6 +549,12 @@ pub fn a2l_page(
 pub fn experiment_page() -> String {
     let engine = TemplateEngine::new();
     engine.experiment_page()
+}
+
+/// Render experiment help page
+pub fn experiment_help_page() -> String {
+    let engine = TemplateEngine::new();
+    engine.experiment_help_page()
 }
 
 /// Escape HTML special characters

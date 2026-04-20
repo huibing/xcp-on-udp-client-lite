@@ -1,0 +1,321 @@
+<div class="card">
+    <h2>🧪 Experiment Page — User Guide</h2>
+    <p style="color: #aaa; margin-bottom: 1.5rem;">
+        The Experiment page provides a unified workspace for multi-device DAQ data acquisition, 
+        calibration editing, and MF4 recording — all in a single, tabbed interface.
+    </p>
+
+    <div style="display:flex; gap:0.5rem; margin-bottom:1.5rem;">
+        <a href="/experiment"><button>Open Experiment Page</button></a>
+    </div>
+
+    <!-- Quick Start -->
+    <div class="card" style="margin-bottom: 1.5rem; border-left: 3px solid #00ff88;">
+        <h3 style="color: #00ff88; margin-bottom: 0.75rem;">⚡ Quick Start</h3>
+        <ol style="line-height: 2; padding-left: 1.5rem;">
+            <li>Connect your XCP devices via <strong>Dashboard</strong> or <strong>Connect</strong> page, and load their A2L files</li>
+            <li>Go to <strong>Experiment</strong> page</li>
+            <li>Click <strong>📋 Variables</strong> to select measurements and calibration parameters</li>
+            <li>Click <strong>▶ Start</strong> to begin DAQ data acquisition</li>
+            <li>Click <strong>⏺ Record</strong> to start MF4 file recording (optional)</li>
+            <li>Click <strong>⏹ Stop</strong> to stop everything</li>
+        </ol>
+    </div>
+
+    <!-- Page Layout -->
+    <div class="card" style="margin-bottom: 1.5rem;">
+        <h3 style="margin-bottom: 0.75rem;">🖥️ Page Layout</h3>
+        <p style="color: #aaa; margin-bottom: 0.75rem;">The Experiment page uses a VSCode-like layout with five areas:</p>
+        <table style="width:100%; border-collapse: collapse;">
+            <tbody>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333; width: 30%; color: #00ff88; font-weight: bold;">Title Bar</td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Editable experiment name and current state indicator (IDLE / DAQ RUNNING / RECORDING)</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #00ff88; font-weight: bold;">Toolbar</td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">All action buttons: Connect, Variables, Start/Record/Stop, Page Mode, Config, Save/Load, Checksum</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #00ff88; font-weight: bold;">Tab Bar</td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Multiple tabs for organizing variables into groups (up to 20 tabs). Click <strong>+</strong> to add, <strong>×</strong> to close, double-click to rename</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #00ff88; font-weight: bold;">Main Area</td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Displays variable cards for the active tab — measurement cards (blue), calibration cards (orange), and map/curve tables</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #00ff88; font-weight: bold;">Status Bar</td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Shows all loaded devices with connection status indicators (green = connected, red = disconnected). Hover for details</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Toolbar Buttons -->
+    <div class="card" style="margin-bottom: 1.5rem;">
+        <h3 style="margin-bottom: 0.75rem;">🔧 Toolbar Reference</h3>
+        <table style="width:100%; border-collapse: collapse;">
+            <thead>
+                <tr>
+                    <th style="padding: 0.6rem; border: 1px solid #333; text-align:left; width:25%; background: #252535;">Button</th>
+                    <th style="padding: 0.6rem; border: 1px solid #333; text-align:left; background: #252535;">Description</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333;">🔌 <strong>Connect</strong></td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Navigate to the Connect page to add new XCP slave connections</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333;">📋 <strong>Variables</strong></td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Open the variable selection dialog. Search and filter variables by device, type (measurement/calibration), or name. Check the ones you want, then click Apply</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333;">▶ <strong>Start</strong></td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Start DAQ data acquisition on all devices that have selected measurements. Variables are collected from <em>all tabs</em>, deduplicated, then DAQ starts simultaneously</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333;">⏺ <strong>Record</strong></td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Start recording DAQ data to an MF4 file. Only available after DAQ is running. File name uses the experiment title with a timestamp</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333;">⏹ <strong>Stop</strong></td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Stop both DAQ acquisition and MF4 recording on all devices</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333;"><strong>REF / WRK</strong></td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Toggle between Reference and Working calibration page on all connected devices. Calibration parameters are only editable in Working mode. If a device fails to switch, its parameters become read-only</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333;">⚙ <strong>Config</strong></td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Open experiment configuration: MF4 file naming pattern, output directory, and device list with rename capability</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333;">💾 <strong>Save</strong></td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Download the experiment configuration (tabs, variables, settings) as a JSON file to your browser</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333;">📂 <strong>Load</strong></td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Load a previously saved experiment JSON file. Restores all tabs, variable selections, and settings. Only available when DAQ is stopped</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333;">✓ <strong>Checksum</strong></td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Run checksum verification on all connected devices. Results are shown in a modal with pass/fail status per device</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Workflow States -->
+    <div class="card" style="margin-bottom: 1.5rem;">
+        <h3 style="margin-bottom: 0.75rem;">🔄 Experiment State Machine</h3>
+        <p style="color: #aaa; margin-bottom: 0.75rem;">The experiment follows a simple linear state flow:</p>
+        <div style="display: flex; align-items: center; justify-content: center; gap: 1rem; padding: 1.5rem; background: #1a1a2e; border-radius: 8px; flex-wrap: wrap;">
+            <div style="text-align:center; padding: 0.75rem 1.5rem; background: #252535; border: 2px solid #888; border-radius: 8px;">
+                <div style="font-size: 1.5rem;">💤</div>
+                <div style="font-weight: bold; margin-top: 0.25rem;">IDLE</div>
+                <div style="font-size: 0.75rem; color: #888;">Edit variables & tabs</div>
+            </div>
+            <div style="color: #00ff88; font-size: 1.5rem;">→</div>
+            <div style="text-align:center; padding: 0.75rem 1.5rem; background: #1a3a1a; border: 2px solid #00ff88; border-radius: 8px;">
+                <div style="font-size: 1.5rem;">▶</div>
+                <div style="font-weight: bold; margin-top: 0.25rem; color: #00ff88;">RUNNING</div>
+                <div style="font-size: 0.75rem; color: #888;">Live data streaming</div>
+            </div>
+            <div style="color: #ff4444; font-size: 1.5rem;">→</div>
+            <div style="text-align:center; padding: 0.75rem 1.5rem; background: #3a1a1a; border: 2px solid #ff4444; border-radius: 8px;">
+                <div style="font-size: 1.5rem;">⏺</div>
+                <div style="font-weight: bold; margin-top: 0.25rem; color: #ff4444;">RECORDING</div>
+                <div style="font-size: 0.75rem; color: #888;">Saving to MF4</div>
+            </div>
+        </div>
+        <ul style="margin-top: 1rem; padding-left: 1.5rem; line-height: 1.8; color: #aaa;">
+            <li><strong>IDLE</strong>: You can add/remove variables, create/rename tabs, load experiments, and change settings</li>
+            <li><strong>RUNNING</strong>: DAQ is active and measurement cards show live values. You can start MF4 recording or edit calibration values. Variable selection is locked</li>
+            <li><strong>RECORDING</strong>: DAQ data is being written to an MF4 file. Click Stop to end both recording and DAQ</li>
+        </ul>
+    </div>
+
+    <!-- Variable Cards -->
+    <div class="card" style="margin-bottom: 1.5rem;">
+        <h3 style="margin-bottom: 0.75rem;">📊 Variable Cards</h3>
+        <p style="color: #aaa; margin-bottom: 0.75rem;">Variables are displayed as compact cards in the tab content area. There are three categories:</p>
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem;">
+            <div style="background: #252535; padding: 1rem; border-radius: 6px; border-left: 3px solid #4488ff;">
+                <h4 style="color: #4488ff; margin-bottom: 0.5rem;">📊 Measurement Cards</h4>
+                <ul style="padding-left: 1rem; line-height: 1.8; color: #aaa;">
+                    <li>Blue left border</li>
+                    <li>Shows device name, variable name, live value</li>
+                    <li>Read-only — values update automatically during DAQ</li>
+                    <li>Values display with 4 decimal places for floats</li>
+                </ul>
+            </div>
+            <div style="background: #252535; padding: 1rem; border-radius: 6px; border-left: 3px solid #ff8844;">
+                <h4 style="color: #ff8844; margin-bottom: 0.5rem;">🔧 Calibration Cards (Scalar)</h4>
+                <ul style="padding-left: 1rem; line-height: 1.8; color: #aaa;">
+                    <li>Orange left border</li>
+                    <li>Click to edit when in <em>Working</em> page mode</li>
+                    <li>Grayed out when in <em>Reference</em> mode or if page switch failed</li>
+                    <li>Values sync across all tabs when edited</li>
+                </ul>
+            </div>
+            <div style="background: #252535; padding: 1rem; border-radius: 6px; border-left: 3px solid #ff8844;">
+                <h4 style="color: #ff8844; margin-bottom: 0.5rem;">📐 Maps & Curves (Table)</h4>
+                <ul style="padding-left: 1rem; line-height: 1.8; color: #aaa;">
+                    <li>Displayed in a separate section below scalar cards</li>
+                    <li>Click "Load Data" to read values from ECU</li>
+                    <li>Click any cell to edit in <em>Working</em> mode</li>
+                    <li>Supports 1D arrays and 2D matrices</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="card" style="margin-bottom: 1.5rem;">
+        <h3 style="margin-bottom: 0.75rem;">📑 Tab Management</h3>
+        <table style="width:100%; border-collapse: collapse;">
+            <tbody>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333; width: 30%; color: #00ff88;">Create a tab</td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Click the <strong>+</strong> button at the end of the tab bar</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #00ff88;">Close a tab</td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Click the <strong>×</strong> on the tab (at least one tab must remain open)</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #00ff88;">Rename a tab</td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Double-click the tab title, type a new name, press Enter</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #00ff88;">Switch tabs</td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">Click on any tab to switch to it</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #00ff88;">Maximum tabs</td>
+                    <td style="padding: 0.6rem; border: 1px solid #333; color: #ccc;">20 tabs maximum</td>
+                </tr>
+            </tbody>
+        </table>
+        <p style="color: #888; margin-top: 0.75rem; font-size: 0.9rem;">
+            <strong>Tip:</strong> Use tabs to organize variables by subsystem (e.g., "Engine", "Transmission", "Brakes") or by purpose (e.g., "Monitoring", "Tuning").
+            The same measurement can appear in multiple tabs — when DAQ starts, duplicates are automatically deduplicated.
+        </p>
+    </div>
+
+    <!-- Save/Load -->
+    <div class="card" style="margin-bottom: 1.5rem;">
+        <h3 style="margin-bottom: 0.75rem;">💾 Save & Load</h3>
+        <p style="color: #aaa; margin-bottom: 0.75rem;">
+            Experiment configurations are saved as JSON files to your browser's download folder. They contain:
+        </p>
+        <ul style="padding-left: 1.5rem; line-height: 1.8; color: #aaa;">
+            <li>Experiment title and settings</li>
+            <li>All tabs with their variable selections</li>
+            <li>MF4 naming configuration</li>
+            <li>Page mode state</li>
+        </ul>
+        <p style="color: #888; margin-top: 0.75rem; font-size: 0.9rem;">
+            <strong>Note:</strong> Save/Load only stores the <em>configuration</em> (which variables to display in which tabs).
+            The actual device connections and A2L files must be set up before loading an experiment.
+            DAQ must be stopped before loading a saved experiment.
+        </p>
+    </div>
+
+    <!-- Calibration Page Mode -->
+    <div class="card" style="margin-bottom: 1.5rem;">
+        <h3 style="margin-bottom: 0.75rem;">📄 Calibration Page Mode</h3>
+        <p style="color: #aaa; margin-bottom: 0.75rem;">
+            The REF/WRK toggle switches the calibration memory page on <em>all connected devices</em> simultaneously:
+        </p>
+        <ul style="padding-left: 1.5rem; line-height: 1.8; color: #aaa;">
+            <li><strong>Reference (REF)</strong>: Read-only view of calibration parameters. Factory/baseline values</li>
+            <li><strong>Working (WRK)</strong>: Editable calibration parameters. Changes are written to the ECU's working page</li>
+        </ul>
+        <p style="color: #ff8844; margin-top: 0.75rem; font-size: 0.9rem;">
+            ⚠️ If a device fails to switch page mode, its calibration variables will become <strong>read-only</strong> 
+            (shown with reduced opacity). Other devices that switched successfully remain editable.
+        </p>
+    </div>
+
+    <!-- Tips -->
+    <div class="card" style="margin-bottom: 1.5rem; border-left: 3px solid #4488ff;">
+        <h3 style="color: #4488ff; margin-bottom: 0.75rem;">💡 Tips & Best Practices</h3>
+        <ul style="padding-left: 1.5rem; line-height: 2; color: #aaa;">
+            <li>Use <strong>Save</strong> frequently to preserve your experiment setup — you can quickly reload it later</li>
+            <li>Give your experiment a descriptive title — it's used in the MF4 file name</li>
+            <li>The variable selection dialog shows up to 500 results — use the search and filters to find specific variables quickly</li>
+            <li>Hover over status bar items to see detailed device information (A2L file, page mode, DAQ status)</li>
+            <li>Calibration edits in one tab are automatically reflected in all other tabs showing the same variable</li>
+            <li>You can rename devices in the <strong>⚙ Config</strong> dialog to distinguish between identical ECUs</li>
+            <li>The existing DAQ and Calibration pages still work independently — the Experiment page is an additional unified workspace</li>
+        </ul>
+    </div>
+
+    <!-- Keyboard Shortcuts (future) -->
+    <div class="card" style="margin-bottom: 0;">
+        <h3 style="margin-bottom: 0.75rem;">📋 API Endpoints</h3>
+        <p style="color: #888; margin-bottom: 0.75rem; font-size: 0.9rem;">
+            For automation or integration, the Experiment page uses these REST endpoints:
+        </p>
+        <table style="width:100%; border-collapse: collapse; font-size: 0.85rem;">
+            <thead>
+                <tr>
+                    <th style="padding: 0.5rem; border: 1px solid #333; text-align:left; background: #252535; width:15%;">Method</th>
+                    <th style="padding: 0.5rem; border: 1px solid #333; text-align:left; background: #252535; width:40%;">Endpoint</th>
+                    <th style="padding: 0.5rem; border: 1px solid #333; text-align:left; background: #252535;">Description</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #00ff88;">GET</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; font-family: monospace;">/api/experiment/variables</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ccc;">List all measurements and calibration parameters across all devices</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ff8844;">POST</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; font-family: monospace;">/api/experiment/start</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ccc;">Start DAQ (body: <code>{ selections: { device_id: [idx, ...] } }</code>)</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ff8844;">POST</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; font-family: monospace;">/api/experiment/stop</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ccc;">Stop DAQ and recording on all devices</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ff8844;">POST</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; font-family: monospace;">/api/experiment/record/start</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ccc;">Start MF4 recording (body: <code>{ title: "..." }</code>)</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ff8844;">POST</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; font-family: monospace;">/api/experiment/record/stop</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ccc;">Stop MF4 recording</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #00ff88;">GET</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; font-family: monospace;">/api/experiment/status</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ccc;">Get aggregated status of all devices</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ff8844;">POST</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; font-family: monospace;">/api/experiment/pagemode</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ccc;">Switch cal page mode (body: <code>{ mode: "working" | "reference" }</code>)</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ff8844;">POST</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; font-family: monospace;">/api/experiment/rename-slave/:device_id</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ccc;">Rename a device (body: <code>{ name: "..." }</code>)</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ff8844;">POST</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; font-family: monospace;">/api/experiment/checksum</td>
+                    <td style="padding: 0.5rem; border: 1px solid #333; color: #ccc;">Run checksum verification on all connected devices</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
