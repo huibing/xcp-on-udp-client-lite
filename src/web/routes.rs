@@ -4536,6 +4536,11 @@ pub async fn experiment_status(State(state): State<AppState>) -> impl IntoRespon
         let is_recording = daq_mgr.is_recording();
         let page_mode = *device.page_mode.read().await;
         let device_name = device.display_name_or_custom().await;
+        let device_id = if let Some(slave_id) = device.slave_id {
+            slave_id.to_string()
+        } else {
+            device.id.clone()
+        };
 
         if daq_running {
             daq_running_count += 1;
@@ -4545,7 +4550,7 @@ pub async fn experiment_status(State(state): State<AppState>) -> impl IntoRespon
         }
 
         device_statuses.push(json!({
-            "device_id": device.id,
+            "device_id": device_id,
             "device_name": device_name,
             "connected": device.connected,
             "daq_running": daq_running,
@@ -4614,7 +4619,7 @@ pub async fn experiment_pagemode(
                 *device.page_mode.write().await = mode;
                 success_count += 1;
                 results.push(json!({
-                    "device_id": device.id,
+                    "device_id": slave_id.to_string(),
                     "device_name": device.name,
                     "success": true,
                     "page_mode": mode_str,
@@ -4623,7 +4628,7 @@ pub async fn experiment_pagemode(
             Err(e) => {
                 fail_count += 1;
                 results.push(json!({
-                    "device_id": device.id,
+                    "device_id": slave_id.to_string(),
                     "device_name": device.name,
                     "success": false,
                     "error": e.to_string(),
@@ -4688,13 +4693,19 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
             continue;
         }
 
+        let dev_id = device
+            .slave_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| device.id.clone());
+        let dev_name = device.display_name_or_custom().await;
+
         let hex_image = device.hex_image.read().await.clone();
         let hex_image = match hex_image {
             Some(img) => img,
             None => {
                 results.push(json!({
-                    "device_id": device.id,
-                    "device_name": device.name,
+                    "device_id": dev_id,
+                    "device_name": dev_name,
                     "success": false,
                     "error": "No HEX file loaded"
                 }));
@@ -4706,8 +4717,8 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
             Some(id) => id,
             None => {
                 results.push(json!({
-                    "device_id": device.id,
-                    "device_name": device.name,
+                    "device_id": dev_id,
+                    "device_name": dev_name,
                     "success": false,
                     "error": "No slave ID"
                 }));
@@ -4720,8 +4731,8 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
             let a2l_path = device.a2l_path.clone();
             if a2l_path.is_empty() {
                 results.push(json!({
-                    "device_id": device.id,
-                    "device_name": device.name,
+                    "device_id": dev_id,
+                    "device_name": dev_name,
                     "success": false,
                     "error": "No A2L file loaded"
                 }));
@@ -4733,8 +4744,8 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
                 Ok(reader) => reader.get_memory_segments(),
                 Err(e) => {
                     results.push(json!({
-                        "device_id": device.id,
-                        "device_name": device.name,
+                        "device_id": dev_id,
+                        "device_name": dev_name,
                         "success": false,
                         "error": format!("Failed to load A2L: {:?}", e)
                     }));
@@ -4745,8 +4756,8 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
 
         if segments.is_empty() {
             results.push(json!({
-                "device_id": device.id,
-                "device_name": device.name,
+                "device_id": dev_id,
+                "device_name": dev_name,
                 "success": false,
                 "error": "No memory segments found"
             }));
@@ -4759,8 +4770,8 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
                 Some(s) => s,
                 None => {
                     results.push(json!({
-                        "device_id": device.id,
-                        "device_name": device.name,
+                        "device_id": dev_id,
+                        "device_name": dev_name,
                         "success": false,
                         "error": "Slave not found"
                     }));
@@ -4778,8 +4789,8 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
                 let passed = report.all_passed();
                 *device.checksum_report.write().await = Some(report.clone());
                 results.push(json!({
-                    "device_id": device.id,
-                    "device_name": device.name,
+                    "device_id": dev_id,
+                    "device_name": dev_name,
                     "success": true,
                     "passed": passed,
                     "segments": report.results.iter().map(|s| {
@@ -4808,8 +4819,8 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
             }
             Err(e) => {
                 results.push(json!({
-                    "device_id": device.id,
-                    "device_name": device.name,
+                    "device_id": dev_id,
+                    "device_name": dev_name,
                     "success": false,
                     "error": format!("{}", e),
                 }));
