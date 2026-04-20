@@ -1884,4 +1884,27 @@ function expToast(msg, type) {
     setTimeout(function() { toast.classList.add('show'); }, 10);
     setTimeout(function() { toast.classList.remove('show'); }, 3000);
 }
+
+// Global keyboard shortcuts for modals: Esc = close, Enter = save & close
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        expCloseVarModal();
+        expCloseConfig();
+        expCloseCalEdit();
+        expCloseInfo();
+        expCloseMatrix();
+        document.getElementById('expChecksumModal').style.display = 'none';
+    } else if (e.key === 'Enter' && !e.target.matches('input, textarea, select')) {
+        var varModal = document.getElementById('expVarModal');
+        var configModal = document.getElementById('expConfigModal');
+        var calEditModal = document.getElementById('expCalEditModal');
+        if (varModal && varModal.style.display !== 'none') {
+            expApplyVarSelection();
+        } else if (configModal && configModal.style.display !== 'none') {
+            expSaveConfig();
+        } else if (calEditModal && calEditModal.style.display !== 'none') {
+            expSaveCalEdit();
+        }
+    }
+});
 </script>
