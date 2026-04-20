@@ -1209,11 +1209,12 @@ function expStart() {
 function expRecord() {
     if (ExpState.mode !== 'running') return;
     var title = document.getElementById('expTitle').value.trim() || 'experiment';
+    var dir = ExpState.config.mf4Dir || 'records';
 
     fetch('/api/experiment/record/start', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ title: title }),
+        body: JSON.stringify({ title: title, dir: dir }),
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {

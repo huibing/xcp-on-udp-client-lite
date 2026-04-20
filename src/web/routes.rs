@@ -4433,38 +4433,85 @@ pub async fn experiment_record_start(
     State(state): State<AppState>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let _title = payload
+    let title = payload
         .get("title")
         .and_then(|v| v.as_str())
         .unwrap_or("experiment");
+    let dir = payload
+        .get("dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or("records");
 
-    let slaves = state.all_slaves().await;
+    // Generate MF4 filename: {title}_{YYYYMMDD}_{HHMMSS}.mf4
+    let now = chrono::Local::now();
+    let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
+    let safe_title = title
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect::<String>();
+
+    // Ensure output directory exists
+    let dir_path = std::path::Path::new(dir);
+    if !dir_path.exists() {
+        if let Err(e) = std::fs::create_dir_all(dir_path) {
+            return Json(json!({
+                "success": false,
+                "error": format!("Failed to create output directory: {}", e)
+            }));
+        }
+    }
+
+    let devices = state.all_devices().await;
     let client = state.client.lock().await;
     let mut errors = Vec::new();
     let mut started_count = 0;
 
-    for slave in &slaves {
-        if !*slave.daq_running.read().await || !slave.is_connected() {
+    for device in &devices {
+        if !*device.daq_running.read().await || !device.connected {
             continue;
         }
 
-        let xcp_slave = match client.get_slave(slave.id) {
+        let slave_id = match device.slave_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        let xcp_slave = match client.get_slave(slave_id) {
             Some(s) => s,
             None => continue,
         };
         let xcp_slave_guard = xcp_slave.lock().await;
-        let mut daq_manager = slave.daq_manager.write().await;
+        let mut daq_manager = device.daq_manager.write().await;
+
+        // Set MF4 path with experiment title and device name
+        let device_name = device.display_name_or_custom().await;
+        let safe_device = device_name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect::<String>();
+        let mf4_filename = if devices.iter().filter(|d| d.connected).count() > 1 {
+            format!("{}_{}_{}.mf4", safe_title, safe_device, timestamp)
+        } else {
+            format!("{}_{}.mf4", safe_title, timestamp)
+        };
+        let mf4_path = dir_path.join(&mf4_filename);
+        daq_manager.set_mdf4_path(&mf4_path);
+
+        // Also set CSV path alongside
+        let csv_path = mf4_path.with_extension("csv");
+        daq_manager.set_csv_path(&csv_path);
 
         match daq_manager.start_recording(&*xcp_slave_guard).await {
             Ok(_) => {
                 started_count += 1;
                 tracing::info!(
-                    "Experiment recording started on {}",
-                    slave.display_name()
+                    "Experiment recording started on {} → {}",
+                    device_name,
+                    mf4_path.display()
                 );
             }
             Err(e) => {
-                errors.push(format!("{}: {}", slave.display_name(), e));
+                errors.push(format!("{}: {}", device_name, e));
             }
         }
     }
@@ -4487,12 +4534,12 @@ pub async fn experiment_record_start(
 
 /// Stop MF4 recording (POST /api/experiment/record/stop)
 pub async fn experiment_record_stop(State(state): State<AppState>) -> impl IntoResponse {
-    let slaves = state.all_slaves().await;
+    let devices = state.all_devices().await;
     let mut errors = Vec::new();
     let mut stopped_count = 0;
 
-    for slave in &slaves {
-        let daq_manager = slave.daq_manager.read().await;
+    for device in &devices {
+        let daq_manager = device.daq_manager.read().await;
         if !daq_manager.is_recording() {
             continue;
         }
@@ -4502,11 +4549,15 @@ pub async fn experiment_record_stop(State(state): State<AppState>) -> impl IntoR
                 stopped_count += 1;
                 tracing::info!(
                     "Experiment recording stopped on {}",
-                    slave.display_name()
+                    device.display_name_or_custom().await
                 );
             }
             Err(e) => {
-                errors.push(format!("{}: {}", slave.display_name(), e));
+                errors.push(format!(
+                    "{}: {}",
+                    device.display_name_or_custom().await,
+                    e
+                ));
             }
         }
     }
