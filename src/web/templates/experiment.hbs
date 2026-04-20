@@ -570,6 +570,13 @@
 </div>
 
 <script>
+// ===== Utility =====
+function escapeHtml(text) {
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 // ===== Experiment Page State =====
 const EXP_MAX_TABS = 20;
 
