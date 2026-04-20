@@ -822,7 +822,7 @@ function expRenderTabContent() {
             '<div class="icon">📋</div>' +
             '<p>No variables in this tab</p>' +
             '<p style="font-size:0.85rem;">Click "Variables" in the toolbar to add measurements and calibration parameters</p>' +
-            '<button class="exp-tb-btn" onclick="expOpenVarModal()" ' + (ExpState.mode !== 'idle' ? 'disabled' : '') + '>📋 Add Variables</button>' +
+            '<button class="exp-tb-btn" onclick="expOpenVarModal()">📋 Add Variables</button>' +
             '</div>';
         return;
     }
@@ -924,10 +924,6 @@ var expIsLoadingMore = false;
 var EXP_VAR_BATCH_SIZE = 500;
 
 function expOpenVarModal() {
-    if (ExpState.mode !== 'idle') {
-        expToast('Cannot change variables while DAQ is running', 'error');
-        return;
-    }
     document.getElementById('expVarModal').style.display = 'flex';
     expVarModalSelection = {};
     expFilteredItems = [];
@@ -1027,14 +1023,19 @@ function expPopulateVarModal() {
 
 function expRenderVarRows(items) {
     var html = '';
+    var daqActive = ExpState.mode !== 'idle';
     items.forEach(function(v) {
         var key = v.kind + ':' + v.device_id + ':' + v.idx;
         var checked = expVarModalSelection[key] ? 'checked' : '';
         var kindLabel = v.kind === 'measurement' ? '📊 Meas' : '🔧 Cal';
         var kindColor = v.kind === 'measurement' ? '#4488ff' : '#ff8844';
+        var measLocked = daqActive && v.kind === 'measurement';
+        var disabledAttr = measLocked ? 'disabled' : '';
+        var rowStyle = measLocked ? 'cursor:not-allowed; opacity:0.5;' : 'cursor:pointer;';
+        var rowClick = measLocked ? '' : 'onclick="expToggleVarCheckbox(\'' + key + '\')"';
         html +=
-            '<tr onclick="expToggleVarCheckbox(\'' + key + '\')" style="cursor:pointer;" class="' + (checked ? 'selected-row' : '') + '">' +
-            '<td style="padding:0.5rem; text-align:center;"><input type="checkbox" ' + checked + ' data-key="' + key + '" onclick="event.stopPropagation(); expToggleVar(\'' + key + '\')"></td>' +
+            '<tr ' + rowClick + ' style="' + rowStyle + '" class="' + (checked ? 'selected-row' : '') + '">' +
+            '<td style="padding:0.5rem; text-align:center;"><input type="checkbox" ' + checked + ' ' + disabledAttr + ' data-key="' + key + '" onclick="event.stopPropagation(); expToggleVar(\'' + key + '\')"></td>' +
             '<td style="padding:0.5rem;">' + escapeHtml(v.name) + '</td>' +
             '<td style="padding:0.5rem; color:#888;">' + escapeHtml(v.device_name) + '</td>' +
             '<td style="padding:0.5rem;"><span style="color:' + kindColor + '; font-size:0.8rem;">' + kindLabel + '</span></td>' +
@@ -1081,6 +1082,10 @@ function expFilterVars() {
 }
 
 function expToggleVar(key) {
+    // Prevent toggling measurement variables while DAQ is running
+    if (ExpState.mode !== 'idle' && key.startsWith('measurement:')) {
+        return;
+    }
     if (expVarModalSelection[key]) {
         delete expVarModalSelection[key];
     } else {
@@ -1101,8 +1106,10 @@ function expToggleVarCheckbox(key) { expToggleVar(key); }
 
 function expToggleSelectAll() {
     var allChecked = document.getElementById('expSelectAll').checked;
+    var daqActive = ExpState.mode !== 'idle';
     document.querySelectorAll('#expVarList input[type="checkbox"]').forEach(function(cb) {
         var key = cb.dataset.key;
+        if (daqActive && key.startsWith('measurement:')) return;
         if (allChecked) {
             expVarModalSelection[key] = true;
             cb.checked = true;
@@ -1277,7 +1284,7 @@ function expUpdateToolbarState() {
             btnStart.style.display = 'none';
             btnRecord.style.display = '';
             btnStop.style.display = '';
-            btnAddVars.disabled = true;
+            btnAddVars.disabled = false;
             stateLabel.textContent = 'DAQ RUNNING';
             stateLabel.style.color = '#00ff88';
             btnRecord.classList.remove('recording');
@@ -1289,7 +1296,7 @@ function expUpdateToolbarState() {
             btnRecord.classList.add('recording');
             btnRecord.disabled = true;
             btnStop.style.display = '';
-            btnAddVars.disabled = true;
+            btnAddVars.disabled = false;
             stateLabel.textContent = '⏺ RECORDING';
             stateLabel.style.color = '#ff4444';
             break;
