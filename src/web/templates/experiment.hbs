@@ -730,6 +730,18 @@ let tabCounter = 0;
     expAddTab();
     expStartStatusPolling();
     expRefreshVariables();
+
+    // Intercept nav links: prevent leaving when DAQ is running/recording
+    document.querySelectorAll('.nav a').forEach(function(link) {
+        var href = link.getAttribute('href');
+        if (href === '/experiment') return; // allow staying on experiment page
+        link.addEventListener('click', function(e) {
+            if (ExpState.mode !== 'idle') {
+                e.preventDefault();
+                expToast('Please stop DAQ before leaving the Experiment page', 'error');
+            }
+        });
+    });
 })();
 
 function expAddTab() {
