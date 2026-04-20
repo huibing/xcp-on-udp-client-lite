@@ -237,6 +237,34 @@
 }
 .exp-var-card:hover .card-remove { opacity: 0.7; }
 .exp-var-card .card-remove:hover { opacity: 1; background: #ff444433; }
+.exp-var-card .card-actions {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.exp-var-card:hover .card-actions { opacity: 1; }
+.exp-var-card .card-info-btn {
+    cursor: pointer;
+    font-size: 0.7rem;
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+.exp-var-card .card-info-btn:hover { background: #4488ff33; }
+.exp-var-card.map-curve {
+    border-left-color: #ff8844;
+}
+.exp-info-row td {
+    padding: 0.5rem;
+    border-bottom: 1px solid #333;
+}
+.exp-info-row td:first-child {
+    color: #888;
+    width: 40%;
+}
 
 /* Map/Curve section */
 .exp-map-section {
@@ -570,6 +598,44 @@
     </div>
 </div>
 
+<!-- Variable Info Modal -->
+<div id="expInfoModal" class="exp-modal" style="display:none;">
+    <div class="exp-modal-content" style="width:600px; max-height:90vh; overflow:hidden; display:flex; flex-direction:column;">
+        <div class="exp-modal-header">
+            <h3 id="expInfoTitle" style="margin:0;">Variable Information</h3>
+            <button class="exp-modal-close" onclick="expCloseInfo()">&times;</button>
+        </div>
+        <div class="exp-modal-body" id="expInfoBody" style="flex:1; overflow:auto;">
+            <!-- Info content rendered here -->
+        </div>
+        <div class="exp-modal-footer">
+            <button class="secondary" onclick="expCloseInfo()">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Matrix/Array Data Modal -->
+<div id="expMatrixModal" class="exp-modal" style="display:none;">
+    <div class="exp-modal-content" style="width:95%; max-width:1400px; max-height:90vh; overflow:hidden; display:flex; flex-direction:column;">
+        <div class="exp-modal-header">
+            <div>
+                <h3 id="expMatrixTitle" style="margin:0;">Data Viewer</h3>
+                <div id="expMatrixAxisInfo" style="margin-top:0.25rem; font-size:0.85em; color:#888;"></div>
+            </div>
+            <div style="display:flex; align-items:center; gap:1rem;">
+                <span id="expMatrixPageMode" style="font-size:0.9em; color:#888;"></span>
+                <button class="exp-modal-close" onclick="expCloseMatrix()">&times;</button>
+            </div>
+        </div>
+        <div class="exp-modal-body" id="expMatrixBody" style="flex:1; overflow:auto;">
+            <!-- Table rendered here -->
+        </div>
+        <div class="exp-modal-footer">
+            <button class="secondary" onclick="expCloseMatrix()">Close</button>
+        </div>
+    </div>
+</div>
+
 <script>
 // ===== Utility =====
 function escapeHtml(text) {
@@ -723,8 +789,10 @@ function expRenderTabContent() {
                 '<div class="card-device">' + escapeHtml(v.device_name) + '</div>' +
                 '<div class="card-name">' + escapeHtml(v.name) + '</div>' +
                 '<div class="card-value"><span data-live-key="' + escapeHtml(key) + '">' + displayVal + '</span><span class="card-unit">' + escapeHtml(v.unit || '') + '</span></div>' +
-                (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
-                '</div>';
+                '<div class="card-actions">' +
+                '<span class="card-info-btn" onclick="event.stopPropagation(); expShowInfo(\'measurement\', \'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')" title="Variable info">ℹ️</span>' +
+                (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
+                '</div></div>';
         });
         html += '</div></div>';
     }
@@ -746,29 +814,32 @@ function expRenderTabContent() {
                 '<div class="card-device">' + escapeHtml(v.device_name) + '</div>' +
                 '<div class="card-name">' + escapeHtml(v.name) + '</div>' +
                 '<div class="card-value"><span data-cal-key="' + escapeHtml(calKey) + '">' + escapeHtml(String(displayVal)) + '</span><span class="card-unit">' + escapeHtml(v.unit || '') + '</span></div>' +
+                '<div class="card-actions">' +
+                '<span class="card-info-btn" onclick="event.stopPropagation(); expShowInfo(\'cal\', \'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')" title="Variable info">ℹ️</span>' +
                 (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
-                '</div>';
+                '</div></div>';
         });
         html += '</div></div>';
     }
 
-    // Map/Curve calibrations (table view)
+    // Map/Curve calibration cards (no value, info + table buttons)
     if (mapCurveCals.length > 0) {
-        html += '<div class="exp-map-section"><h3>📐 Maps & Curves (' + mapCurveCals.length + ')</h3>';
+        html += '<div class="exp-cards-section"><h3>📐 Maps & Curves (' + mapCurveCals.length + ')</h3><div class="exp-cards-grid">';
         mapCurveCals.forEach(function(v) {
             html +=
-                '<div class="card" style="margin-top:0.5rem; padding:0.75rem;">' +
-                '<div style="display:flex; justify-content:space-between; align-items:center;">' +
-                '<strong style="color:#ff8844;">' + escapeHtml(v.name) + '</strong>' +
-                '<span style="color:#666; font-size:0.8rem;">' + escapeHtml(v.device_name) + ' | ' + escapeHtml(v.calType || '') + '</span>' +
-                (ExpState.mode === 'idle' ? '<span class="card-remove" style="position:static; opacity:0.7;" onclick="expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
+                '<div class="exp-var-card calibration map-curve" title="' + escapeHtml(v.device_name + ' / ' + v.name) + '">' +
+                '<div class="card-device">' + escapeHtml(v.device_name) + '</div>' +
+                '<div class="card-name">' + escapeHtml(v.name) + '</div>' +
+                '<div class="card-type" style="color:#888; font-size:0.75rem; margin-top:0.15rem;">' + escapeHtml(v.calType || '') + '</div>' +
+                '<div class="card-map-actions" style="display:flex; gap:0.5rem; margin-top:0.5rem;">' +
+                '<button class="exp-tb-btn" style="font-size:0.75rem; padding:0.25rem 0.5rem;" onclick="event.stopPropagation(); expShowInfo(\'cal\', \'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')">ℹ️ Info</button>' +
+                '<button class="exp-tb-btn" style="font-size:0.75rem; padding:0.25rem 0.5rem;" onclick="event.stopPropagation(); expShowMatrix(\'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')">📊 Table</button>' +
                 '</div>' +
-                '<div id="mapTable_' + v.device_id + '_' + v.idx + '" style="margin-top:0.5rem; overflow-x:auto;">' +
-                '<button class="secondary" style="font-size:0.8rem;" onclick="expLoadMapData(\'' + v.device_id + '\', ' + v.idx + ')">Load Data</button>' +
-                '</div>' +
-                '</div>';
+                '<div class="card-actions">' +
+                (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
+                '</div></div>';
         });
-        html += '</div>';
+        html += '</div></div>';
     }
 
     container.innerHTML = html;
@@ -1377,81 +1448,231 @@ function expSaveCalEdit() {
 
 // ===== Map/Curve Data Loading =====
 function expLoadMapData(deviceId, idx) {
-    fetch('/api/cal/detail/' + deviceId + '/' + idx)
+    expShowMatrix(deviceId, idx, '');
+}
+
+// ===== Variable Info Modal =====
+function expShowInfo(varType, deviceId, idx, name) {
+    document.getElementById('expInfoTitle').textContent = name;
+    document.getElementById('expInfoModal').style.display = 'flex';
+    document.getElementById('expInfoBody').innerHTML = '<p style="text-align:center; color:#888;">Loading...</p>';
+
+    var apiPath = varType === 'cal' ? '/api/cal/detail/' + deviceId + '/' + idx : '/api/daq/detail/' + deviceId + '/' + idx;
+    fetch(apiPath)
         .then(function(r) { return r.json(); })
         .then(function(data) {
-            if (!data.success) {
-                expToast('Failed to load: ' + (data.error || ''), 'error');
-                return;
+            if (data.success && data.detail) {
+                expRenderInfo(data.detail, varType);
+            } else {
+                document.getElementById('expInfoBody').innerHTML = '<p style="color:#ff4444;">Error: ' + escapeHtml(data.error || 'Unknown') + '</p>';
             }
-            var container = document.getElementById('mapTable_' + deviceId + '_' + idx);
-            if (!container) return;
-
-            fetch('/api/cal/read/' + deviceId + '/' + idx)
-                .then(function(r) { return r.json(); })
-                .then(function(readData) {
-                    if (readData.success && readData.value) {
-                        container.innerHTML = expRenderMapTable(data, readData.value, deviceId, idx);
-                    } else {
-                        container.innerHTML = '<span style="color:#ff4444;">Failed to read value</span>';
-                    }
-                });
         })
-        .catch(function(e) { expToast('Load failed: ' + e, 'error'); });
+        .catch(function(e) {
+            document.getElementById('expInfoBody').innerHTML = '<p style="color:#ff4444;">Failed: ' + escapeHtml(e.message || String(e)) + '</p>';
+        });
 }
 
-function expRenderMapTable(detail, value, deviceId, idx) {
-    if (typeof value === 'string') {
-        try { value = JSON.parse(value); } catch(e) { /* keep */ }
+function expCloseInfo() {
+    document.getElementById('expInfoModal').style.display = 'none';
+}
+
+function expRenderInfo(detail, varType) {
+    var body = document.getElementById('expInfoBody');
+    var html = '<table style="width:100%; border-collapse:collapse;">';
+
+    function row(label, value) {
+        if (value === undefined || value === null || value === '') return '';
+        return '<tr class="exp-info-row"><td>' + escapeHtml(label) + '</td><td style="font-family:monospace; word-break:break-all;">' + escapeHtml(String(value)) + '</td></tr>';
     }
 
-    if (Array.isArray(value)) {
-        if (Array.isArray(value[0])) {
-            // 2D matrix
-            var html = '<table class="exp-map-table"><tbody>';
-            value.forEach(function(row, ri) {
-                html += '<tr>';
-                row.forEach(function(cell, ci) {
-                    var isW = ExpState.pageMode === 'working';
-                    html += '<td class="' + (isW ? 'editable' : '') + '" ' + (isW ? 'onclick="expEditMapCell(\'' + deviceId + '\', ' + idx + ', ' + ri + ', ' + ci + ', this)"' : '') + '>' + formatValue(cell) + '</td>';
-                });
-                html += '</tr>';
+    html += row('Name', detail.name);
+    html += row('Device', detail.device_name);
+    html += row('Type', detail.type);
+    html += row('Address', detail.address);
+    html += row('Address Extension', detail.address_ext);
+
+    if (varType === 'cal') {
+        html += row('Description', detail.description);
+        html += row('Unit', detail.unit);
+        html += row('Range', detail.range);
+        html += row('Characteristic Type', detail.characteristic_type);
+        html += row('Storage Order', detail.storage_order);
+        html += row('Data Size', detail.data_size);
+
+        if (detail.axis_info && detail.axis_info.length > 0) {
+            html += '<tr><td colspan="2" style="padding:1rem 0.5rem 0.5rem; border:none; font-weight:bold; color:#00ff88;">Axis Information</td></tr>';
+            detail.axis_info.forEach(function(axis, i) {
+                var axisRole = '';
+                if (detail.characteristic_type === 'MAP' && detail.axis_info.length === 2) {
+                    axisRole = i === 0 ? ' (X, columns)' : ' (Y, rows)';
+                } else if (detail.characteristic_type === 'CURVE') {
+                    axisRole = ' (X)';
+                }
+                html += '<tr><td colspan="2" style="padding:0.5rem; background:#2a2a2a; border:1px solid #444;">' +
+                    '<strong>Axis ' + (i + 1) + axisRole + ': ' + escapeHtml(axis.name) + '</strong>' +
+                    (axis.unit ? ' (' + escapeHtml(axis.unit) + ')' : '') +
+                    '<br>Points: ' + axis.num_points + ', Range: ' + axis.min + ' ~ ' + axis.max +
+                    '</td></tr>';
             });
-            html += '</tbody></table>';
-            return html;
+        }
+    } else {
+        html += row('Description', detail.description);
+        html += row('Unit', detail.unit);
+        html += row('Data Size', detail.data_size);
+    }
+
+    html += '</table>';
+    body.innerHTML = html;
+}
+
+// ===== Matrix/Array Data Modal =====
+var expMatrixDeviceId = null;
+var expMatrixIdx = null;
+
+function expShowMatrix(deviceId, idx, name) {
+    expMatrixDeviceId = deviceId;
+    expMatrixIdx = idx;
+    document.getElementById('expMatrixTitle').textContent = name || 'Data Viewer';
+    document.getElementById('expMatrixModal').style.display = 'flex';
+    document.getElementById('expMatrixBody').innerHTML = '<p style="text-align:center; color:#888;">Loading data...</p>';
+    document.getElementById('expMatrixAxisInfo').innerHTML = '';
+    document.getElementById('expMatrixPageMode').innerHTML = '';
+
+    fetch('/api/cal/value/' + deviceId + '/' + idx)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                expRenderMatrix(data);
+            } else {
+                document.getElementById('expMatrixBody').innerHTML = '<p style="color:#ff4444;">Error: ' + escapeHtml(data.error || '') + '</p>';
+            }
+        })
+        .catch(function(e) {
+            document.getElementById('expMatrixBody').innerHTML = '<p style="color:#ff4444;">Failed: ' + escapeHtml(String(e)) + '</p>';
+        });
+}
+
+function expCloseMatrix() {
+    document.getElementById('expMatrixModal').style.display = 'none';
+    expMatrixDeviceId = null;
+    expMatrixIdx = null;
+}
+
+function expRenderMatrix(data) {
+    var container = document.getElementById('expMatrixBody');
+    var isWorking = data.is_working_page;
+    var axisValues = data.axis_values || [];
+    var axisInfo = data.axis_info || [];
+
+    // Page mode indicator
+    var pageModeSpan = document.getElementById('expMatrixPageMode');
+    if (isWorking) {
+        pageModeSpan.innerHTML = '<span style="color:#4CAF50;">✏️ Working (editable)</span>';
+    } else {
+        pageModeSpan.innerHTML = '<span style="color:#888;">📖 Reference (read-only)</span>';
+    }
+
+    // Axis info
+    var axisInfoDiv = document.getElementById('expMatrixAxisInfo');
+    if (axisInfo.length === 2) {
+        axisInfoDiv.innerHTML = 'X: ' + escapeHtml(axisInfo[0].name) + ' | Y: ' + escapeHtml(axisInfo[1].name);
+    } else if (axisInfo.length === 1) {
+        axisInfoDiv.innerHTML = 'X: ' + escapeHtml(axisInfo[0].name);
+    }
+
+    // Update title with name if available
+    if (data.name) {
+        document.getElementById('expMatrixTitle').textContent = data.name;
+    }
+
+    if (data.is_1d) {
+        expRender1DTable(container, data, isWorking, axisValues, axisInfo);
+    } else {
+        expRender2DTable(container, data, isWorking, axisValues, axisInfo);
+    }
+}
+
+function expRender1DTable(container, data, isWorking, axisValues, axisInfo) {
+    var values = data.value;
+    var cols = data.cols;
+    var xLabels = [];
+    if (axisValues.length > 0 && axisValues[0]) {
+        xLabels = axisValues[0].map(function(v) { return String(v); });
+    }
+
+    var html = '<table style="width:100%; border-collapse:collapse;"><thead><tr>' +
+        '<th style="padding:0.5rem; background:#2a2a2a; border:1px solid #444;">Index</th>';
+    for (var c = 0; c < cols; c++) {
+        html += '<th style="padding:0.5rem; background:#2a2a2a; border:1px solid #444;">' + escapeHtml(xLabels[c] || String(c)) + '</th>';
+    }
+    html += '</tr></thead><tbody><tr><td style="padding:0.5rem; background:#1e1e1e; border:1px solid #444; font-weight:bold;">Value</td>';
+    for (var c = 0; c < cols; c++) {
+        var val = values[c] !== undefined ? values[c] : '-';
+        if (isWorking) {
+            html += '<td style="padding:0.25rem; border:1px solid #444; text-align:center;">' +
+                '<input type="text" value="' + val + '" style="width:80px; text-align:center; background:#1e1e1e; border:1px solid #0f3460; color:#00ff88; padding:0.25rem;" ' +
+                'onchange="expSaveMatrixCell(0, ' + c + ', this.value)">' +
+                '</td>';
         } else {
-            // 1D array
-            var html = '<table class="exp-map-table"><tbody><tr>';
-            value.forEach(function(v, i) {
-                var isW = ExpState.pageMode === 'working';
-                html += '<td class="' + (isW ? 'editable' : '') + '" ' + (isW ? 'onclick="expEditMapCell(\'' + deviceId + '\', ' + idx + ', 0, ' + i + ', this)"' : '') + '>' + formatValue(v) + '</td>';
-            });
-            html += '</tr></tbody></table>';
-            return html;
+            html += '<td style="padding:0.5rem; border:1px solid #444; text-align:center; color:#00ff88;">' + val + '</td>';
         }
     }
-
-    return '<span style="color:#888;">' + escapeHtml(String(value)) + '</span>';
+    html += '</tr></tbody></table>';
+    container.innerHTML = html;
 }
 
-function expEditMapCell(deviceId, idx, row, col, cell) {
-    if (ExpState.pageMode !== 'working') return;
-    var oldVal = cell.textContent;
-    cell.innerHTML = '<input class="exp-inline-edit" value="' + escapeHtml(oldVal) + '" ' +
-        'onblur="expSaveMapCell(\'' + deviceId + '\', ' + idx + ', ' + row + ', ' + col + ', this, \'' + escapeHtml(oldVal) + '\')" ' +
-        'onkeydown="if(event.key===\'Enter\')this.blur(); if(event.key===\'Escape\'){this.value=\'' + escapeHtml(oldVal) + '\';this.blur();}">';
-    cell.querySelector('input').focus();
-    cell.querySelector('input').select();
-}
-
-function expSaveMapCell(deviceId, idx, row, col, input, oldVal) {
-    var newVal = input.value;
-    if (newVal === oldVal) {
-        input.parentElement.textContent = oldVal;
-        return;
+function expRender2DTable(container, data, isWorking, axisValues, axisInfo) {
+    var values = data.value;
+    var rows = data.rows;
+    var cols = data.cols;
+    var xLabels = [], yLabels = [];
+    if (axisValues.length > 1) {
+        xLabels = axisValues[0] ? axisValues[0].map(function(v) { return String(v); }) : [];
+        yLabels = axisValues[1] ? axisValues[1].map(function(v) { return String(v); }) : [];
+    } else if (axisValues.length > 0) {
+        yLabels = axisValues[0] ? axisValues[0].map(function(v) { return String(v); }) : [];
     }
 
-    fetch('/api/cal/write-element/' + deviceId + '/' + idx, {
+    // Transpose for correct display (values[r][c] where r=X_points, c=Y_points -> display r=Y, c=X)
+    var transposed = [];
+    for (var c = 0; c < cols; c++) {
+        transposed[c] = [];
+        for (var r = 0; r < rows; r++) {
+            transposed[c][r] = values[r] ? values[r][c] : '-';
+        }
+    }
+    var displayRows = cols;
+    var displayCols = rows;
+
+    var html = '<table style="width:100%; border-collapse:collapse;"><thead><tr>' +
+        '<th style="padding:0.5rem; background:#2a2a2a; border:1px solid #444;"></th>';
+    for (var dc = 0; dc < displayCols; dc++) {
+        html += '<th style="padding:0.5rem; background:#2a2a2a; border:1px solid #444;">' + escapeHtml(xLabels[dc] || String(dc)) + '</th>';
+    }
+    html += '</tr></thead><tbody>';
+
+    for (var dr = 0; dr < displayRows; dr++) {
+        html += '<tr><td style="padding:0.5rem; background:#2a2a2a; border:1px solid #444; font-weight:bold;">' + escapeHtml(yLabels[dr] || String(dr)) + '</td>';
+        for (var dc = 0; dc < displayCols; dc++) {
+            var val = transposed[dr] ? (transposed[dr][dc] !== undefined ? transposed[dr][dc] : '-') : '-';
+            if (isWorking) {
+                html += '<td style="padding:0.25rem; border:1px solid #444; text-align:center;">' +
+                    '<input type="text" value="' + val + '" style="width:80px; text-align:center; background:#1e1e1e; border:1px solid #0f3460; color:#00ff88; padding:0.25rem;" ' +
+                    'onchange="expSaveMatrixCell(' + dc + ', ' + dr + ', this.value)">' +
+                    '</td>';
+            } else {
+                html += '<td style="padding:0.5rem; border:1px solid #444; text-align:center; color:#00ff88;">' + val + '</td>';
+            }
+        }
+        html += '</tr>';
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+function expSaveMatrixCell(row, col, newVal) {
+    if (!expMatrixDeviceId || expMatrixIdx === null) return;
+    fetch('/api/cal/write-element/' + expMatrixDeviceId + '/' + expMatrixIdx, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ row: row, col: col, value: newVal }),
@@ -1459,16 +1680,12 @@ function expSaveMapCell(deviceId, idx, row, col, input, oldVal) {
     .then(function(r) { return r.json(); })
     .then(function(data) {
         if (data.success) {
-            input.parentElement.textContent = newVal;
             expToast('Cell updated', 'success');
         } else {
-            input.parentElement.textContent = oldVal;
             expToast('Write failed: ' + (data.error || ''), 'error');
         }
     })
-    .catch(function() {
-        input.parentElement.textContent = oldVal;
-    });
+    .catch(function(e) { expToast('Write error: ' + e, 'error'); });
 }
 
 // ===== Save / Load =====
