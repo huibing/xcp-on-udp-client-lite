@@ -1409,9 +1409,9 @@ impl DaqManager {
 
                 match msg {
                     Ok(Some(msg)) => {
-                        // Parse single DTO packet
-                        if let Some(data) =
-                            parse_dto_packet(&msg.payload, timestamp_size, &iden_field_type)
+                        // Parse single DTO packet (PID + raw data, no timestamp parsed yet)
+                        if let Some(mut data) =
+                            parse_dto_packet(&msg.payload, &iden_field_type)
                         {
                             // Get configuration for this DAQ list and ODT
                             let config = daq_config.read().await;
@@ -1432,6 +1432,15 @@ impl DaqManager {
                                     }
                                 },
                             };
+
+                            // Per XCP spec, timestamp only exists in ODT 0 of each DAQ list.
+                            // Strip timestamp bytes from data and parse them.
+                            if resolved_odt == 0 && timestamp_size > 0 {
+                                let (ts, remaining) =
+                                    extract_odt0_timestamp(&data.data, timestamp_size);
+                                data.timestamp = ts;
+                                data.data = remaining;
+                            }
 
                             // Find entries for this ODT
                             let entries: Vec<&OdtEntryConfig> = config
@@ -2171,7 +2180,6 @@ impl Default for DaqManager {
 /// - N bytes: ODT data (including identification field and timestamp)
 fn parse_dto_packet(
     packet: &[u8],
-    timestamp_size: u8,
     ind_field_type: &IdentificationFieldType,
 ) -> Option<DtoData> {
     if packet.is_empty() {
@@ -2211,39 +2219,34 @@ fn parse_dto_packet(
         }
     };
 
-    // Parse timestamp if present
-    let timestamp = match timestamp_size {
-        0 => None,
-        1 => {
-            let mut timestamp_buf = [0u8];
-            cur.read_exact(&mut timestamp_buf).ok()?;
-            Some(timestamp_buf[0] as u32)
-        }
-        2 => {
-            let mut timestamp_buf = [0u8; 2];
-            cur.read_exact(&mut timestamp_buf).ok()?;
-            Some(u16::from_le_bytes(timestamp_buf) as u32)
-        }
-        4 => {
-            let mut timestamp_buf = [0u8; 4];
-            cur.read_exact(&mut timestamp_buf).ok()?;
-            Some(u32::from_le_bytes(timestamp_buf))
-        }
-        _ => {
-            tracing::error!("Invalid timestamp size: {}", timestamp_size);
-            None
-        }
-    };
-
+    // NOTE: Timestamp is NOT parsed here. Per XCP spec, timestamp only
+    // appears in ODT 0 of each DAQ list. The caller must strip the
+    // timestamp bytes after resolving which ODT is ODT 0.
     let mut data = Vec::with_capacity(packet.len().saturating_sub(pid_size));
     cur.read_to_end(&mut data).ok()?;
 
     Some(DtoData {
         daq_list,
         odt,
-        timestamp,
+        timestamp: None,
         data,
     })
+}
+
+/// Extract timestamp from the beginning of a DTO data buffer (ODT 0 only).
+/// Returns `(timestamp, data_without_timestamp)`.
+fn extract_odt0_timestamp(data: &[u8], timestamp_size: u8) -> (Option<u32>, Vec<u8>) {
+    let ts_len = timestamp_size as usize;
+    if ts_len == 0 || data.len() < ts_len {
+        return (None, data.to_vec());
+    }
+    let timestamp = match timestamp_size {
+        1 => Some(data[0] as u32),
+        2 => Some(u16::from_le_bytes([data[0], data[1]]) as u32),
+        4 => Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]])),
+        _ => None,
+    };
+    (timestamp, data[ts_len..].to_vec())
 }
 
 #[cfg(test)]
@@ -2790,17 +2793,18 @@ mod tests {
         // Valid DTO payload: ODT (0x00) + data (AbosulteODT mode)
         // Note: In AbosulteODT mode, the ODT number is absolute, daq_list is None
         let packet = [0x00, 0x01, 0x02, 0x03, 0x04];
-        let result = parse_dto_packet(&packet, 0, &IdentificationFieldType::AbosulteODT);
+        let result = parse_dto_packet(&packet, &IdentificationFieldType::AbosulteODT);
         assert!(result.is_some());
         let data = result.unwrap();
         assert_eq!(data.daq_list, None); // AbosulteODT doesn't include daq_list
         assert_eq!(data.odt, 0x00);
+        // Timestamp is no longer parsed here — caller strips it for ODT 0
         assert_eq!(data.data, vec![0x01, 0x02, 0x03, 0x04]);
 
         // Test with RelativeODT mode - includes DAQ list
         // Format: ODT (1 byte) + DAQ list (1 byte) + data
         let packet = [0x01, 0x01, 0xAA, 0xBB, 0xCC, 0xDD];
-        let result = parse_dto_packet(&packet, 0, &IdentificationFieldType::RelatetiveODTBYTE);
+        let result = parse_dto_packet(&packet, &IdentificationFieldType::RelatetiveODTBYTE);
         assert!(result.is_some());
         let data = result.unwrap();
         assert_eq!(data.daq_list, Some(1));
@@ -2808,8 +2812,29 @@ mod tests {
 
         // Packet too short (missing PID/data payload bytes)
         let packet = [];
-        let result = parse_dto_packet(&packet, 0, &IdentificationFieldType::AbosulteODT);
+        let result = parse_dto_packet(&packet, &IdentificationFieldType::AbosulteODT);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_odt0_timestamp() {
+        // 4-byte timestamp
+        let data = vec![0x10, 0x27, 0x00, 0x00, 0xAA, 0xBB, 0xCC];
+        let (ts, remaining) = extract_odt0_timestamp(&data, 4);
+        assert_eq!(ts, Some(10000)); // 0x00002710 = 10000
+        assert_eq!(remaining, vec![0xAA, 0xBB, 0xCC]);
+
+        // 2-byte timestamp
+        let data = vec![0xE8, 0x03, 0xDD, 0xEE];
+        let (ts, remaining) = extract_odt0_timestamp(&data, 2);
+        assert_eq!(ts, Some(1000)); // 0x03E8 = 1000
+        assert_eq!(remaining, vec![0xDD, 0xEE]);
+
+        // No timestamp
+        let data = vec![0xAA, 0xBB];
+        let (ts, remaining) = extract_odt0_timestamp(&data, 0);
+        assert_eq!(ts, None);
+        assert_eq!(remaining, vec![0xAA, 0xBB]);
     }
 
     #[test]
