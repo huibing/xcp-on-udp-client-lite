@@ -591,15 +591,15 @@ const ExpState = {
     statusInterval: null,
 };
 
+// ===== Tab Management =====
+let tabCounter = 0;
+
 // ===== Initialization =====
 (function init() {
     expAddTab();
     expStartStatusPolling();
     expRefreshVariables();
 })();
-
-// ===== Tab Management =====
-let tabCounter = 0;
 
 function expAddTab() {
     if (ExpState.tabs.length >= EXP_MAX_TABS) {
