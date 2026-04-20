@@ -1532,6 +1532,68 @@ pub async fn cal_write_api(
     Redirect::to("/calibration")
 }
 
+/// JSON calibration write API (POST /api/experiment/cal/write/:device_id/:idx)
+/// Used by the experiment page which expects JSON responses.
+pub async fn cal_write_json_api(
+    State(state): State<AppState>,
+    Path((device_id_str, idx)): Path<(String, usize)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let uuid = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(json!({ "success": false, "error": "Invalid device ID" }));
+        }
+    };
+
+    let slave_id = SlaveId(uuid);
+    let Some(slave) = state.get_slave(slave_id).await else {
+        return Json(json!({ "success": false, "error": "Device not found or not connected" }));
+    };
+
+    if !slave.is_connected() {
+        return Json(json!({ "success": false, "error": "Not connected to XCP slave" }));
+    }
+
+    let value_str = form.get("value").cloned().unwrap_or_default();
+    let cal_manager = slave.cal_manager.read().await;
+
+    let Some(param) = cal_manager.params().get(idx).cloned() else {
+        return Json(json!({ "success": false, "error": "Parameter not found" }));
+    };
+    drop(cal_manager);
+
+    let parse_mgr = CalibrationManager::new();
+    let value = match parse_mgr.parse_value(&param, &value_str) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(
+                json!({ "success": false, "error": format!("Invalid value: {}", e) }),
+            );
+        }
+    };
+
+    let client = state.client.lock().await;
+    if let Some(xcp_slave) = client.get_slave(slave_id) {
+        let xcp_slave_guard = xcp_slave.lock().await;
+        match write_calibration_to_slave(&xcp_slave_guard, &param, &value).await {
+            Ok(_) => {
+                slave
+                    .cal_values
+                    .write()
+                    .await
+                    .insert(param.name.clone(), value);
+                Json(json!({ "success": true, "message": format!("Wrote {} = {}", param.name, value_str) }))
+            }
+            Err(e) => {
+                Json(json!({ "success": false, "error": format!("Write failed: {}", e) }))
+            }
+        }
+    } else {
+        Json(json!({ "success": false, "error": "Slave not available" }))
+    }
+}
+
 /// Helper function to write calibration to a slave
 async fn write_calibration_to_slave(
     slave: &crate::slave::XcpSlave,

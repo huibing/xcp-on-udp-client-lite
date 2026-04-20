@@ -1480,7 +1480,7 @@ function expSaveCalEdit() {
     var idx = currentCalEdit.idx;
     var value = document.getElementById('expCalEditValue').value;
 
-    fetch('/api/cal/write/' + deviceId + '/' + idx, {
+    fetch('/api/experiment/cal/write/' + deviceId + '/' + idx, {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'value=' + encodeURIComponent(value),

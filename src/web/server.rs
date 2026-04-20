@@ -160,6 +160,10 @@ impl WebServer {
                 "/api/experiment/checksum",
                 post(routes::experiment_checksum),
             )
+            .route(
+                "/api/experiment/cal/write/:device_id/:idx",
+                post(routes::cal_write_json_api),
+            )
             // State and middleware
             .layer(axum::middleware::from_fn(auth_middleware))
             .layer(TraceLayer::new_for_http())
