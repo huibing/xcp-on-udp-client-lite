@@ -237,23 +237,19 @@
 }
 .exp-var-card:hover .card-remove { opacity: 0.7; }
 .exp-var-card .card-remove:hover { opacity: 1; background: #ff444433; }
-.exp-var-card .card-actions {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    display: flex;
-    gap: 6px;
-    opacity: 0;
-    transition: opacity 0.15s;
-}
-.exp-var-card:hover .card-actions { opacity: 1; }
 .exp-var-card .card-info-btn {
+    position: absolute;
+    bottom: 4px;
+    right: 4px;
+    opacity: 0;
     cursor: pointer;
     font-size: 0.75rem;
     padding: 2px 6px;
     border-radius: 3px;
     color: #4488ff;
+    transition: opacity 0.15s;
 }
+.exp-var-card:hover .card-info-btn { opacity: 1; }
 .exp-var-card .card-info-btn:hover { background: #4488ff33; }
 .exp-var-card.map-curve {
     border-left-color: #ff8844;
@@ -790,10 +786,9 @@ function expRenderTabContent() {
                 '<div class="card-device">' + escapeHtml(v.device_name) + '</div>' +
                 '<div class="card-name">' + escapeHtml(v.name) + '</div>' +
                 '<div class="card-value"><span data-live-key="' + escapeHtml(key) + '">' + displayVal + '</span><span class="card-unit">' + escapeHtml(v.unit || '') + '</span></div>' +
-                '<div class="card-actions">' +
                 '<span class="card-info-btn" onclick="event.stopPropagation(); expShowInfo(\'measurement\', \'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')" title="Variable info">ℹ️</span>' +
                 (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
-                '</div></div>';
+                '</div>';
         });
         html += '</div></div>';
     }
@@ -815,10 +810,9 @@ function expRenderTabContent() {
                 '<div class="card-device">' + escapeHtml(v.device_name) + '</div>' +
                 '<div class="card-name">' + escapeHtml(v.name) + '</div>' +
                 '<div class="card-value"><span data-cal-key="' + escapeHtml(calKey) + '">' + escapeHtml(String(displayVal)) + '</span><span class="card-unit">' + escapeHtml(v.unit || '') + '</span></div>' +
-                '<div class="card-actions">' +
                 '<span class="card-info-btn" onclick="event.stopPropagation(); expShowInfo(\'cal\', \'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')" title="Variable info">ℹ️</span>' +
                 (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
-                '</div></div>';
+                '</div>';
         });
         html += '</div></div>';
     }
@@ -836,9 +830,8 @@ function expRenderTabContent() {
                 '<button class="exp-tb-btn" style="font-size:0.75rem; padding:0.25rem 0.5rem;" onclick="event.stopPropagation(); expShowInfo(\'cal\', \'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')">ℹ️ Info</button>' +
                 '<button class="exp-tb-btn" style="font-size:0.75rem; padding:0.25rem 0.5rem;" onclick="event.stopPropagation(); expShowMatrix(\'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')">📊 Table</button>' +
                 '</div>' +
-                '<div class="card-actions">' +
                 (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
-                '</div></div>';
+                '</div>';
         });
         html += '</div></div>';
     }
