@@ -725,9 +725,46 @@ const ExpState = {
 // ===== Tab Management =====
 let tabCounter = 0;
 
+// ===== LocalStorage Persistence =====
+const EXP_STORAGE_KEY = 'experiment_state';
+
+function expSaveStateToStorage() {
+    try {
+        var data = {
+            tabs: ExpState.tabs,
+            activeTabId: ExpState.activeTabId,
+            tabCounter: tabCounter,
+            config: ExpState.config,
+        };
+        localStorage.setItem(EXP_STORAGE_KEY, JSON.stringify(data));
+    } catch (e) { /* ignore quota errors */ }
+}
+
+function expLoadStateFromStorage() {
+    try {
+        var raw = localStorage.getItem(EXP_STORAGE_KEY);
+        if (!raw) return false;
+        var data = JSON.parse(raw);
+        if (!data.tabs || !data.tabs.length) return false;
+        ExpState.tabs = data.tabs;
+        ExpState.activeTabId = data.activeTabId || data.tabs[0].id;
+        tabCounter = data.tabCounter || data.tabs.length;
+        if (data.config) {
+            ExpState.config = Object.assign(ExpState.config, data.config);
+        }
+        return true;
+    } catch (e) { return false; }
+}
+
 // ===== Initialization =====
 (function init() {
-    expAddTab();
+    var restored = expLoadStateFromStorage();
+    if (!restored) {
+        expAddTab();
+    } else {
+        expRenderTabs();
+        expRenderTabContent();
+    }
     expStartStatusPolling();
     expRefreshVariables();
 
@@ -817,6 +854,7 @@ function expRenderTabs() {
             '<span class="tab-close" onclick="expCloseTab(\'' + tab.id + '\', event)" title="Close tab">&times;</span>';
         bar.appendChild(el);
     });
+    expSaveStateToStorage();
 }
 
 // ===== Tab Content Rendering =====
@@ -882,7 +920,7 @@ function expRenderTabContent() {
                 '<div class="card-name">' + escapeHtml(v.name) + '</div>' +
                 '<div class="card-value"><span data-cal-key="' + escapeHtml(calKey) + '">' + escapeHtml(String(displayVal)) + '</span><span class="card-unit">' + escapeHtml(v.unit || '') + '</span></div>' +
                 '<span class="card-info-btn" onclick="event.stopPropagation(); expShowInfo(\'cal\', \'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')" title="Variable info">ℹ️</span>' +
-                (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
+                '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' +
                 '</div>';
         });
         html += '</div></div>';
@@ -901,7 +939,7 @@ function expRenderTabContent() {
                 '<button class="exp-tb-btn" style="font-size:0.75rem; padding:0.25rem 0.5rem;" onclick="event.stopPropagation(); expShowInfo(\'cal\', \'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')">ℹ️ Info</button>' +
                 '<button class="exp-tb-btn" style="font-size:0.75rem; padding:0.25rem 0.5rem;" onclick="event.stopPropagation(); expShowMatrix(\'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')">📊 Table</button>' +
                 '</div>' +
-                (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
+                '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' +
                 '</div>';
         });
         html += '</div></div>';
@@ -919,13 +957,14 @@ function formatValue(val) {
 
 // ===== Variable Removal =====
 function expRemoveVar(tabId, deviceId, idx, kind) {
-    if (ExpState.mode !== 'idle') return;
+    if (ExpState.mode !== 'idle' && kind === 'measurement') return;
     var tab = ExpState.tabs.find(function(t) { return t.id === tabId; });
     if (!tab) return;
     tab.variables = tab.variables.filter(function(v) {
         return !(v.device_id === deviceId && v.idx === idx && v.kind === kind);
     });
     expRenderTabContent();
+    expSaveStateToStorage();
 }
 
 // ===== Variable Selection Modal =====
@@ -1175,6 +1214,7 @@ function expApplyVarSelection() {
     expCloseVarModal();
     expRenderTabContent();
     expReadAllCalValues();
+    expSaveStateToStorage();
 }
 
 // ===== DAQ Control =====
@@ -2057,6 +2097,7 @@ function expSaveConfig() {
     });
     expCloseConfig();
     expToast('Configuration saved', 'success');
+    expSaveStateToStorage();
 }
 
 function expRenameDevice(deviceId, newName) {
