@@ -614,6 +614,27 @@ a.exp-sb-btn { text-decoration: none; }
 <!-- Tab Rename Input (floating) -->
 <input type="text" id="expTabRenameInput" style="display:none; position:absolute; z-index:100; background:#1a1a2e; border:1px solid #00ff88; color:#fff; padding:2px 6px; font-size:0.85rem; border-radius:3px;">
 
+<!-- Device Mapping Modal (used during experiment load) -->
+<div id="expDeviceMapModal" class="exp-modal" style="display:none;">
+    <div class="exp-modal-content" style="width:600px; max-width:95vw;">
+        <div class="exp-modal-header">
+            <h3 style="margin:0;">Map Saved Devices to Connected Devices</h3>
+            <button class="exp-modal-close" onclick="expCancelDeviceMap()">&times;</button>
+        </div>
+        <div class="exp-modal-body" id="expDeviceMapBody">
+            <p style="color:#888; font-size:0.85rem; margin-bottom:1rem;">
+                Some saved devices could not be automatically matched to currently connected devices.
+                Please select the correct mapping or choose "Skip" to drop those variables.
+            </p>
+            <div id="expDeviceMapRows"></div>
+        </div>
+        <div class="exp-modal-footer">
+            <button class="secondary" onclick="expCancelDeviceMap()">Cancel</button>
+            <button onclick="expApplyDeviceMap()">Apply Mapping</button>
+        </div>
+    </div>
+</div>
+
 <!-- Calibration Edit Modal -->
 <div id="expCalEditModal" class="exp-modal" style="display:none;">
     <div class="exp-modal-content" style="width:400px;">
@@ -1724,6 +1745,16 @@ function expSaveMatrixCell(row, col, newVal) {
 
 // ===== Save / Load =====
 function expSave() {
+    // Collect device info for future resolution
+    var deviceInfo = {};
+    ExpState.tabs.forEach(function(t) {
+        t.variables.forEach(function(v) {
+            if (v.device_id && !deviceInfo[v.device_id]) {
+                deviceInfo[v.device_id] = { name: v.device_name || '' };
+            }
+        });
+    });
+
     var experiment = {
         version: 1,
         title: document.getElementById('expTitle').value,
@@ -1731,6 +1762,7 @@ function expSave() {
         pageMode: ExpState.pageMode,
         tabs: ExpState.tabs.map(function(t) { return { id: t.id, title: t.title, variables: t.variables }; }),
         pageModeResults: ExpState.pageModeResults,
+        devices: deviceInfo,
         savedAt: new Date().toISOString(),
     };
 
@@ -1759,8 +1791,7 @@ function expLoad() {
         reader.onload = function(ev) {
             try {
                 var data = JSON.parse(ev.target.result);
-                expApplyLoadedConfig(data);
-                expToast('Experiment loaded: ' + (data.title || file.name), 'success');
+                expResolveAndLoad(data);
             } catch (err) {
                 expToast('Invalid experiment file: ' + err.message, 'error');
             }
@@ -1770,7 +1801,143 @@ function expLoad() {
     input.click();
 }
 
-function expApplyLoadedConfig(data) {
+// Pending load data while device mapping dialog is open
+var expPendingLoadData = null;
+var expPendingDeviceMap = {};
+
+function expResolveAndLoad(data) {
+    // Collect all unique saved device IDs and their names
+    var savedDevices = {};
+    if (data.devices) {
+        // Use saved device info if available
+        Object.keys(data.devices).forEach(function(id) {
+            savedDevices[id] = data.devices[id].name || id;
+        });
+    }
+    if (data.tabs) {
+        data.tabs.forEach(function(tab) {
+            if (tab.variables) {
+                tab.variables.forEach(function(v) {
+                    if (v.device_id && !savedDevices[v.device_id]) {
+                        savedDevices[v.device_id] = v.device_name || v.device_id;
+                    }
+                });
+            }
+        });
+    }
+    var savedDeviceIds = Object.keys(savedDevices);
+    if (savedDeviceIds.length === 0) {
+        expApplyLoadedConfig(data, {});
+        expToast('Experiment loaded: ' + (data.title || 'untitled'), 'success');
+        return;
+    }
+
+    // Refresh variables first, then resolve devices
+    fetch('/api/experiment/variables')
+        .then(function(r) { return r.json(); })
+        .then(function(varData) {
+            if (varData.success) {
+                ExpState.allMeasurements = varData.measurements || [];
+                ExpState.allCalibrations = varData.calibrations || [];
+                expPopulateVarFilterDevices();
+            }
+            return fetch('/api/experiment/status');
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(statusData) {
+            var currentDevices = (statusData.devices || []).filter(function(d) { return d.connected; });
+            var deviceMap = {};
+            var unmapped = [];
+
+            // Try auto-resolution: match by device_id first, then by name
+            savedDeviceIds.forEach(function(savedId) {
+                var savedName = savedDevices[savedId];
+                // Exact ID match
+                var exactMatch = currentDevices.find(function(d) { return d.device_id === savedId; });
+                if (exactMatch) {
+                    deviceMap[savedId] = exactMatch.device_id;
+                    return;
+                }
+                // Name match (case-insensitive)
+                var nameMatch = currentDevices.find(function(d) {
+                    return d.device_name && savedName &&
+                           d.device_name.toLowerCase() === savedName.toLowerCase();
+                });
+                if (nameMatch) {
+                    deviceMap[savedId] = nameMatch.device_id;
+                    return;
+                }
+                unmapped.push(savedId);
+            });
+
+            if (unmapped.length === 0) {
+                // All resolved automatically
+                expApplyLoadedConfig(data, deviceMap);
+                expToast('Experiment loaded: ' + (data.title || 'untitled'), 'success');
+            } else {
+                // Show mapping dialog for unresolved devices
+                expPendingLoadData = data;
+                expPendingDeviceMap = deviceMap;
+                expShowDeviceMapDialog(unmapped, savedDevices, currentDevices);
+            }
+        })
+        .catch(function(e) {
+            expToast('Failed to check devices: ' + e, 'error');
+        });
+}
+
+function expShowDeviceMapDialog(unmapped, savedDevices, currentDevices) {
+    var container = document.getElementById('expDeviceMapRows');
+    var html = '';
+    unmapped.forEach(function(savedId) {
+        var savedName = savedDevices[savedId];
+        html +=
+            '<div style="display:flex; align-items:center; gap:0.75rem; padding:0.5rem; border-bottom:1px solid #333;">' +
+            '<div style="flex:1;">' +
+            '<div style="color:#ccc;">' + escapeHtml(savedName) + '</div>' +
+            '<div style="color:#666; font-size:0.7rem; font-family:monospace;">' + escapeHtml(savedId) + '</div>' +
+            '</div>' +
+            '<span style="color:#888;">→</span>' +
+            '<select data-saved-id="' + escapeHtml(savedId) + '" style="flex:1; font-size:0.85rem;">' +
+            '<option value="">(Skip - drop variables)</option>';
+        currentDevices.forEach(function(d) {
+            html += '<option value="' + escapeHtml(d.device_id) + '">' + escapeHtml(d.device_name) + '</option>';
+        });
+        html += '</select></div>';
+    });
+    container.innerHTML = html;
+    document.getElementById('expDeviceMapModal').style.display = 'flex';
+}
+
+function expCancelDeviceMap() {
+    document.getElementById('expDeviceMapModal').style.display = 'none';
+    expPendingLoadData = null;
+    expPendingDeviceMap = {};
+    expToast('Load cancelled', '');
+}
+
+function expApplyDeviceMap() {
+    var selects = document.querySelectorAll('#expDeviceMapRows select[data-saved-id]');
+    selects.forEach(function(sel) {
+        var savedId = sel.dataset.savedId;
+        var mappedTo = sel.value;
+        if (mappedTo) {
+            expPendingDeviceMap[savedId] = mappedTo;
+        }
+        // If empty (skip), do NOT add to map — variables will be dropped
+    });
+    document.getElementById('expDeviceMapModal').style.display = 'none';
+    expApplyLoadedConfig(expPendingLoadData, expPendingDeviceMap);
+    var droppedCount = 0;
+    selects.forEach(function(sel) { if (!sel.value) droppedCount++; });
+    var msg = 'Experiment loaded: ' + (expPendingLoadData.title || 'untitled');
+    if (droppedCount > 0) msg += ' (' + droppedCount + ' device(s) skipped)';
+    expToast(msg, 'success');
+    expPendingLoadData = null;
+    expPendingDeviceMap = {};
+}
+
+function expApplyLoadedConfig(data, deviceMap) {
     if (data.title) document.getElementById('expTitle').value = data.title;
     if (data.config) {
         ExpState.config = { mf4Pattern: data.config.mf4Pattern || ExpState.config.mf4Pattern, mf4Dir: data.config.mf4Dir || ExpState.config.mf4Dir };
@@ -1778,6 +1945,45 @@ function expApplyLoadedConfig(data) {
         document.getElementById('expMf4Dir').value = ExpState.config.mf4Dir;
     }
     if (data.tabs && Array.isArray(data.tabs)) {
+        // Remap device IDs and resolve variable indices
+        data.tabs.forEach(function(tab) {
+            if (tab.variables) {
+                tab.variables = tab.variables.filter(function(v) {
+                    if (!v.device_id) return false;
+                    if (deviceMap.hasOwnProperty(v.device_id)) {
+                        v.device_id = deviceMap[v.device_id];
+                    }
+                    // Resolve current index by name + device_id
+                    if (v.kind === 'measurement') {
+                        var m = ExpState.allMeasurements.find(function(x) { return x.device_id === v.device_id && x.name === v.name; });
+                        if (m) {
+                            v.idx = m.idx;
+                            v.device_name = m.device_name;
+                            v.unit = m.unit || v.unit || '';
+                            return true;
+                        }
+                    } else if (v.kind === 'calibration') {
+                        var c = ExpState.allCalibrations.find(function(x) { return x.device_id === v.device_id && x.name === v.name; });
+                        if (c) {
+                            v.idx = c.idx;
+                            v.device_name = c.device_name;
+                            v.unit = c.unit || v.unit || '';
+                            v.calType = c.characteristic_type || v.calType || '';
+                            var ct = (c.characteristic_type || '').toUpperCase();
+                            v.isMapCurve = ct === 'MAP' || ct === 'CURVE' || ct === 'VAL_BLK';
+                            return true;
+                        }
+                    }
+                    // Variable not found on current device — drop it
+                    return false;
+                });
+            }
+        });
+        // Remove empty tabs
+        data.tabs = data.tabs.filter(function(tab) { return tab.variables && tab.variables.length > 0; });
+        if (data.tabs.length === 0) {
+            expToast('No variables could be resolved to connected devices', 'error');
+        }
         ExpState.tabs = data.tabs;
         tabCounter = Math.max(tabCounter, data.tabs.length);
         ExpState.activeTabId = ExpState.tabs.length > 0 ? ExpState.tabs[0].id : null;
@@ -1963,6 +2169,7 @@ document.addEventListener('keydown', function(e) {
         expCloseCalEdit();
         expCloseInfo();
         expCloseMatrix();
+        expCancelDeviceMap();
         document.getElementById('expChecksumModal').style.display = 'none';
     } else if (e.key === 'Enter' && !e.target.matches('input, textarea, select')) {
         var varModal = document.getElementById('expVarModal');
