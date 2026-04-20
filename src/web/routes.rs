@@ -4782,12 +4782,28 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
                     "device_name": device.name,
                     "success": true,
                     "passed": passed,
-                    "segments": report.results.iter().map(|s| json!({
-                        "name": s.name,
-                        "address": format!("0x{:08X}", s.address),
-                        "size": s.size,
-                        "match": s.passed,
-                    })).collect::<Vec<_>>(),
+                    "segments": report.results.iter().map(|s| {
+                        let mut seg = json!({
+                            "name": s.name,
+                            "address": format!("0x{:08X}", s.address),
+                            "size": s.size,
+                            "algorithm": s.algorithm,
+                            "master_checksum": format!("0x{:08X}", s.master_checksum),
+                            "slave_checksum": format!("0x{:08X}", s.slave_checksum),
+                            "match": s.passed,
+                            "status": format!("{}", s.status),
+                        });
+                        if let Some(chunks) = &s.chunks {
+                            seg["chunks"] = json!(chunks.iter().map(|c| json!({
+                                "offset": format!("0x{:08X}", c.offset),
+                                "size": c.size,
+                                "master_checksum": format!("0x{:08X}", c.master_checksum),
+                                "slave_checksum": format!("0x{:08X}", c.slave_checksum),
+                                "match": c.passed,
+                            })).collect::<Vec<_>>());
+                        }
+                        seg
+                    }).collect::<Vec<_>>(),
                 }));
             }
             Err(e) => {

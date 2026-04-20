@@ -599,7 +599,7 @@ a.exp-sb-btn { text-decoration: none; }
 
 <!-- Checksum Results Modal -->
 <div id="expChecksumModal" class="exp-modal" style="display:none;">
-    <div class="exp-modal-content" style="width:600px;">
+    <div class="exp-modal-content" style="width:900px; max-width:95vw;">
         <div class="exp-modal-header">
             <h3 style="margin:0;">Checksum Verification Results</h3>
             <button class="exp-modal-close" onclick="document.getElementById('expChecksumModal').style.display='none'">&times;</button>
@@ -1887,13 +1887,52 @@ function expChecksum() {
             data.results.forEach(function(r) {
                 var icon = r.success && r.passed ? '✅' : '❌';
                 html +=
-                    '<div class="card" style="margin-bottom:0.5rem; padding:0.75rem;">' +
-                    '<div style="display:flex; justify-content:space-between; align-items:center;">' +
+                    '<div class="card" style="margin-bottom:0.75rem; padding:0.75rem;">' +
+                    '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">' +
                     '<strong>' + icon + ' ' + escapeHtml(r.device_name) + '</strong>' +
-                    '<span style="color:' + (r.success && r.passed ? '#00ff88' : '#ff4444') + ';">' + (r.success && r.passed ? 'PASS' : 'FAIL') + '</span>' +
-                    '</div>' +
-                    (r.error ? '<div style="color:#ff4444; font-size:0.85rem; margin-top:0.25rem;">' + escapeHtml(r.error) + '</div>' : '') +
+                    '<span style="color:' + (r.success && r.passed ? '#00ff88' : '#ff4444') + '; font-weight:bold;">' +
+                    (r.success && r.passed ? 'PASS' : 'FAIL') + '</span>' +
                     '</div>';
+                if (r.error) {
+                    html += '<div style="color:#ff4444; font-size:0.85rem;">' + escapeHtml(r.error) + '</div>';
+                }
+                if (r.segments && r.segments.length > 0) {
+                    html += '<table style="width:100%; border-collapse:collapse; font-size:0.8rem; margin-top:0.25rem;">' +
+                        '<tr style="border-bottom:1px solid #444; color:#888;">' +
+                        '<th style="text-align:left; padding:0.25rem;">Segment</th>' +
+                        '<th style="text-align:left; padding:0.25rem;">Address</th>' +
+                        '<th style="text-align:right; padding:0.25rem;">Size</th>' +
+                        '<th style="text-align:left; padding:0.25rem;">Algorithm</th>' +
+                        '<th style="text-align:left; padding:0.25rem;">Master</th>' +
+                        '<th style="text-align:left; padding:0.25rem;">Slave</th>' +
+                        '<th style="text-align:center; padding:0.25rem;">Status</th></tr>';
+                    r.segments.forEach(function(seg) {
+                        var mc = seg.match ? '#00ff88' : '#ff4444';
+                        html += '<tr style="border-bottom:1px solid #333;">' +
+                            '<td style="padding:0.25rem; color:#ccc;">' + escapeHtml(seg.name) + '</td>' +
+                            '<td style="padding:0.25rem; font-family:monospace; color:#888;">' + escapeHtml(seg.address) + '</td>' +
+                            '<td style="padding:0.25rem; text-align:right; color:#888;">' + seg.size + '</td>' +
+                            '<td style="padding:0.25rem; color:#888;">' + escapeHtml(seg.algorithm || '') + '</td>' +
+                            '<td style="padding:0.25rem; font-family:monospace; color:#aaa;">' + escapeHtml(seg.master_checksum || '') + '</td>' +
+                            '<td style="padding:0.25rem; font-family:monospace; color:#aaa;">' + escapeHtml(seg.slave_checksum || '') + '</td>' +
+                            '<td style="padding:0.25rem; text-align:center; color:' + mc + ';">' + escapeHtml(seg.status || (seg.match ? 'PASS' : 'FAIL')) + '</td></tr>';
+                        if (seg.chunks && seg.chunks.length > 0) {
+                            seg.chunks.forEach(function(ch, ci) {
+                                var cc = ch.match ? '#00ff88' : '#ff4444';
+                                html += '<tr style="border-bottom:1px solid #2a2a3a;">' +
+                                    '<td style="padding:0.2rem 0.25rem 0.2rem 1.5rem; color:#777; font-size:0.75rem;">chunk ' + ci + '</td>' +
+                                    '<td style="padding:0.2rem 0.25rem; font-family:monospace; color:#666; font-size:0.75rem;">' + escapeHtml(ch.offset) + '</td>' +
+                                    '<td style="padding:0.2rem 0.25rem; text-align:right; color:#666; font-size:0.75rem;">' + ch.size + '</td>' +
+                                    '<td style="padding:0.2rem 0.25rem;"></td>' +
+                                    '<td style="padding:0.2rem 0.25rem; font-family:monospace; color:#777; font-size:0.75rem;">' + escapeHtml(ch.master_checksum) + '</td>' +
+                                    '<td style="padding:0.2rem 0.25rem; font-family:monospace; color:#777; font-size:0.75rem;">' + escapeHtml(ch.slave_checksum) + '</td>' +
+                                    '<td style="padding:0.2rem 0.25rem; text-align:center; color:' + cc + '; font-size:0.75rem;">' + (ch.match ? '✓' : '✗') + '</td></tr>';
+                            });
+                        }
+                    });
+                    html += '</table>';
+                }
+                html += '</div>';
             });
             container.innerHTML = html;
         }
