@@ -55,6 +55,8 @@ pub struct DeviceState {
     pub hex_filename: Arc<RwLock<Option<String>>>,
     /// Last checksum verification report
     pub checksum_report: Arc<RwLock<Option<VerificationReport>>>,
+    /// Custom display name set by user (for experiment page)
+    pub custom_name: Arc<RwLock<Option<String>>>,
 }
 
 impl DeviceState {
@@ -85,6 +87,16 @@ impl DeviceState {
             hex_image: Arc::new(RwLock::new(None)),
             hex_filename: Arc::new(RwLock::new(None)),
             checksum_report: Arc::new(RwLock::new(None)),
+            custom_name: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Get display name, preferring custom name if set
+    pub async fn display_name_or_custom(&self) -> String {
+        if let Some(ref custom) = *self.custom_name.read().await {
+            custom.clone()
+        } else {
+            self.name.clone()
         }
     }
 
@@ -210,6 +222,8 @@ pub struct AppState {
     pub devices: Arc<RwLock<Vec<DeviceState>>>,
     /// Current selected device ID
     pub current_device_id: Arc<RwLock<Option<String>>>,
+    /// Whether an experiment is currently active (DAQ running from experiment page)
+    pub experiment_active: Arc<RwLock<bool>>,
 }
 
 impl AppState {
@@ -229,6 +243,7 @@ impl AppState {
             templates: Arc::new(TemplateEngine::new()),
             devices: Arc::new(RwLock::new(Vec::new())),
             current_device_id: Arc::new(RwLock::new(None)),
+            experiment_active: Arc::new(RwLock::new(false)),
         }
     }
 
@@ -245,6 +260,16 @@ impl AppState {
     /// Clear error message
     pub async fn clear_error(&self) {
         *self.error.write().await = None;
+    }
+
+    /// Check if an experiment is currently active
+    pub async fn is_experiment_active(&self) -> bool {
+        *self.experiment_active.read().await
+    }
+
+    /// Set experiment active state
+    pub async fn set_experiment_active(&self, active: bool) {
+        *self.experiment_active.write().await = active;
     }
 
     /// Get and clear status
@@ -463,6 +488,7 @@ mod tests {
             hex_image: Arc::new(RwLock::new(None)),
             hex_filename: Arc::new(RwLock::new(None)),
             checksum_report: Arc::new(RwLock::new(None)),
+            custom_name: Arc::new(RwLock::new(None)),
             transport_configs: transports,
         }
     }

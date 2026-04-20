@@ -2526,6 +2526,7 @@ pub async fn a2l_load(
             hex_image: Arc::new(RwLock::new(None)),
             hex_filename: Arc::new(RwLock::new(None)),
             checksum_report: Arc::new(RwLock::new(None)),
+            custom_name: Arc::new(RwLock::new(None)),
         };
 
         state.add_device(device).await;
@@ -4157,5 +4158,647 @@ pub async fn checksum_verify(
         "total": report.total_segments(),
         "passed": report.passed(),
         "failed": report.failed(),
+    }))
+}
+
+// ============ Experiment Page Routes ============
+
+/// Experiment page (GET /experiment)
+pub async fn experiment_page(State(state): State<AppState>) -> Html<String> {
+    let status = state.take_status().await;
+    let error = state.take_error().await;
+
+    let content = templates::experiment_page();
+    Html(templates::page(
+        "Experiment",
+        &content,
+        status.as_deref(),
+        error.as_deref(),
+    ))
+}
+
+/// Get all variables (measurements + calibration) from all devices (GET /api/experiment/variables)
+pub async fn experiment_variables(State(state): State<AppState>) -> impl IntoResponse {
+    let mut measurements: Vec<serde_json::Value> = Vec::new();
+    let mut calibrations: Vec<serde_json::Value> = Vec::new();
+
+    let devices = state.all_devices().await;
+
+    for device in &devices {
+        let device_name = device.display_name_or_custom().await;
+        let device_id = if let Some(slave_id) = device.slave_id {
+            slave_id.to_string()
+        } else {
+            device.id.clone()
+        };
+        let connected = device.connected;
+
+        // Get measurements
+        let daq_mgr = device.daq_manager.read().await;
+        for (i, m) in daq_mgr.all_measurements().iter().enumerate() {
+            measurements.push(json!({
+                "device_id": device_id,
+                "device_name": device_name,
+                "idx": i,
+                "name": m.name,
+                "type": format!("{:?}", m.data_type),
+                "address_hex": format!("{:08X}", m.address),
+                "connected": connected,
+                "unit": m.unit.as_deref().unwrap_or(""),
+            }));
+        }
+
+        // Get calibration parameters
+        let cal_mgr = device.cal_manager.read().await;
+        for (i, p) in cal_mgr.params().iter().enumerate() {
+            calibrations.push(serialize_cal_param(
+                p,
+                &device_id,
+                &device_name,
+                i,
+                connected,
+            ));
+        }
+    }
+
+    Json(json!({
+        "success": true,
+        "measurements": measurements,
+        "calibrations": calibrations,
+    }))
+}
+
+/// Start DAQ on specified slaves (POST /api/experiment/start)
+pub async fn experiment_start(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // payload: { "selections": { "device_id": [idx1, idx2, ...], ... } }
+    let selections = match payload.get("selections").and_then(|v| v.as_object()) {
+        Some(s) => s,
+        None => {
+            return Json(json!({
+                "success": false,
+                "error": "Missing 'selections' object"
+            }));
+        }
+    };
+
+    let client = state.client.lock().await;
+    let mut errors = Vec::new();
+    let mut started_count = 0;
+
+    for (device_id_str, indices_val) in selections {
+        let indices: Vec<usize> = match indices_val.as_array() {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                .collect(),
+            None => continue,
+        };
+
+        if indices.is_empty() {
+            continue;
+        }
+
+        // Find the device
+        let device = match state.get_device(device_id_str).await {
+            Some(d) => d,
+            None => {
+                // Try as slave ID
+                if let Ok(uuid) = uuid::Uuid::parse_str(device_id_str) {
+                    let slave_id = SlaveId(uuid);
+                    let devices = state.all_devices().await;
+                    match devices.iter().find(|d| d.slave_id == Some(slave_id)) {
+                        Some(d) => d.clone(),
+                        None => {
+                            errors.push(format!("Device {} not found", device_id_str));
+                            continue;
+                        }
+                    }
+                } else {
+                    errors.push(format!("Device {} not found", device_id_str));
+                    continue;
+                }
+            }
+        };
+
+        if !device.connected {
+            errors.push(format!("{}: not connected", device.name));
+            continue;
+        }
+
+        let slave_id = match device.slave_id {
+            Some(id) => id,
+            None => {
+                errors.push(format!("{}: no slave ID", device.name));
+                continue;
+            }
+        };
+
+        // Set measurement selections
+        {
+            let mut daq_manager = device.daq_manager.write().await;
+            daq_manager.deselect_all();
+            for idx in &indices {
+                daq_manager.select_measurement(*idx);
+            }
+        }
+
+        // Start DAQ
+        let xcp_slave = match client.get_slave(slave_id) {
+            Some(s) => s,
+            None => {
+                errors.push(format!("{}: slave not found in client", device.name));
+                continue;
+            }
+        };
+        let xcp_slave_guard = xcp_slave.lock().await;
+        let mut daq_manager = device.daq_manager.write().await;
+
+        match daq_manager.start(&*xcp_slave_guard, 1000).await {
+            Ok(_) => {
+                *device.daq_running.write().await = true;
+                if let Some(slave) = state.get_slave(slave_id).await {
+                    *slave.daq_running.write().await = true;
+                }
+                started_count += 1;
+                tracing::info!("Experiment DAQ started on {}", device.name);
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", device.name, e));
+            }
+        }
+    }
+
+    if started_count > 0 {
+        state.set_experiment_active(true).await;
+    }
+
+    if !errors.is_empty() {
+        Json(json!({
+            "success": started_count > 0,
+            "started": started_count,
+            "errors": errors
+        }))
+    } else if started_count == 0 {
+        Json(json!({
+            "success": false,
+            "error": "No devices to start DAQ on"
+        }))
+    } else {
+        Json(json!({ "success": true, "started": started_count }))
+    }
+}
+
+/// Stop DAQ on all slaves (POST /api/experiment/stop)
+pub async fn experiment_stop(State(state): State<AppState>) -> impl IntoResponse {
+    let devices = state.all_devices().await;
+    let client = state.client.lock().await;
+    let mut errors = Vec::new();
+    let mut stopped_count = 0;
+
+    for device in &devices {
+        if !*device.daq_running.read().await || !device.connected {
+            continue;
+        }
+
+        let slave_id = match device.slave_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        // Stop recording first if active
+        {
+            let daq_manager = device.daq_manager.read().await;
+            if daq_manager.is_recording() {
+                if let Err(e) = daq_manager.stop_recording().await {
+                    tracing::warn!("Failed to stop recording on {}: {}", device.name, e);
+                }
+            }
+        }
+
+        // Stop DAQ
+        let xcp_slave = match client.get_slave(slave_id) {
+            Some(s) => s,
+            None => continue,
+        };
+        let xcp_slave_guard = xcp_slave.lock().await;
+        let daq_manager = device.daq_manager.read().await;
+
+        match daq_manager.stop(&*xcp_slave_guard).await {
+            Ok(_) => {
+                *device.daq_running.write().await = false;
+                if let Some(slave) = state.get_slave(slave_id).await {
+                    *slave.daq_running.write().await = false;
+                }
+                stopped_count += 1;
+                tracing::info!("Experiment DAQ stopped on {}", device.name);
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", device.name, e));
+            }
+        }
+    }
+
+    state.set_experiment_active(false).await;
+
+    if !errors.is_empty() {
+        Json(json!({
+            "success": stopped_count > 0,
+            "stopped": stopped_count,
+            "errors": errors
+        }))
+    } else {
+        Json(json!({ "success": true, "stopped": stopped_count }))
+    }
+}
+
+/// Start MF4 recording (POST /api/experiment/record/start)
+pub async fn experiment_record_start(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let _title = payload
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("experiment");
+
+    let slaves = state.all_slaves().await;
+    let client = state.client.lock().await;
+    let mut errors = Vec::new();
+    let mut started_count = 0;
+
+    for slave in &slaves {
+        if !*slave.daq_running.read().await || !slave.is_connected() {
+            continue;
+        }
+
+        let xcp_slave = match client.get_slave(slave.id) {
+            Some(s) => s,
+            None => continue,
+        };
+        let xcp_slave_guard = xcp_slave.lock().await;
+        let mut daq_manager = slave.daq_manager.write().await;
+
+        match daq_manager.start_recording(&*xcp_slave_guard).await {
+            Ok(_) => {
+                started_count += 1;
+                tracing::info!(
+                    "Experiment recording started on {}",
+                    slave.display_name()
+                );
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", slave.display_name(), e));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        Json(json!({
+            "success": started_count > 0,
+            "started": started_count,
+            "errors": errors
+        }))
+    } else if started_count == 0 {
+        Json(json!({
+            "success": false,
+            "error": "No running DAQ found to record"
+        }))
+    } else {
+        Json(json!({ "success": true, "started": started_count }))
+    }
+}
+
+/// Stop MF4 recording (POST /api/experiment/record/stop)
+pub async fn experiment_record_stop(State(state): State<AppState>) -> impl IntoResponse {
+    let slaves = state.all_slaves().await;
+    let mut errors = Vec::new();
+    let mut stopped_count = 0;
+
+    for slave in &slaves {
+        let daq_manager = slave.daq_manager.read().await;
+        if !daq_manager.is_recording() {
+            continue;
+        }
+
+        match daq_manager.stop_recording().await {
+            Ok(_) => {
+                stopped_count += 1;
+                tracing::info!(
+                    "Experiment recording stopped on {}",
+                    slave.display_name()
+                );
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", slave.display_name(), e));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        Json(json!({
+            "success": stopped_count > 0,
+            "stopped": stopped_count,
+            "errors": errors
+        }))
+    } else {
+        Json(json!({ "success": true, "stopped": stopped_count }))
+    }
+}
+
+/// Get experiment status (GET /api/experiment/status)
+pub async fn experiment_status(State(state): State<AppState>) -> impl IntoResponse {
+    let devices = state.all_devices().await;
+    let experiment_active = state.is_experiment_active().await;
+    let mut daq_running_count = 0;
+    let mut recording_count = 0;
+    let mut device_statuses: Vec<serde_json::Value> = Vec::new();
+
+    for device in &devices {
+        let daq_running = *device.daq_running.read().await;
+        let daq_mgr = device.daq_manager.read().await;
+        let is_recording = daq_mgr.is_recording();
+        let page_mode = *device.page_mode.read().await;
+        let device_name = device.display_name_or_custom().await;
+
+        if daq_running {
+            daq_running_count += 1;
+        }
+        if is_recording {
+            recording_count += 1;
+        }
+
+        device_statuses.push(json!({
+            "device_id": device.id,
+            "device_name": device_name,
+            "connected": device.connected,
+            "daq_running": daq_running,
+            "recording": is_recording,
+            "page_mode": match page_mode {
+                crate::slave::PageMode::Working => "working",
+                crate::slave::PageMode::Reference => "reference",
+            },
+            "a2l_file": device.original_filename,
+        }));
+    }
+
+    Json(json!({
+        "success": true,
+        "experiment_active": experiment_active,
+        "daq_running_count": daq_running_count,
+        "recording_count": recording_count,
+        "devices": device_statuses,
+    }))
+}
+
+/// Switch page mode on all slaves (POST /api/experiment/pagemode)
+pub async fn experiment_pagemode(
+    State(state): State<AppState>,
+    Json(payload): Json<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let mode_str = payload
+        .get("mode")
+        .cloned()
+        .unwrap_or_else(|| "reference".to_string());
+    let mode = match mode_str.as_str() {
+        "working" => crate::slave::PageMode::Working,
+        "reference" => crate::slave::PageMode::Reference,
+        _ => {
+            return Json(json!({
+                "success": false,
+                "error": "Invalid mode. Use 'working' or 'reference'."
+            }));
+        }
+    };
+
+    let devices = state.all_devices().await;
+    let client = state.client.lock().await;
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut success_count = 0;
+    let mut fail_count = 0;
+
+    for device in &devices {
+        if !device.connected {
+            continue;
+        }
+
+        let slave_id = match device.slave_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        let xcp_slave = match client.get_slave(slave_id) {
+            Some(s) => s,
+            None => continue,
+        };
+        let mut xcp_slave_guard = xcp_slave.lock().await;
+
+        match xcp_slave_guard.switch_all_pages(mode).await {
+            Ok(_segments) => {
+                *device.page_mode.write().await = mode;
+                success_count += 1;
+                results.push(json!({
+                    "device_id": device.id,
+                    "device_name": device.name,
+                    "success": true,
+                    "page_mode": mode_str,
+                }));
+            }
+            Err(e) => {
+                fail_count += 1;
+                results.push(json!({
+                    "device_id": device.id,
+                    "device_name": device.name,
+                    "success": false,
+                    "error": e.to_string(),
+                    "read_only": true,
+                }));
+            }
+        }
+    }
+
+    Json(json!({
+        "success": fail_count == 0,
+        "switched": success_count,
+        "failed": fail_count,
+        "results": results,
+        "mode": mode_str,
+    }))
+}
+
+/// Rename a slave (POST /api/experiment/rename-slave/:device_id)
+pub async fn experiment_rename_slave(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Json(payload): Json<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let new_name = match payload.get("name") {
+        Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+        _ => {
+            return Json(json!({
+                "success": false,
+                "error": "Name is required"
+            }));
+        }
+    };
+
+    let mut devices = state.devices.write().await;
+    let found = devices.iter_mut().find(|d| {
+        d.id == device_id || d.slave_id.map(|s| s.to_string()) == Some(device_id.clone())
+    });
+
+    match found {
+        Some(device) => {
+            *device.custom_name.write().await = Some(new_name.clone());
+            Json(json!({
+                "success": true,
+                "name": new_name
+            }))
+        }
+        None => Json(json!({
+            "success": false,
+            "error": "Device not found"
+        })),
+    }
+}
+
+/// Verify checksum on all connected slaves (POST /api/experiment/checksum)
+pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResponse {
+    let devices = state.all_devices().await;
+    let mut results: Vec<serde_json::Value> = Vec::new();
+
+    for device in &devices {
+        if !device.connected {
+            continue;
+        }
+
+        let hex_image = device.hex_image.read().await.clone();
+        let hex_image = match hex_image {
+            Some(img) => img,
+            None => {
+                results.push(json!({
+                    "device_id": device.id,
+                    "device_name": device.name,
+                    "success": false,
+                    "error": "No HEX file loaded"
+                }));
+                continue;
+            }
+        };
+
+        let slave_id = match device.slave_id {
+            Some(id) => id,
+            None => {
+                results.push(json!({
+                    "device_id": device.id,
+                    "device_name": device.name,
+                    "success": false,
+                    "error": "No slave ID"
+                }));
+                continue;
+            }
+        };
+
+        // Get memory segments from A2L
+        let segments = {
+            let a2l_path = device.a2l_path.clone();
+            if a2l_path.is_empty() {
+                results.push(json!({
+                    "device_id": device.id,
+                    "device_name": device.name,
+                    "success": false,
+                    "error": "No A2L file loaded"
+                }));
+                continue;
+            }
+
+            use crate::A2lReader;
+            match A2lReader::load(&a2l_path) {
+                Ok(reader) => reader.get_memory_segments(),
+                Err(e) => {
+                    results.push(json!({
+                        "device_id": device.id,
+                        "device_name": device.name,
+                        "success": false,
+                        "error": format!("Failed to load A2L: {:?}", e)
+                    }));
+                    continue;
+                }
+            }
+        };
+
+        if segments.is_empty() {
+            results.push(json!({
+                "device_id": device.id,
+                "device_name": device.name,
+                "success": false,
+                "error": "No memory segments found"
+            }));
+            continue;
+        }
+
+        let report = {
+            let client = state.client.lock().await;
+            let slave_arc = match client.get_slave(slave_id) {
+                Some(s) => s,
+                None => {
+                    results.push(json!({
+                        "device_id": device.id,
+                        "device_name": device.name,
+                        "success": false,
+                        "error": "Slave not found"
+                    }));
+                    continue;
+                }
+            };
+            drop(client);
+
+            let mut slave_guard = slave_arc.lock().await;
+            crate::checksum::verify_segments(&mut slave_guard, &hex_image, &segments, None).await
+        };
+
+        match report {
+            Ok(report) => {
+                let passed = report.all_passed();
+                *device.checksum_report.write().await = Some(report.clone());
+                results.push(json!({
+                    "device_id": device.id,
+                    "device_name": device.name,
+                    "success": true,
+                    "passed": passed,
+                    "segments": report.results.iter().map(|s| json!({
+                        "name": s.name,
+                        "address": format!("0x{:08X}", s.address),
+                        "size": s.size,
+                        "match": s.passed,
+                    })).collect::<Vec<_>>(),
+                }));
+            }
+            Err(e) => {
+                results.push(json!({
+                    "device_id": device.id,
+                    "device_name": device.name,
+                    "success": false,
+                    "error": format!("{}", e),
+                }));
+            }
+        }
+    }
+
+    let all_passed = results.iter().all(|r| {
+        r.get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            && r.get("passed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+    });
+
+    Json(json!({
+        "success": true,
+        "all_passed": all_passed,
+        "results": results,
     }))
 }

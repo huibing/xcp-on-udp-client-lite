@@ -1,0 +1,1565 @@
+<!-- Experiment Page Template -->
+<!-- VSCode-like layout with toolbar, tabs, and status bar -->
+
+<style>
+/* ===== Experiment Page Layout ===== */
+.exp-container {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 80px);
+    margin: -2rem;
+    overflow: hidden;
+}
+
+/* Title Bar */
+.exp-title-bar {
+    display: flex;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    background: #1e1e2e;
+    border-bottom: 1px solid #333;
+    gap: 0.5rem;
+}
+.exp-title-bar input {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #fff;
+    font-size: 1.1rem;
+    font-weight: 600;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    width: 300px;
+}
+.exp-title-bar input:hover { border-color: #555; }
+.exp-title-bar input:focus { border-color: #00ff88; outline: none; }
+
+/* Toolbar */
+.exp-toolbar {
+    display: flex;
+    align-items: center;
+    padding: 0.35rem 1rem;
+    background: #252535;
+    border-bottom: 1px solid #333;
+    gap: 0.25rem;
+    flex-wrap: wrap;
+}
+.exp-toolbar .separator {
+    width: 1px;
+    height: 24px;
+    background: #444;
+    margin: 0 0.35rem;
+}
+.exp-tb-btn {
+    background: none;
+    border: 1px solid transparent;
+    color: #ccc;
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    white-space: nowrap;
+    transition: all 0.15s;
+}
+.exp-tb-btn:hover { background: #3a3a4a; color: #fff; border-color: #555; }
+.exp-tb-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.exp-tb-btn:disabled:hover { background: none; color: #ccc; border-color: transparent; }
+.exp-tb-btn.active { background: #00ff88; color: #1a1a2e; }
+.exp-tb-btn.danger { color: #ff6666; }
+.exp-tb-btn.danger:hover { background: #4a2020; }
+.exp-tb-btn.recording { color: #ff4444; animation: pulse-rec 1.5s infinite; }
+@keyframes pulse-rec { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* Page mode toggle */
+.exp-pagemode {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin: 0 0.25rem;
+}
+.exp-pagemode label { color: #888; font-size: 0.8rem; cursor: pointer; }
+.exp-pagemode .toggle {
+    position: relative;
+    width: 40px;
+    height: 20px;
+    background: #555;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.3s;
+}
+.exp-pagemode .toggle.working { background: #00ff88; }
+.exp-pagemode .toggle::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    background: #fff;
+    border-radius: 50%;
+    top: 2px;
+    left: 2px;
+    transition: left 0.3s;
+}
+.exp-pagemode .toggle.working::after { left: 22px; }
+
+/* Main area with tabs */
+.exp-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Tab bar */
+.exp-tab-bar {
+    display: flex;
+    align-items: center;
+    background: #1e1e2e;
+    border-bottom: 1px solid #333;
+    overflow-x: auto;
+    min-height: 36px;
+}
+.exp-tab-bar::-webkit-scrollbar { height: 3px; }
+.exp-tab-bar::-webkit-scrollbar-thumb { background: #555; border-radius: 2px; }
+.exp-tab {
+    display: flex;
+    align-items: center;
+    padding: 0.4rem 0.75rem;
+    background: #252535;
+    border-right: 1px solid #333;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: #888;
+    white-space: nowrap;
+    min-width: 100px;
+    max-width: 200px;
+    gap: 0.5rem;
+    transition: all 0.15s;
+}
+.exp-tab:hover { background: #2a2a3a; color: #ccc; }
+.exp-tab.active { background: #1a1a2e; color: #fff; border-bottom: 2px solid #00ff88; }
+.exp-tab .tab-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.exp-tab .tab-close {
+    opacity: 0;
+    font-size: 0.75rem;
+    padding: 0 2px;
+    border-radius: 3px;
+    transition: opacity 0.15s;
+}
+.exp-tab:hover .tab-close, .exp-tab.active .tab-close { opacity: 0.7; }
+.exp-tab .tab-close:hover { opacity: 1; background: #ff444444; }
+.exp-tab-add {
+    padding: 0.4rem 0.6rem;
+    color: #666;
+    cursor: pointer;
+    font-size: 1rem;
+    border: none;
+    background: none;
+}
+.exp-tab-add:hover { color: #00ff88; }
+
+/* Tab content area */
+.exp-tab-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    background: #1a1a2e;
+}
+
+/* Variable cards */
+.exp-cards-section { margin-bottom: 1.5rem; }
+.exp-cards-section h3 {
+    color: #888;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    margin-bottom: 0.5rem;
+    letter-spacing: 0.5px;
+}
+.exp-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.5rem;
+}
+.exp-var-card {
+    background: #252535;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 0.6rem 0.75rem;
+    position: relative;
+    transition: border-color 0.15s;
+}
+.exp-var-card:hover { border-color: #555; }
+.exp-var-card .card-name {
+    font-size: 0.8rem;
+    color: #aaa;
+    margin-bottom: 0.25rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.exp-var-card .card-device {
+    font-size: 0.65rem;
+    color: #666;
+    margin-bottom: 0.15rem;
+}
+.exp-var-card .card-value {
+    font-family: 'Courier New', monospace;
+    font-size: 1rem;
+    color: #00ff88;
+    font-weight: 600;
+}
+.exp-var-card .card-unit {
+    font-size: 0.7rem;
+    color: #888;
+    margin-left: 0.25rem;
+}
+.exp-var-card.measurement { border-left: 3px solid #4488ff; }
+.exp-var-card.calibration { border-left: 3px solid #ff8844; }
+.exp-var-card.calibration.editable { cursor: pointer; }
+.exp-var-card.calibration.editable:hover { border-color: #ff8844; }
+.exp-var-card.calibration.readonly { opacity: 0.7; }
+.exp-var-card .card-remove {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    opacity: 0;
+    color: #ff4444;
+    cursor: pointer;
+    font-size: 0.7rem;
+    padding: 2px 4px;
+    border-radius: 3px;
+    transition: opacity 0.15s;
+}
+.exp-var-card:hover .card-remove { opacity: 0.7; }
+.exp-var-card .card-remove:hover { opacity: 1; background: #ff444433; }
+
+/* Map/Curve section */
+.exp-map-section {
+    margin-top: 1rem;
+    border-top: 1px solid #333;
+    padding-top: 1rem;
+}
+.exp-map-section h3 { color: #ff8844; }
+.exp-map-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.5rem;
+}
+.exp-map-table th, .exp-map-table td {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #333;
+    text-align: center;
+    font-size: 0.85rem;
+}
+.exp-map-table th { background: #252535; color: #888; }
+.exp-map-table td { font-family: monospace; }
+.exp-map-table td.editable { cursor: pointer; }
+.exp-map-table td.editable:hover { background: #2a3a2a; }
+.exp-map-table input {
+    width: 80px;
+    background: #1a1a2e;
+    border: 1px solid #00ff88;
+    color: #fff;
+    padding: 2px 4px;
+    text-align: center;
+    font-family: monospace;
+}
+
+/* Empty tab state */
+.exp-empty-tab {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #555;
+    gap: 1rem;
+}
+.exp-empty-tab .icon { font-size: 3rem; }
+.exp-empty-tab button { margin-top: 0.5rem; }
+
+/* Status bar */
+.exp-status-bar {
+    display: flex;
+    align-items: center;
+    padding: 0.2rem 1rem;
+    background: #252535;
+    border-top: 1px solid #333;
+    font-size: 0.75rem;
+    color: #888;
+    gap: 1rem;
+    min-height: 24px;
+    flex-wrap: nowrap;
+    overflow: hidden;
+}
+.exp-status-bar .status-item {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    white-space: nowrap;
+}
+.exp-status-bar .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.exp-status-bar .status-dot.connected { background: #00ff88; }
+.exp-status-bar .status-dot.disconnected { background: #ff4444; }
+.exp-status-bar .status-separator {
+    width: 1px;
+    height: 14px;
+    background: #444;
+}
+
+/* Modals */
+.exp-modal {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+.exp-modal-content {
+    background: #1e1e1e;
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.exp-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem;
+    border-bottom: 1px solid #444;
+}
+.exp-modal-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+}
+.exp-modal-footer {
+    padding: 1rem;
+    border-top: 1px solid #444;
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+}
+.exp-modal-close {
+    background: none;
+    border: none;
+    color: #fff;
+    font-size: 1.5rem;
+    cursor: pointer;
+}
+
+/* Variable selection modal (wide) */
+#expVarModal .exp-modal-content { width: 80%; min-width: 600px; max-width: 1200px; }
+
+/* Filter bar in variable modal */
+.exp-filter-bar {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #333;
+    flex-wrap: wrap;
+}
+.exp-filter-bar input, .exp-filter-bar select {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.85rem;
+}
+.exp-filter-bar input { flex: 1; min-width: 200px; }
+.exp-filter-bar select { min-width: 120px; }
+
+/* Toast notification */
+.exp-toast {
+    position: fixed;
+    bottom: 40px;
+    right: 20px;
+    background: #333;
+    color: #fff;
+    padding: 0.75rem 1.25rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    z-index: 2000;
+    opacity: 0;
+    transform: translateY(10px);
+    transition: all 0.3s;
+    max-width: 400px;
+}
+.exp-toast.show { opacity: 1; transform: translateY(0); }
+.exp-toast.error { border-left: 3px solid #ff4444; }
+.exp-toast.success { border-left: 3px solid #00ff88; }
+
+/* Inline edit */
+.exp-inline-edit {
+    background: #1a1a2e;
+    border: 1px solid #00ff88;
+    color: #fff;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: monospace;
+    width: 100px;
+}
+</style>
+
+<div class="exp-container">
+    <!-- Title Bar -->
+    <div class="exp-title-bar">
+        <span style="color: #00ff88; font-size: 1.2rem;">🧪</span>
+        <input type="text" id="expTitle" value="New Experiment" placeholder="Experiment name..." title="Click to rename experiment">
+        <span style="flex:1;"></span>
+        <span id="expStateLabel" style="font-size: 0.8rem; color: #888;">IDLE</span>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="exp-toolbar">
+        <button class="exp-tb-btn" onclick="expConnect()" title="Connect to devices">🔌 Connect</button>
+        <div class="separator"></div>
+        <button class="exp-tb-btn" id="btnAddVars" onclick="expOpenVarModal()" title="Add variables to current tab">📋 Variables</button>
+        <div class="separator"></div>
+        <button class="exp-tb-btn" id="btnStart" onclick="expStart()" title="Start DAQ on all devices">▶ Start</button>
+        <button class="exp-tb-btn danger" id="btnRecord" onclick="expRecord()" title="Start MF4 recording" style="display:none;">⏺ Record</button>
+        <button class="exp-tb-btn danger" id="btnStop" onclick="expStop()" title="Stop DAQ and recording" style="display:none;">⏹ Stop</button>
+        <div class="separator"></div>
+        <div class="exp-pagemode">
+            <label>REF</label>
+            <div class="toggle" id="pageModeToggle" onclick="expTogglePageMode()" title="Switch Reference/Working page"></div>
+            <label>WRK</label>
+        </div>
+        <div class="separator"></div>
+        <button class="exp-tb-btn" onclick="expConfig()" title="Experiment configuration">⚙ Config</button>
+        <button class="exp-tb-btn" onclick="expSave()" title="Save experiment to JSON file">💾 Save</button>
+        <button class="exp-tb-btn" onclick="expLoad()" title="Load experiment from JSON file">📂 Load</button>
+        <div class="separator"></div>
+        <button class="exp-tb-btn" onclick="expChecksum()" title="Verify checksum on all slaves">✓ Checksum</button>
+    </div>
+
+    <!-- Main area: tab bar + tab content -->
+    <div class="exp-main">
+        <div class="exp-tab-bar" id="expTabBar">
+            <button class="exp-tab-add" onclick="expAddTab()" title="Add new tab">+</button>
+        </div>
+        <div class="exp-tab-content" id="expTabContent"></div>
+    </div>
+
+    <!-- Status Bar -->
+    <div class="exp-status-bar" id="expStatusBar">
+        <span class="status-item">No devices connected</span>
+    </div>
+</div>
+
+<!-- Variable Selection Modal -->
+<div id="expVarModal" class="exp-modal" style="display:none;">
+    <div class="exp-modal-content">
+        <div class="exp-modal-header">
+            <h3 style="margin:0;">Select Variables</h3>
+            <button class="exp-modal-close" onclick="expCloseVarModal()">&times;</button>
+        </div>
+        <div class="exp-filter-bar">
+            <input type="text" id="expVarSearch" placeholder="Search by name..." oninput="expFilterVars()">
+            <select id="expVarFilterDevice" onchange="expFilterVars()">
+                <option value="">All Devices</option>
+            </select>
+            <select id="expVarFilterType" onchange="expFilterVars()">
+                <option value="">All Types</option>
+                <option value="measurement">Measurements</option>
+                <option value="calibration">Calibration</option>
+            </select>
+        </div>
+        <div class="exp-modal-body" style="padding: 0;">
+            <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
+                <thead style="position:sticky; top:0; background:#2a2a2a; z-index:1;">
+                    <tr>
+                        <th style="width:40px; padding:0.5rem;"><input type="checkbox" id="expSelectAll" onclick="expToggleSelectAll()"></th>
+                        <th style="text-align:left; padding:0.5rem; width:30%;">Name</th>
+                        <th style="text-align:left; padding:0.5rem; width:20%;">Device</th>
+                        <th style="text-align:left; padding:0.5rem; width:15%;">Kind</th>
+                        <th style="text-align:left; padding:0.5rem; width:15%;">Type</th>
+                        <th style="text-align:left; padding:0.5rem; width:15%;">Address</th>
+                    </tr>
+                </thead>
+                <tbody id="expVarList"></tbody>
+            </table>
+        </div>
+        <div class="exp-modal-footer">
+            <span id="expVarCount" style="flex:1; color:#888;">0 selected</span>
+            <button class="secondary" onclick="expCloseVarModal()">Cancel</button>
+            <button onclick="expApplyVarSelection()">Apply</button>
+        </div>
+    </div>
+</div>
+
+<!-- Config Modal -->
+<div id="expConfigModal" class="exp-modal" style="display:none;">
+    <div class="exp-modal-content" style="width:500px;">
+        <div class="exp-modal-header">
+            <h3 style="margin:0;">Experiment Configuration</h3>
+            <button class="exp-modal-close" onclick="expCloseConfig()">&times;</button>
+        </div>
+        <div class="exp-modal-body">
+            <div class="form-group">
+                <label>MF4 File Name Pattern</label>
+                <input type="text" id="expMf4Pattern" value="{title}_{YYYYMMDD}_{HHMMSS}.mf4" style="font-family:monospace;">
+                <small style="color:#666;">Placeholders: {title}, {YYYYMMDD}, {HHMMSS}</small>
+            </div>
+            <div class="form-group">
+                <label>MF4 Output Directory</label>
+                <input type="text" id="expMf4Dir" value="records/" placeholder="records/">
+            </div>
+            <div class="form-group" style="margin-top:1rem;">
+                <label>Connected Devices</label>
+                <div id="expConfigDevices" style="max-height:200px; overflow-y:auto;"></div>
+            </div>
+        </div>
+        <div class="exp-modal-footer">
+            <button class="secondary" onclick="expCloseConfig()">Cancel</button>
+            <button onclick="expSaveConfig()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Checksum Results Modal -->
+<div id="expChecksumModal" class="exp-modal" style="display:none;">
+    <div class="exp-modal-content" style="width:600px;">
+        <div class="exp-modal-header">
+            <h3 style="margin:0;">Checksum Verification Results</h3>
+            <button class="exp-modal-close" onclick="document.getElementById('expChecksumModal').style.display='none'">&times;</button>
+        </div>
+        <div class="exp-modal-body" id="expChecksumResults"></div>
+        <div class="exp-modal-footer">
+            <button onclick="document.getElementById('expChecksumModal').style.display='none'">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Tab Rename Input (floating) -->
+<input type="text" id="expTabRenameInput" style="display:none; position:absolute; z-index:100; background:#1a1a2e; border:1px solid #00ff88; color:#fff; padding:2px 6px; font-size:0.85rem; border-radius:3px;">
+
+<!-- Calibration Edit Modal -->
+<div id="expCalEditModal" class="exp-modal" style="display:none;">
+    <div class="exp-modal-content" style="width:400px;">
+        <div class="exp-modal-header">
+            <h3 id="expCalEditTitle" style="margin:0;">Edit Value</h3>
+            <button class="exp-modal-close" onclick="expCloseCalEdit()">&times;</button>
+        </div>
+        <div class="exp-modal-body">
+            <div class="form-group">
+                <label id="expCalEditLabel">Current value:</label>
+                <input type="text" id="expCalEditValue" style="font-family:monospace;">
+            </div>
+        </div>
+        <div class="exp-modal-footer">
+            <button class="secondary" onclick="expCloseCalEdit()">Cancel</button>
+            <button onclick="expSaveCalEdit()">Write</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// ===== Experiment Page State =====
+const EXP_MAX_TABS = 20;
+
+const ExpState = {
+    mode: 'idle',          // 'idle' | 'running' | 'recording'
+    pageMode: 'reference', // 'reference' | 'working'
+    tabs: [],
+    activeTabId: null,
+    allMeasurements: [],
+    allCalibrations: [],
+    liveValues: {},        // "device_id:name" -> value
+    calValues: {},         // "device_id:idx" -> value string
+    pageModeResults: {},   // device_id -> {success, read_only}
+    config: {
+        mf4Pattern: '{title}_{YYYYMMDD}_{HHMMSS}.mf4',
+        mf4Dir: 'records/',
+    },
+    pollingInterval: null,
+    statusInterval: null,
+};
+
+// ===== Initialization =====
+(function init() {
+    expAddTab();
+    expStartStatusPolling();
+    expRefreshVariables();
+})();
+
+// ===== Tab Management =====
+let tabCounter = 0;
+
+function expAddTab() {
+    if (ExpState.tabs.length >= EXP_MAX_TABS) {
+        expToast('Maximum ' + EXP_MAX_TABS + ' tabs reached', 'error');
+        return;
+    }
+    tabCounter++;
+    const tab = { id: 'tab-' + tabCounter, title: 'Tab ' + tabCounter, variables: [] };
+    ExpState.tabs.push(tab);
+    ExpState.activeTabId = tab.id;
+    expRenderTabs();
+    expRenderTabContent();
+}
+
+function expCloseTab(tabId, ev) {
+    if (ev) ev.stopPropagation();
+    if (ExpState.tabs.length <= 1) {
+        expToast('Cannot close the last tab', 'error');
+        return;
+    }
+    const idx = ExpState.tabs.findIndex(t => t.id === tabId);
+    ExpState.tabs.splice(idx, 1);
+    if (ExpState.activeTabId === tabId) {
+        ExpState.activeTabId = ExpState.tabs[Math.min(idx, ExpState.tabs.length - 1)].id;
+    }
+    expRenderTabs();
+    expRenderTabContent();
+}
+
+function expSelectTab(tabId) {
+    ExpState.activeTabId = tabId;
+    expRenderTabs();
+    expRenderTabContent();
+}
+
+function expRenameTab(tabId, ev) {
+    if (ev) ev.stopPropagation();
+    const tabEl = document.querySelector('.exp-tab[data-id="' + tabId + '"] .tab-title');
+    if (!tabEl) return;
+    const input = document.getElementById('expTabRenameInput');
+    const rect = tabEl.getBoundingClientRect();
+    input.style.display = 'block';
+    input.style.left = rect.left + 'px';
+    input.style.top = rect.top + 'px';
+    input.style.width = rect.width + 'px';
+    const tab = ExpState.tabs.find(t => t.id === tabId);
+    input.value = tab.title;
+    input.focus();
+    input.select();
+    input.onblur = function() {
+        tab.title = input.value.trim() || tab.title;
+        input.style.display = 'none';
+        expRenderTabs();
+    };
+    input.onkeydown = function(e) {
+        if (e.key === 'Enter') input.blur();
+        if (e.key === 'Escape') { input.value = tab.title; input.blur(); }
+    };
+}
+
+function expRenderTabs() {
+    const bar = document.getElementById('expTabBar');
+    const addBtn = bar.querySelector('.exp-tab-add');
+    bar.querySelectorAll('.exp-tab').forEach(function(el) { el.remove(); });
+    ExpState.tabs.forEach(function(tab) {
+        const el = document.createElement('div');
+        el.className = 'exp-tab' + (tab.id === ExpState.activeTabId ? ' active' : '');
+        el.dataset.id = tab.id;
+        el.onclick = function() { expSelectTab(tab.id); };
+        el.ondblclick = function(ev) { expRenameTab(tab.id, ev); };
+        el.innerHTML =
+            '<span class="tab-title">' + escapeHtml(tab.title) + '</span>' +
+            '<span class="tab-close" onclick="expCloseTab(\'' + tab.id + '\', event)" title="Close tab">&times;</span>';
+        bar.insertBefore(el, addBtn);
+    });
+}
+
+// ===== Tab Content Rendering =====
+function expRenderTabContent() {
+    var container = document.getElementById('expTabContent');
+    var tab = ExpState.tabs.find(function(t) { return t.id === ExpState.activeTabId; });
+    if (!tab) {
+        container.innerHTML = '<div class="exp-empty-tab"><div class="icon">📋</div><p>No tabs open</p></div>';
+        return;
+    }
+
+    if (tab.variables.length === 0) {
+        container.innerHTML =
+            '<div class="exp-empty-tab">' +
+            '<div class="icon">📋</div>' +
+            '<p>No variables in this tab</p>' +
+            '<p style="font-size:0.85rem;">Click "Variables" in the toolbar to add measurements and calibration parameters</p>' +
+            '<button class="exp-tb-btn" onclick="expOpenVarModal()" ' + (ExpState.mode !== 'idle' ? 'disabled' : '') + '>📋 Add Variables</button>' +
+            '</div>';
+        return;
+    }
+
+    var measurements = tab.variables.filter(function(v) { return v.kind === 'measurement'; });
+    var scalarCals = tab.variables.filter(function(v) { return v.kind === 'calibration' && !v.isMapCurve; });
+    var mapCurveCals = tab.variables.filter(function(v) { return v.kind === 'calibration' && v.isMapCurve; });
+
+    var html = '';
+
+    // Measurement cards
+    if (measurements.length > 0) {
+        html += '<div class="exp-cards-section"><h3>📊 Measurements (' + measurements.length + ')</h3><div class="exp-cards-grid">';
+        measurements.forEach(function(v) {
+            var key = v.device_id + ':' + v.name;
+            var val = ExpState.liveValues[key];
+            var displayVal = val !== undefined ? formatValue(val) : '—';
+            html +=
+                '<div class="exp-var-card measurement" title="' + escapeHtml(v.device_name + ' / ' + v.name) + '">' +
+                '<div class="card-device">' + escapeHtml(v.device_name) + '</div>' +
+                '<div class="card-name">' + escapeHtml(v.name) + '</div>' +
+                '<div class="card-value"><span data-live-key="' + escapeHtml(key) + '">' + displayVal + '</span><span class="card-unit">' + escapeHtml(v.unit || '') + '</span></div>' +
+                (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
+                '</div>';
+        });
+        html += '</div></div>';
+    }
+
+    // Scalar calibration cards
+    if (scalarCals.length > 0) {
+        var isWorking = ExpState.pageMode === 'working';
+        html += '<div class="exp-cards-section"><h3>🔧 Calibration (' + scalarCals.length + ')</h3><div class="exp-cards-grid">';
+        scalarCals.forEach(function(v) {
+            var calKey = v.device_id + ':' + v.idx;
+            var val = ExpState.calValues[calKey];
+            var displayVal = val !== undefined ? val : '—';
+            var deviceResult = ExpState.pageModeResults[v.device_id];
+            var readOnly = !isWorking || (deviceResult && deviceResult.read_only);
+            var editableClass = isWorking && !readOnly ? 'editable' : 'readonly';
+            var clickHandler = isWorking && !readOnly ? 'onclick="expEditCal(\'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')"' : '';
+            html +=
+                '<div class="exp-var-card calibration ' + editableClass + '" ' + clickHandler + ' title="' + escapeHtml(v.device_name + ' / ' + v.name) + (readOnly ? ' (read-only)' : '') + '">' +
+                '<div class="card-device">' + escapeHtml(v.device_name) + '</div>' +
+                '<div class="card-name">' + escapeHtml(v.name) + '</div>' +
+                '<div class="card-value"><span data-cal-key="' + escapeHtml(calKey) + '">' + escapeHtml(String(displayVal)) + '</span><span class="card-unit">' + escapeHtml(v.unit || '') + '</span></div>' +
+                (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
+                '</div>';
+        });
+        html += '</div></div>';
+    }
+
+    // Map/Curve calibrations (table view)
+    if (mapCurveCals.length > 0) {
+        html += '<div class="exp-map-section"><h3>📐 Maps & Curves (' + mapCurveCals.length + ')</h3>';
+        mapCurveCals.forEach(function(v) {
+            html +=
+                '<div class="card" style="margin-top:0.5rem; padding:0.75rem;">' +
+                '<div style="display:flex; justify-content:space-between; align-items:center;">' +
+                '<strong style="color:#ff8844;">' + escapeHtml(v.name) + '</strong>' +
+                '<span style="color:#666; font-size:0.8rem;">' + escapeHtml(v.device_name) + ' | ' + escapeHtml(v.calType || '') + '</span>' +
+                (ExpState.mode === 'idle' ? '<span class="card-remove" style="position:static; opacity:0.7;" onclick="expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
+                '</div>' +
+                '<div id="mapTable_' + v.device_id + '_' + v.idx + '" style="margin-top:0.5rem; overflow-x:auto;">' +
+                '<button class="secondary" style="font-size:0.8rem;" onclick="expLoadMapData(\'' + v.device_id + '\', ' + v.idx + ')">Load Data</button>' +
+                '</div>' +
+                '</div>';
+        });
+        html += '</div>';
+    }
+
+    container.innerHTML = html;
+}
+
+function formatValue(val) {
+    if (typeof val === 'number') {
+        return Number.isInteger(val) ? val.toString() : val.toFixed(4);
+    }
+    return String(val);
+}
+
+// ===== Variable Removal =====
+function expRemoveVar(tabId, deviceId, idx, kind) {
+    if (ExpState.mode !== 'idle') return;
+    var tab = ExpState.tabs.find(function(t) { return t.id === tabId; });
+    if (!tab) return;
+    tab.variables = tab.variables.filter(function(v) {
+        return !(v.device_id === deviceId && v.idx === idx && v.kind === kind);
+    });
+    expRenderTabContent();
+}
+
+// ===== Variable Selection Modal =====
+var expVarModalSelection = {};  // "kind:device_id:idx" -> true
+
+function expOpenVarModal() {
+    if (ExpState.mode !== 'idle') {
+        expToast('Cannot change variables while DAQ is running', 'error');
+        return;
+    }
+    document.getElementById('expVarModal').style.display = 'flex';
+    expVarModalSelection = {};
+    var tab = ExpState.tabs.find(function(t) { return t.id === ExpState.activeTabId; });
+    if (tab) {
+        tab.variables.forEach(function(v) {
+            expVarModalSelection[v.kind + ':' + v.device_id + ':' + v.idx] = true;
+        });
+    }
+    expPopulateVarModal();
+}
+
+function expCloseVarModal() {
+    document.getElementById('expVarModal').style.display = 'none';
+}
+
+function expRefreshVariables() {
+    fetch('/api/experiment/variables')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                ExpState.allMeasurements = data.measurements || [];
+                ExpState.allCalibrations = data.calibrations || [];
+                expPopulateVarFilterDevices();
+            }
+        })
+        .catch(function(e) { console.error('Failed to load variables:', e); });
+}
+
+function expPopulateVarFilterDevices() {
+    var sel = document.getElementById('expVarFilterDevice');
+    var devices = {};
+    ExpState.allMeasurements.forEach(function(v) { devices[v.device_id] = v.device_name; });
+    ExpState.allCalibrations.forEach(function(v) { devices[v.device_id] = v.device_name; });
+    sel.innerHTML = '<option value="">All Devices</option>';
+    Object.keys(devices).forEach(function(id) {
+        sel.innerHTML += '<option value="' + escapeHtml(id) + '">' + escapeHtml(devices[id]) + '</option>';
+    });
+}
+
+function expPopulateVarModal() {
+    var tbody = document.getElementById('expVarList');
+    var search = document.getElementById('expVarSearch').value.toLowerCase();
+    var deviceFilter = document.getElementById('expVarFilterDevice').value;
+    var typeFilter = document.getElementById('expVarFilterType').value;
+
+    var items = [];
+
+    if (typeFilter !== 'calibration') {
+        ExpState.allMeasurements.forEach(function(m) {
+            items.push({
+                kind: 'measurement', device_id: m.device_id, device_name: m.device_name,
+                idx: m.idx, name: m.name, type: m.type || '', address: m.address_hex || '',
+                unit: m.unit || '', connected: m.connected,
+            });
+        });
+    }
+
+    if (typeFilter !== 'measurement') {
+        ExpState.allCalibrations.forEach(function(c) {
+            var tn = c.type_name || c.type || '';
+            items.push({
+                kind: 'calibration', device_id: c.device_id, device_name: c.device_name,
+                idx: c.idx, name: c.name, type: tn,
+                address: c.address_hex || (c.address ? ('0x' + Number(c.address).toString(16).toUpperCase().padStart(8, '0')) : ''),
+                unit: c.unit || '', connected: c.connected, calType: tn,
+                isMapCurve: tn.indexOf('Map') >= 0 || tn.indexOf('Curve') >= 0 || tn.indexOf('Matrix') >= 0 || tn.indexOf('Array') >= 0,
+            });
+        });
+    }
+
+    if (search) {
+        items = items.filter(function(v) { return v.name.toLowerCase().indexOf(search) >= 0 || v.device_name.toLowerCase().indexOf(search) >= 0; });
+    }
+    if (deviceFilter) {
+        items = items.filter(function(v) { return v.device_id === deviceFilter; });
+    }
+
+    var display = items.slice(0, 500);
+    var html = '';
+    display.forEach(function(v) {
+        var key = v.kind + ':' + v.device_id + ':' + v.idx;
+        var checked = expVarModalSelection[key] ? 'checked' : '';
+        var kindLabel = v.kind === 'measurement' ? '📊 Meas' : '🔧 Cal';
+        var kindColor = v.kind === 'measurement' ? '#4488ff' : '#ff8844';
+        html +=
+            '<tr onclick="expToggleVarCheckbox(\'' + key + '\')" style="cursor:pointer;" class="' + (checked ? 'selected-row' : '') + '">' +
+            '<td style="padding:0.5rem; text-align:center;"><input type="checkbox" ' + checked + ' data-key="' + key + '" onclick="event.stopPropagation(); expToggleVar(\'' + key + '\')"></td>' +
+            '<td style="padding:0.5rem;">' + escapeHtml(v.name) + '</td>' +
+            '<td style="padding:0.5rem; color:#888;">' + escapeHtml(v.device_name) + '</td>' +
+            '<td style="padding:0.5rem;"><span style="color:' + kindColor + '; font-size:0.8rem;">' + kindLabel + '</span></td>' +
+            '<td style="padding:0.5rem; font-family:monospace; font-size:0.8rem;">' + escapeHtml(v.type) + '</td>' +
+            '<td style="padding:0.5rem; font-family:monospace; font-size:0.8rem; color:#888;">' + escapeHtml(v.address) + '</td>' +
+            '</tr>';
+    });
+    if (items.length > 500) {
+        html += '<tr><td colspan="6" style="text-align:center; color:#888; padding:1rem;">Showing 500 of ' + items.length + ' — use search to narrow</td></tr>';
+    }
+    tbody.innerHTML = html;
+    var count = Object.keys(expVarModalSelection).length;
+    document.getElementById('expVarCount').textContent = count + ' selected';
+}
+
+function expFilterVars() { expPopulateVarModal(); }
+
+function expToggleVar(key) {
+    if (expVarModalSelection[key]) {
+        delete expVarModalSelection[key];
+    } else {
+        expVarModalSelection[key] = true;
+    }
+    expPopulateVarModal();
+}
+
+function expToggleVarCheckbox(key) { expToggleVar(key); }
+
+function expToggleSelectAll() {
+    var allChecked = document.getElementById('expSelectAll').checked;
+    document.querySelectorAll('#expVarList input[type="checkbox"]').forEach(function(cb) {
+        var key = cb.dataset.key;
+        if (allChecked) expVarModalSelection[key] = true;
+        else delete expVarModalSelection[key];
+    });
+    expPopulateVarModal();
+}
+
+function expApplyVarSelection() {
+    var tab = ExpState.tabs.find(function(t) { return t.id === ExpState.activeTabId; });
+    if (!tab) return;
+
+    var newVars = [];
+    Object.keys(expVarModalSelection).forEach(function(key) {
+        var parts = key.split(':');
+        var kind = parts[0];
+        var device_id = parts[1];
+        var idx = parseInt(parts[2]);
+        var source;
+        if (kind === 'measurement') {
+            source = ExpState.allMeasurements.find(function(m) { return m.device_id === device_id && m.idx === idx; });
+            if (source) {
+                newVars.push({
+                    kind: 'measurement', device_id: source.device_id, device_name: source.device_name,
+                    idx: source.idx, name: source.name, type: source.type || '',
+                    unit: source.unit || '', isMapCurve: false,
+                });
+            }
+        } else {
+            source = ExpState.allCalibrations.find(function(c) { return c.device_id === device_id && c.idx === idx; });
+            if (source) {
+                var typeName = source.type_name || source.type || '';
+                newVars.push({
+                    kind: 'calibration', device_id: source.device_id, device_name: source.device_name,
+                    idx: source.idx, name: source.name, type: typeName,
+                    unit: source.unit || '', calType: typeName,
+                    isMapCurve: typeName.indexOf('Map') >= 0 || typeName.indexOf('Curve') >= 0 || typeName.indexOf('Matrix') >= 0 || typeName.indexOf('Array') >= 0,
+                });
+            }
+        }
+    });
+
+    tab.variables = newVars;
+    expCloseVarModal();
+    expRenderTabContent();
+    expReadAllCalValues();
+}
+
+// ===== DAQ Control =====
+function expStart() {
+    if (ExpState.mode !== 'idle') return;
+
+    // Collect unique measurements across all tabs, grouped by device
+    var selections = {};
+    var seen = {};
+    ExpState.tabs.forEach(function(tab) {
+        tab.variables.filter(function(v) { return v.kind === 'measurement'; }).forEach(function(v) {
+            var key = v.device_id + ':' + v.idx;
+            if (!seen[key]) {
+                seen[key] = true;
+                if (!selections[v.device_id]) selections[v.device_id] = [];
+                selections[v.device_id].push(v.idx);
+            }
+        });
+    });
+
+    if (Object.keys(selections).length === 0) {
+        expToast('No measurement variables selected in any tab', 'error');
+        return;
+    }
+
+    document.getElementById('btnStart').disabled = true;
+
+    fetch('/api/experiment/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ selections: selections }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success) {
+            ExpState.mode = 'running';
+            expUpdateToolbarState();
+            expStartDataPolling();
+            expToast('DAQ started on ' + data.started + ' device(s)', 'success');
+        } else {
+            expToast('Start failed: ' + (data.error || (data.errors ? data.errors.join('; ') : '')), 'error');
+        }
+        document.getElementById('btnStart').disabled = false;
+    })
+    .catch(function(e) {
+        expToast('Start failed: ' + e, 'error');
+        document.getElementById('btnStart').disabled = false;
+    });
+}
+
+function expRecord() {
+    if (ExpState.mode !== 'running') return;
+    var title = document.getElementById('expTitle').value.trim() || 'experiment';
+
+    fetch('/api/experiment/record/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ title: title }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success) {
+            ExpState.mode = 'recording';
+            expUpdateToolbarState();
+            expToast('Recording started', 'success');
+        } else {
+            expToast('Record failed: ' + (data.error || (data.errors ? data.errors.join('; ') : '')), 'error');
+        }
+    })
+    .catch(function(e) { expToast('Record failed: ' + e, 'error'); });
+}
+
+function expStop() {
+    if (ExpState.mode === 'idle') return;
+
+    fetch('/api/experiment/stop', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        ExpState.mode = 'idle';
+        expStopDataPolling();
+        expUpdateToolbarState();
+        if (data.success) {
+            expToast('DAQ stopped on ' + data.stopped + ' device(s)', 'success');
+        } else {
+            expToast('Stop: ' + (data.error || (data.errors ? data.errors.join('; ') : '')), 'error');
+        }
+    })
+    .catch(function(e) {
+        ExpState.mode = 'idle';
+        expStopDataPolling();
+        expUpdateToolbarState();
+        expToast('Stop error: ' + e, 'error');
+    });
+}
+
+function expUpdateToolbarState() {
+    var btnStart = document.getElementById('btnStart');
+    var btnRecord = document.getElementById('btnRecord');
+    var btnStop = document.getElementById('btnStop');
+    var btnAddVars = document.getElementById('btnAddVars');
+    var stateLabel = document.getElementById('expStateLabel');
+
+    switch (ExpState.mode) {
+        case 'idle':
+            btnStart.style.display = '';
+            btnRecord.style.display = 'none';
+            btnStop.style.display = 'none';
+            btnAddVars.disabled = false;
+            stateLabel.textContent = 'IDLE';
+            stateLabel.style.color = '#888';
+            btnRecord.classList.remove('recording');
+            btnRecord.disabled = false;
+            break;
+        case 'running':
+            btnStart.style.display = 'none';
+            btnRecord.style.display = '';
+            btnStop.style.display = '';
+            btnAddVars.disabled = true;
+            stateLabel.textContent = 'DAQ RUNNING';
+            stateLabel.style.color = '#00ff88';
+            btnRecord.classList.remove('recording');
+            btnRecord.disabled = false;
+            break;
+        case 'recording':
+            btnStart.style.display = 'none';
+            btnRecord.style.display = '';
+            btnRecord.classList.add('recording');
+            btnRecord.disabled = true;
+            btnStop.style.display = '';
+            btnAddVars.disabled = true;
+            stateLabel.textContent = '⏺ RECORDING';
+            stateLabel.style.color = '#ff4444';
+            break;
+    }
+    expRenderTabContent();
+}
+
+// ===== Data Polling =====
+function expStartDataPolling() {
+    if (ExpState.pollingInterval) return;
+    ExpState.pollingInterval = setInterval(expPollData, 500);
+}
+
+function expStopDataPolling() {
+    if (ExpState.pollingInterval) {
+        clearInterval(ExpState.pollingInterval);
+        ExpState.pollingInterval = null;
+    }
+}
+
+function expPollData() {
+    var deviceIds = {};
+    ExpState.tabs.forEach(function(tab) {
+        tab.variables.filter(function(v) { return v.kind === 'measurement'; }).forEach(function(v) {
+            deviceIds[v.device_id] = true;
+        });
+    });
+
+    Object.keys(deviceIds).forEach(function(deviceId) {
+        fetch('/api/daq/data', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ device_id: deviceId }),
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.values) {
+                Object.keys(data.values).forEach(function(name) {
+                    ExpState.liveValues[deviceId + ':' + name] = data.values[name];
+                });
+                // Update live value displays without re-rendering entire content
+                document.querySelectorAll('[data-live-key]').forEach(function(el) {
+                    var key = el.dataset.liveKey;
+                    if (ExpState.liveValues[key] !== undefined) {
+                        el.textContent = formatValue(ExpState.liveValues[key]);
+                    }
+                });
+            }
+        })
+        .catch(function() {});
+    });
+}
+
+// ===== Status Polling =====
+function expStartStatusPolling() {
+    ExpState.statusInterval = setInterval(expPollStatus, 3000);
+    expPollStatus();
+}
+
+function expPollStatus() {
+    fetch('/api/experiment/status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                expUpdateStatusBar(data.devices || []);
+                // Sync mode if server says experiment is active but we think idle
+                if (data.experiment_active && ExpState.mode === 'idle') {
+                    if (data.daq_running_count > 0) {
+                        ExpState.mode = data.recording_count > 0 ? 'recording' : 'running';
+                        expUpdateToolbarState();
+                        if (ExpState.mode !== 'idle') expStartDataPolling();
+                    }
+                }
+            }
+        })
+        .catch(function() {});
+}
+
+function expUpdateStatusBar(devices) {
+    var bar = document.getElementById('expStatusBar');
+    if (devices.length === 0) {
+        bar.innerHTML = '<span class="status-item">No devices loaded</span>';
+        return;
+    }
+    var html = '';
+    devices.forEach(function(d, i) {
+        if (i > 0) html += '<span class="status-separator"></span>';
+        var dotClass = d.connected ? 'connected' : 'disconnected';
+        var name = d.device_name || d.device_id;
+        var tooltip = name + '\nA2L: ' + (d.a2l_file || 'none') + '\nPage: ' + (d.page_mode || 'N/A') + '\nDAQ: ' + (d.daq_running ? 'running' : 'stopped');
+        html += '<span class="status-item" title="' + escapeHtml(tooltip) + '"><span class="status-dot ' + dotClass + '"></span>' + escapeHtml(name) + '</span>';
+    });
+    bar.innerHTML = html;
+}
+
+// ===== Page Mode Toggle =====
+function expTogglePageMode() {
+    var newMode = ExpState.pageMode === 'reference' ? 'working' : 'reference';
+
+    fetch('/api/experiment/pagemode', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ mode: newMode }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.switched > 0 || data.failed === 0) {
+            ExpState.pageMode = newMode;
+            var toggle = document.getElementById('pageModeToggle');
+            if (newMode === 'working') toggle.classList.add('working');
+            else toggle.classList.remove('working');
+
+            if (data.results) {
+                data.results.forEach(function(r) {
+                    ExpState.pageModeResults[r.device_id] = {
+                        success: r.success,
+                        read_only: r.read_only || false,
+                    };
+                });
+            }
+
+            if (data.failed > 0) {
+                expToast('Switched ' + data.switched + ' device(s), ' + data.failed + ' failed (read-only)', 'error');
+            } else {
+                expToast('Switched to ' + newMode + ' page', 'success');
+            }
+            expRenderTabContent();
+        } else {
+            expToast('Page mode switch failed: ' + (data.error || ''), 'error');
+        }
+    })
+    .catch(function(e) { expToast('Page mode switch failed: ' + e, 'error'); });
+}
+
+// ===== Calibration Read/Edit =====
+function expReadAllCalValues() {
+    var calVars = {};
+    ExpState.tabs.forEach(function(tab) {
+        tab.variables.filter(function(v) { return v.kind === 'calibration'; }).forEach(function(v) {
+            calVars[v.device_id + ':' + v.idx] = true;
+        });
+    });
+
+    Object.keys(calVars).forEach(function(key) {
+        var parts = key.split(':');
+        var deviceId = parts[0];
+        var idx = parts[1];
+        fetch('/api/cal/value/' + deviceId + '/' + idx)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.value !== undefined) {
+                    ExpState.calValues[key] = data.value;
+                    document.querySelectorAll('[data-cal-key="' + key + '"]').forEach(function(el) {
+                        el.textContent = String(data.value);
+                    });
+                }
+            })
+            .catch(function() {});
+    });
+}
+
+var currentCalEdit = null;
+
+function expEditCal(deviceId, idx, name) {
+    if (ExpState.pageMode !== 'working') return;
+    currentCalEdit = { deviceId: deviceId, idx: idx, name: name };
+    document.getElementById('expCalEditTitle').textContent = 'Edit: ' + name;
+    var key = deviceId + ':' + idx;
+    document.getElementById('expCalEditValue').value = ExpState.calValues[key] || '';
+    document.getElementById('expCalEditModal').style.display = 'flex';
+    document.getElementById('expCalEditValue').focus();
+}
+
+function expCloseCalEdit() {
+    document.getElementById('expCalEditModal').style.display = 'none';
+    currentCalEdit = null;
+}
+
+function expSaveCalEdit() {
+    if (!currentCalEdit) return;
+    var deviceId = currentCalEdit.deviceId;
+    var idx = currentCalEdit.idx;
+    var value = document.getElementById('expCalEditValue').value;
+
+    fetch('/api/cal/write/' + deviceId + '/' + idx, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'value=' + encodeURIComponent(value),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success) {
+            var key = deviceId + ':' + idx;
+            ExpState.calValues[key] = value;
+            document.querySelectorAll('[data-cal-key="' + key + '"]').forEach(function(el) {
+                el.textContent = value;
+            });
+            expCloseCalEdit();
+            expToast('Value written successfully', 'success');
+        } else {
+            expToast('Write failed: ' + (data.error || ''), 'error');
+        }
+    })
+    .catch(function(e) { expToast('Write failed: ' + e, 'error'); });
+}
+
+// ===== Map/Curve Data Loading =====
+function expLoadMapData(deviceId, idx) {
+    fetch('/api/cal/detail/' + deviceId + '/' + idx)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.success) {
+                expToast('Failed to load: ' + (data.error || ''), 'error');
+                return;
+            }
+            var container = document.getElementById('mapTable_' + deviceId + '_' + idx);
+            if (!container) return;
+
+            fetch('/api/cal/read/' + deviceId + '/' + idx)
+                .then(function(r) { return r.json(); })
+                .then(function(readData) {
+                    if (readData.success && readData.value) {
+                        container.innerHTML = expRenderMapTable(data, readData.value, deviceId, idx);
+                    } else {
+                        container.innerHTML = '<span style="color:#ff4444;">Failed to read value</span>';
+                    }
+                });
+        })
+        .catch(function(e) { expToast('Load failed: ' + e, 'error'); });
+}
+
+function expRenderMapTable(detail, value, deviceId, idx) {
+    if (typeof value === 'string') {
+        try { value = JSON.parse(value); } catch(e) { /* keep */ }
+    }
+
+    if (Array.isArray(value)) {
+        if (Array.isArray(value[0])) {
+            // 2D matrix
+            var html = '<table class="exp-map-table"><tbody>';
+            value.forEach(function(row, ri) {
+                html += '<tr>';
+                row.forEach(function(cell, ci) {
+                    var isW = ExpState.pageMode === 'working';
+                    html += '<td class="' + (isW ? 'editable' : '') + '" ' + (isW ? 'onclick="expEditMapCell(\'' + deviceId + '\', ' + idx + ', ' + ri + ', ' + ci + ', this)"' : '') + '>' + formatValue(cell) + '</td>';
+                });
+                html += '</tr>';
+            });
+            html += '</tbody></table>';
+            return html;
+        } else {
+            // 1D array
+            var html = '<table class="exp-map-table"><tbody><tr>';
+            value.forEach(function(v, i) {
+                var isW = ExpState.pageMode === 'working';
+                html += '<td class="' + (isW ? 'editable' : '') + '" ' + (isW ? 'onclick="expEditMapCell(\'' + deviceId + '\', ' + idx + ', 0, ' + i + ', this)"' : '') + '>' + formatValue(v) + '</td>';
+            });
+            html += '</tr></tbody></table>';
+            return html;
+        }
+    }
+
+    return '<span style="color:#888;">' + escapeHtml(String(value)) + '</span>';
+}
+
+function expEditMapCell(deviceId, idx, row, col, cell) {
+    if (ExpState.pageMode !== 'working') return;
+    var oldVal = cell.textContent;
+    cell.innerHTML = '<input class="exp-inline-edit" value="' + escapeHtml(oldVal) + '" ' +
+        'onblur="expSaveMapCell(\'' + deviceId + '\', ' + idx + ', ' + row + ', ' + col + ', this, \'' + escapeHtml(oldVal) + '\')" ' +
+        'onkeydown="if(event.key===\'Enter\')this.blur(); if(event.key===\'Escape\'){this.value=\'' + escapeHtml(oldVal) + '\';this.blur();}">';
+    cell.querySelector('input').focus();
+    cell.querySelector('input').select();
+}
+
+function expSaveMapCell(deviceId, idx, row, col, input, oldVal) {
+    var newVal = input.value;
+    if (newVal === oldVal) {
+        input.parentElement.textContent = oldVal;
+        return;
+    }
+
+    fetch('/api/cal/write-element/' + deviceId + '/' + idx, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ row: row, col: col, value: newVal }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success) {
+            input.parentElement.textContent = newVal;
+            expToast('Cell updated', 'success');
+        } else {
+            input.parentElement.textContent = oldVal;
+            expToast('Write failed: ' + (data.error || ''), 'error');
+        }
+    })
+    .catch(function() {
+        input.parentElement.textContent = oldVal;
+    });
+}
+
+// ===== Save / Load =====
+function expSave() {
+    var experiment = {
+        version: 1,
+        title: document.getElementById('expTitle').value,
+        config: ExpState.config,
+        pageMode: ExpState.pageMode,
+        tabs: ExpState.tabs.map(function(t) { return { id: t.id, title: t.title, variables: t.variables }; }),
+        pageModeResults: ExpState.pageModeResults,
+        savedAt: new Date().toISOString(),
+    };
+
+    var blob = new Blob([JSON.stringify(experiment, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = (experiment.title || 'experiment').replace(/[^a-zA-Z0-9_-]/g, '_') + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    expToast('Experiment saved', 'success');
+}
+
+function expLoad() {
+    if (ExpState.mode !== 'idle') {
+        expToast('Stop DAQ before loading', 'error');
+        return;
+    }
+    var input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = function(e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        var reader = new FileReader();
+        reader.onload = function(ev) {
+            try {
+                var data = JSON.parse(ev.target.result);
+                expApplyLoadedConfig(data);
+                expToast('Experiment loaded: ' + (data.title || file.name), 'success');
+            } catch (err) {
+                expToast('Invalid experiment file: ' + err.message, 'error');
+            }
+        };
+        reader.readAsText(file);
+    };
+    input.click();
+}
+
+function expApplyLoadedConfig(data) {
+    if (data.title) document.getElementById('expTitle').value = data.title;
+    if (data.config) {
+        ExpState.config = { mf4Pattern: data.config.mf4Pattern || ExpState.config.mf4Pattern, mf4Dir: data.config.mf4Dir || ExpState.config.mf4Dir };
+        document.getElementById('expMf4Pattern').value = ExpState.config.mf4Pattern;
+        document.getElementById('expMf4Dir').value = ExpState.config.mf4Dir;
+    }
+    if (data.tabs && Array.isArray(data.tabs)) {
+        ExpState.tabs = data.tabs;
+        tabCounter = Math.max(tabCounter, data.tabs.length);
+        ExpState.activeTabId = ExpState.tabs.length > 0 ? ExpState.tabs[0].id : null;
+    }
+    if (data.pageModeResults) ExpState.pageModeResults = data.pageModeResults;
+    expRenderTabs();
+    expRenderTabContent();
+    expReadAllCalValues();
+}
+
+// ===== Config Dialog =====
+function expConfig() {
+    document.getElementById('expMf4Pattern').value = ExpState.config.mf4Pattern;
+    document.getElementById('expMf4Dir').value = ExpState.config.mf4Dir;
+
+    fetch('/api/experiment/status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var container = document.getElementById('expConfigDevices');
+            if (!data.devices || data.devices.length === 0) {
+                container.innerHTML = '<p style="color:#666;">No devices loaded</p>';
+            } else {
+                container.innerHTML = data.devices.map(function(d) {
+                    return '<div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem; border-bottom:1px solid #333;">' +
+                        '<span class="status-dot ' + (d.connected ? 'connected' : 'disconnected') + '"></span>' +
+                        '<input type="text" value="' + escapeHtml(d.device_name) + '" style="flex:1; font-size:0.85rem;" data-device-id="' + escapeHtml(d.device_id) + '" onblur="expRenameDevice(\'' + escapeHtml(d.device_id) + '\', this.value)">' +
+                        '<span style="color:#666; font-size:0.75rem;">' + escapeHtml(d.a2l_file || '') + '</span>' +
+                        '</div>';
+                }).join('');
+            }
+        });
+
+    document.getElementById('expConfigModal').style.display = 'flex';
+}
+
+function expCloseConfig() {
+    document.getElementById('expConfigModal').style.display = 'none';
+}
+
+function expSaveConfig() {
+    ExpState.config.mf4Pattern = document.getElementById('expMf4Pattern').value;
+    ExpState.config.mf4Dir = document.getElementById('expMf4Dir').value;
+    expCloseConfig();
+    expToast('Configuration saved', 'success');
+}
+
+function expRenameDevice(deviceId, newName) {
+    if (!newName.trim()) return;
+    fetch('/api/experiment/rename-slave/' + deviceId, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ name: newName.trim() }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success) {
+            ExpState.tabs.forEach(function(tab) {
+                tab.variables.forEach(function(v) {
+                    if (v.device_id === deviceId) v.device_name = newName.trim();
+                });
+            });
+            expRenderTabContent();
+        }
+    })
+    .catch(function() {});
+}
+
+// ===== Connect =====
+function expConnect() {
+    window.location.href = '/connect';
+}
+
+// ===== Checksum =====
+function expChecksum() {
+    expToast('Running checksum verification...', 'success');
+
+    fetch('/api/experiment/checksum', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var container = document.getElementById('expChecksumResults');
+        if (!data.results || data.results.length === 0) {
+            container.innerHTML = '<p style="color:#888;">No devices to verify</p>';
+        } else {
+            var html = '';
+            data.results.forEach(function(r) {
+                var icon = r.success && r.passed ? '✅' : '❌';
+                html +=
+                    '<div class="card" style="margin-bottom:0.5rem; padding:0.75rem;">' +
+                    '<div style="display:flex; justify-content:space-between; align-items:center;">' +
+                    '<strong>' + icon + ' ' + escapeHtml(r.device_name) + '</strong>' +
+                    '<span style="color:' + (r.success && r.passed ? '#00ff88' : '#ff4444') + ';">' + (r.success && r.passed ? 'PASS' : 'FAIL') + '</span>' +
+                    '</div>' +
+                    (r.error ? '<div style="color:#ff4444; font-size:0.85rem; margin-top:0.25rem;">' + escapeHtml(r.error) + '</div>' : '') +
+                    '</div>';
+            });
+            container.innerHTML = html;
+        }
+        document.getElementById('expChecksumModal').style.display = 'flex';
+    })
+    .catch(function(e) { expToast('Checksum failed: ' + e, 'error'); });
+}
+
+// ===== Toast Notifications =====
+function expToast(msg, type) {
+    var toast = document.querySelector('.exp-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.className = 'exp-toast';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = msg;
+    toast.className = 'exp-toast ' + (type || '');
+    setTimeout(function() { toast.classList.add('show'); }, 10);
+    setTimeout(function() { toast.classList.remove('show'); }, 3000);
+}
+</script>

@@ -133,6 +133,32 @@ impl WebServer {
                 "/api/checksum/verify/:device_id",
                 post(routes::checksum_verify),
             )
+            // Experiment
+            .route("/experiment", get(routes::experiment_page))
+            .route("/api/experiment/variables", get(routes::experiment_variables))
+            .route("/api/experiment/start", post(routes::experiment_start))
+            .route("/api/experiment/stop", post(routes::experiment_stop))
+            .route(
+                "/api/experiment/record/start",
+                post(routes::experiment_record_start),
+            )
+            .route(
+                "/api/experiment/record/stop",
+                post(routes::experiment_record_stop),
+            )
+            .route("/api/experiment/status", get(routes::experiment_status))
+            .route(
+                "/api/experiment/pagemode",
+                post(routes::experiment_pagemode),
+            )
+            .route(
+                "/api/experiment/rename-slave/:device_id",
+                post(routes::experiment_rename_slave),
+            )
+            .route(
+                "/api/experiment/checksum",
+                post(routes::experiment_checksum),
+            )
             // State and middleware
             .layer(axum::middleware::from_fn(auth_middleware))
             .layer(TraceLayer::new_for_http())

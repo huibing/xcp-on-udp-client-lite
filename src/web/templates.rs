@@ -406,6 +406,11 @@ impl TemplateEngine {
     pub fn checksum_page(&self, data: &serde_json::Value) -> String {
         self.render("checksum", data)
     }
+
+    /// Render experiment page
+    pub fn experiment_page(&self) -> String {
+        self.render("experiment", &json!({}))
+    }
 }
 
 impl Default for TemplateEngine {
@@ -427,6 +432,7 @@ pub fn page(title: &str, content: &str, status: Option<&str>, error: Option<&str
         "active_daq": title == "DAQ",
         "active_a2l": title == "A2L",
         "active_checksum": title == "Checksum",
+        "active_experiment": title == "Experiment",
     });
     engine.render("base", &data)
 }
@@ -532,6 +538,12 @@ pub fn a2l_page(
         cal_count,
         meas_count,
     )
+}
+
+/// Render experiment page
+pub fn experiment_page() -> String {
+    let engine = TemplateEngine::new();
+    engine.experiment_page()
 }
 
 /// Escape HTML special characters
