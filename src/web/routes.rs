@@ -5243,197 +5243,157 @@ pub async fn experiment_dcm_export(
 
 // ── DCM helpers ──────────────────────────────────────────────────────────────
 
-/// Format a scalar `CalibrationValue` as a DCM token.
-/// Returns `None` for non-scalar variants.
-fn cal_value_to_dcm_scalar(value: &CalibrationValue) -> Option<String> {
+/// Convert a scalar `CalibrationValue` to f64. Returns `None` for non-scalar variants.
+fn cal_value_to_dcm_f64(value: &CalibrationValue) -> Option<f64> {
     match value {
-        CalibrationValue::U8(v) => Some(v.to_string()),
-        CalibrationValue::U16(v) => Some(v.to_string()),
-        CalibrationValue::U32(v) => Some(v.to_string()),
-        CalibrationValue::U64(v) => Some(v.to_string()),
-        CalibrationValue::I8(v) => Some(v.to_string()),
-        CalibrationValue::I16(v) => Some(v.to_string()),
-        CalibrationValue::I32(v) => Some(v.to_string()),
-        CalibrationValue::I64(v) => Some(v.to_string()),
-        CalibrationValue::F32(v) => Some(format!("{:.10}", v)),
-        CalibrationValue::F64(v) => Some(format!("{:.10}", v)),
-        CalibrationValue::Bool(v) => Some(if *v { "1" } else { "0" }.to_string()),
+        CalibrationValue::U8(v) => Some(*v as f64),
+        CalibrationValue::U16(v) => Some(*v as f64),
+        CalibrationValue::U32(v) => Some(*v as f64),
+        CalibrationValue::U64(v) => Some(*v as f64),
+        CalibrationValue::I8(v) => Some(*v as f64),
+        CalibrationValue::I16(v) => Some(*v as f64),
+        CalibrationValue::I32(v) => Some(*v as f64),
+        CalibrationValue::I64(v) => Some(*v as f64),
+        CalibrationValue::F32(v) => Some(*v as f64),
+        CalibrationValue::F64(v) => Some(*v),
+        CalibrationValue::Bool(v) => Some(if *v { 1.0 } else { 0.0 }),
         _ => None,
     }
 }
 
-/// Flatten a 1-D `CalibrationValue` into DCM-formatted tokens.
+/// Flatten a 1-D `CalibrationValue` into a `Vec<f64>`.
 /// Returns `None` for scalar or matrix variants.
-fn cal_value_to_dcm_array(value: &CalibrationValue) -> Option<Vec<String>> {
+fn cal_value_to_dcm_f64_array(value: &CalibrationValue) -> Option<Vec<f64>> {
     match value {
-        CalibrationValue::U8Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
-        CalibrationValue::U16Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
-        CalibrationValue::U32Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
-        CalibrationValue::U64Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
-        CalibrationValue::I8Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
-        CalibrationValue::I16Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
-        CalibrationValue::I32Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
-        CalibrationValue::I64Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
-        CalibrationValue::F32Array(a) => Some(a.iter().map(|v| format!("{:.10}", v)).collect()),
-        CalibrationValue::F64Array(a) => Some(a.iter().map(|v| format!("{:.10}", v)).collect()),
-        CalibrationValue::BoolArray(a) => Some(
-            a.iter()
-                .map(|v| if *v { "1" } else { "0" }.to_string())
-                .collect(),
-        ),
+        CalibrationValue::U8Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::U16Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::U32Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::U64Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::I8Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::I16Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::I32Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::I64Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::F32Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::F64Array(a) => Some(a.clone()),
+        CalibrationValue::BoolArray(a) => Some(a.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect()),
         _ => None,
     }
 }
 
-/// Convert a 2-D `CalibrationValue` into a row-major grid of DCM tokens.
+/// Convert a 2-D `CalibrationValue` into a row-major `Vec<Vec<f64>>`.
 /// Returns `None` for non-matrix variants.
-fn cal_value_to_dcm_matrix(value: &CalibrationValue) -> Option<Vec<Vec<String>>> {
-    macro_rules! fmt_int_matrix {
+fn cal_value_to_dcm_f64_matrix(value: &CalibrationValue) -> Option<Vec<Vec<f64>>> {
+    macro_rules! to_f64_matrix {
         ($m:expr) => {
-            Some(
-                $m.iter()
-                    .map(|r| r.iter().map(|v| v.to_string()).collect())
-                    .collect(),
-            )
-        };
-    }
-    macro_rules! fmt_float_matrix {
-        ($m:expr) => {
-            Some(
-                $m.iter()
-                    .map(|r| r.iter().map(|v| format!("{:.10}", v)).collect())
-                    .collect(),
-            )
+            Some($m.iter().map(|r| r.iter().map(|v| *v as f64).collect()).collect())
         };
     }
     match value {
-        CalibrationValue::U8Matrix(m) => fmt_int_matrix!(m),
-        CalibrationValue::U16Matrix(m) => fmt_int_matrix!(m),
-        CalibrationValue::U32Matrix(m) => fmt_int_matrix!(m),
-        CalibrationValue::U64Matrix(m) => fmt_int_matrix!(m),
-        CalibrationValue::I8Matrix(m) => fmt_int_matrix!(m),
-        CalibrationValue::I16Matrix(m) => fmt_int_matrix!(m),
-        CalibrationValue::I32Matrix(m) => fmt_int_matrix!(m),
-        CalibrationValue::I64Matrix(m) => fmt_int_matrix!(m),
-        CalibrationValue::F32Matrix(m) => fmt_float_matrix!(m),
-        CalibrationValue::F64Matrix(m) => fmt_float_matrix!(m),
-        CalibrationValue::BoolMatrix(m) => Some(
-            m.iter()
-                .map(|r| {
-                    r.iter()
-                        .map(|v| if *v { "1" } else { "0" }.to_string())
-                        .collect()
-                })
-                .collect(),
-        ),
+        CalibrationValue::U8Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::U16Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::U32Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::U64Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::I8Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::I16Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::I32Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::I64Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::F32Matrix(m) => Some(m.iter().map(|r| r.iter().map(|v| *v as f64).collect()).collect()),
+        CalibrationValue::F64Matrix(m) => Some(m.clone()),
+        CalibrationValue::BoolMatrix(m) => Some(m.iter().map(|r| r.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect()).collect()),
         _ => None,
     }
 }
 
-/// Generate the full text of a DCM (Konservierung Format 2.0) file.
-fn generate_dcm(title: &str, entries: &[(CalibrationParam, CalibrationValue)]) -> String {
+/// Generate the full text of a DCM (Konservierung Format 2.0) file using the `dcm_utils` crate.
+fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue)]) -> String {
     use crate::a2l::CharacteristicType;
+    use dcm_utils::block::Block;
+    use dcm_utils::blocks::{FESTWERT, FESTWERTEBLOCK, GRUPPENKENNFELD, GRUPPENKENNLINIE};
+    use dcm_utils::{write_dcm_data, DcmData};
 
-    let now = chrono::Local::now();
-    let date_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
-
-    let mut dcm = String::new();
-    dcm.push_str("KONSERVIERUNG_FORMAT 2.0\n\n");
-    dcm.push_str(&format!("* Exported by xcp-client on {}\n", date_str));
-    dcm.push_str(&format!("* Title: {}\n", title));
+    let mut data = DcmData::from_blocks(Default::default());
 
     for (param, value) in entries {
-        dcm.push('\n');
-        let unit = param.unit.as_deref().unwrap_or("");
+        let name = param.name.clone();
+        let desc = param.description.clone();
+        let unit = param.unit.clone().unwrap_or_default();
 
-        match param.characteristic_type {
-            CharacteristicType::Value => {
-                if let Some(scalar_str) = cal_value_to_dcm_scalar(value) {
-                    dcm.push_str(&format!("FESTWERT {}\n", param.name));
-                    dcm.push_str(&format!("   LANGNAME \"{}\"\n", param.description));
-                    dcm.push_str(&format!("   EINHEIT_W \"{}\"\n", unit));
-                    dcm.push_str(&format!("   WERT   {}\n", scalar_str));
-                    dcm.push_str("END\n");
-                }
-            }
+        let block_opt: Option<Block> = match param.characteristic_type {
+            CharacteristicType::Value => cal_value_to_dcm_f64(value).map(|v| {
+                Block::Constant(FESTWERT::from_f64(name.clone(), v, desc.clone(), unit.clone()))
+            }),
 
-            CharacteristicType::Curve => {
-                if let Some(values) = cal_value_to_dcm_array(value) {
-                    let num_cols = values.len();
-                    let axis = param.axis_info.first();
-                    let axis_unit = axis.and_then(|a| a.unit.as_deref()).unwrap_or("");
-                    let axis_vals = axis
-                        .and_then(|a| a.get_static_values())
-                        .unwrap_or_else(|| (0..num_cols).map(|i| i as f64).collect());
-                    let axis_strs: Vec<String> =
-                        axis_vals.iter().map(|v| format!("{:.10}", v)).collect();
+            CharacteristicType::Curve => cal_value_to_dcm_f64_array(value).map(|values| {
+                let n = values.len();
+                let axis_info = param.axis_info.first();
+                let axis = axis_info
+                    .and_then(|a| a.get_static_values())
+                    .unwrap_or_else(|| (0..n).map(|i| i as f64).collect());
+                let axis_name = axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
+                let unit_x = axis_info
+                    .and_then(|a| a.unit.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                Block::Table(GRUPPENKENNLINIE::from_f64(
+                    &name, &values, &desc, &unit, &unit_x, &axis_name, &axis,
+                ))
+            }),
 
-                    dcm.push_str(&format!("KENNLINIE {} 1 {}\n", param.name, num_cols));
-                    dcm.push_str(&format!("   LANGNAME \"{}\"\n", param.description));
-                    dcm.push_str(&format!("   EINHEIT_X \"{}\"\n", axis_unit));
-                    dcm.push_str(&format!("   EINHEIT_W \"{}\"\n", unit));
-                    dcm.push_str(&format!("   ST/X   {}\n", axis_strs.join(" ")));
-                    dcm.push_str(&format!("   WERT   {}\n", values.join(" ")));
-                    dcm.push_str("END\n");
-                }
-            }
-
-            CharacteristicType::Map => {
-                if let Some(matrix) = cal_value_to_dcm_matrix(value) {
-                    let num_rows = matrix.len();
-                    let num_cols = matrix.first().map(|r| r.len()).unwrap_or(0);
-                    let x_axis = param.axis_info.first();
-                    let y_axis = param.axis_info.get(1);
-                    let x_unit = x_axis.and_then(|a| a.unit.as_deref()).unwrap_or("");
-                    let y_unit = y_axis.and_then(|a| a.unit.as_deref()).unwrap_or("");
-                    let x_vals = x_axis
-                        .and_then(|a| a.get_static_values())
-                        .unwrap_or_else(|| (0..num_cols).map(|i| i as f64).collect());
-                    let y_vals = y_axis
-                        .and_then(|a| a.get_static_values())
-                        .unwrap_or_else(|| (0..num_rows).map(|i| i as f64).collect());
-                    let x_strs: Vec<String> =
-                        x_vals.iter().map(|v| format!("{:.10}", v)).collect();
-
-                    dcm.push_str(&format!(
-                        "KENNFELD {} {} {}\n",
-                        param.name, num_rows, num_cols
-                    ));
-                    dcm.push_str(&format!("   LANGNAME \"{}\"\n", param.description));
-                    dcm.push_str(&format!("   EINHEIT_X \"{}\"\n", x_unit));
-                    dcm.push_str(&format!("   EINHEIT_Y \"{}\"\n", y_unit));
-                    dcm.push_str(&format!("   EINHEIT_W \"{}\"\n", unit));
-                    dcm.push_str(&format!("   ST/X   {}\n", x_strs.join(" ")));
-                    for (r, row) in matrix.iter().enumerate() {
-                        let y_val = y_vals.get(r).copied().unwrap_or(r as f64);
-                        dcm.push_str(&format!("   ST/Y   {:.10}\n", y_val));
-                        dcm.push_str(&format!("   WERT   {}\n", row.join(" ")));
-                    }
-                    dcm.push_str("END\n");
-                }
-            }
+            CharacteristicType::Map => cal_value_to_dcm_f64_matrix(value).map(|matrix| {
+                let rows = matrix.len();
+                let cols = matrix.first().map(|r| r.len()).unwrap_or(0);
+                let x_axis_info = param.axis_info.first();
+                let y_axis_info = param.axis_info.get(1);
+                let x_axis = x_axis_info
+                    .and_then(|a| a.get_static_values())
+                    .unwrap_or_else(|| (0..cols).map(|i| i as f64).collect());
+                let y_axis = y_axis_info
+                    .and_then(|a| a.get_static_values())
+                    .unwrap_or_else(|| (0..rows).map(|i| i as f64).collect());
+                let x_name = x_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
+                let y_name = y_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
+                let unit_x = x_axis_info
+                    .and_then(|a| a.unit.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                let unit_y = y_axis_info
+                    .and_then(|a| a.unit.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                Block::Map(GRUPPENKENNFELD::from_f64(
+                    &name, matrix, x_axis, y_axis, &x_name, &y_name, &desc, &unit, &unit_x,
+                    &unit_y,
+                ))
+            }),
 
             CharacteristicType::ValBlk => {
-                if let Some(values) = cal_value_to_dcm_array(value) {
-                    let num_cols = values.len();
-                    dcm.push_str(&format!("FESTWERTEBLOCK {} {}\n", param.name, num_cols));
-                    dcm.push_str(&format!("   LANGNAME \"{}\"\n", param.description));
-                    dcm.push_str(&format!("   EINHEIT_W \"{}\"\n", unit));
-                    dcm.push_str(&format!("   WERT   {}\n", values.join(" ")));
-                    dcm.push_str("END\n");
-                } else if let Some(matrix) = cal_value_to_dcm_matrix(value) {
-                    let all_values: Vec<String> =
-                        matrix.into_iter().flatten().collect();
-                    let num_cols = all_values.len();
-                    dcm.push_str(&format!("FESTWERTEBLOCK {} {}\n", param.name, num_cols));
-                    dcm.push_str(&format!("   LANGNAME \"{}\"\n", param.description));
-                    dcm.push_str(&format!("   EINHEIT_W \"{}\"\n", unit));
-                    dcm.push_str(&format!("   WERT   {}\n", all_values.join(" ")));
-                    dcm.push_str("END\n");
-                }
+                let flat = cal_value_to_dcm_f64_array(value).or_else(|| {
+                    cal_value_to_dcm_f64_matrix(value)
+                        .map(|m| m.into_iter().flatten().collect())
+                });
+                flat.map(|values| {
+                    Block::ConstantBlock(FESTWERTEBLOCK::from_f64(
+                        name.clone(),
+                        values,
+                        desc.clone(),
+                        unit.clone(),
+                    ))
+                })
             }
+        };
+
+        if let Some(block) = block_opt {
+            data.insert_block(block);
         }
     }
 
-    dcm
+    // Write to a temp file and read it back as a String
+    let temp_path = std::env::temp_dir().join(format!("{}.dcm", uuid::Uuid::new_v4()));
+    write_dcm_data(&data, &temp_path);
+    let content = std::fs::read_to_string(&temp_path).unwrap_or_else(|e| {
+        tracing::warn!("Failed to read generated DCM temp file: {}", e);
+        String::new()
+    });
+    let _ = std::fs::remove_file(&temp_path);
+    content
 }
