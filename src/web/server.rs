@@ -164,6 +164,10 @@ impl WebServer {
                 "/api/experiment/cal/write/:device_id/:idx",
                 post(routes::cal_write_json_api),
             )
+            .route(
+                "/api/experiment/cal/original/:device_id/:idx",
+                get(routes::cal_original_api),
+            )
             // State and middleware
             .layer(axum::middleware::from_fn(auth_middleware))
             .layer(TraceLayer::new_for_http())

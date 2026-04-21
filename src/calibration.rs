@@ -209,6 +209,26 @@ impl CalibrationValue {
             CalibrationValue::BoolMatrix(mat) => format_matrix(mat),
         }
     }
+
+    /// Format scalar value as a plain string for change-tracking comparison.
+    /// For scalar types returns a simple numeric/bool string.
+    /// For array/matrix types returns an empty string (not used for scalar comparison).
+    pub fn format_scalar_str(&self) -> String {
+        match self {
+            CalibrationValue::U8(v) => v.to_string(),
+            CalibrationValue::U16(v) => v.to_string(),
+            CalibrationValue::U32(v) => v.to_string(),
+            CalibrationValue::U64(v) => v.to_string(),
+            CalibrationValue::I8(v) => v.to_string(),
+            CalibrationValue::I16(v) => v.to_string(),
+            CalibrationValue::I32(v) => v.to_string(),
+            CalibrationValue::I64(v) => v.to_string(),
+            CalibrationValue::F32(v) => format!("{:.6}", v),
+            CalibrationValue::F64(v) => format!("{:.6}", v),
+            CalibrationValue::Bool(v) => v.to_string(),
+            _ => String::new(),
+        }
+    }
 }
 
 /// Format a matrix for display

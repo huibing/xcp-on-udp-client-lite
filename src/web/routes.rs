@@ -535,6 +535,7 @@ pub async fn connect_all_devices(
                         cal_values: device.cal_values.clone(),
                         daq_running: device.daq_running.clone(),
                         a2l_path: Arc::new(RwLock::new(device.a2l_path.clone())),
+                        cal_original_values: Arc::new(RwLock::new(HashMap::new())),
                     };
                     state.add_slave_state(slave_state).await;
 
@@ -709,6 +710,7 @@ pub async fn connect_device(
                 cal_values: device.cal_values.clone(),
                 daq_running: device.daq_running.clone(),
                 a2l_path: Arc::new(RwLock::new(device.a2l_path.clone())),
+                cal_original_values: Arc::new(RwLock::new(HashMap::new())),
             };
             state.add_slave_state(slave_state).await;
 
@@ -1591,6 +1593,64 @@ pub async fn cal_write_json_api(
         }
     } else {
         Json(json!({ "success": false, "error": "Slave not available" }))
+    }
+}
+
+/// Get or capture the original (reference) calibration value for change tracking
+/// (GET /api/experiment/cal/original/:device_id/:idx)
+///
+/// On first call for a given parameter, reads the value from the slave and stores it.
+/// Subsequent calls return the stored original without re-reading.
+pub async fn cal_original_api(
+    State(state): State<AppState>,
+    Path((device_id_str, idx)): Path<(String, usize)>,
+) -> impl IntoResponse {
+    let uuid = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
+        Err(_) => return Json(json!({ "success": false, "error": "Invalid device ID" })),
+    };
+
+    let slave_id = SlaveId(uuid);
+    let Some(slave) = state.get_slave(slave_id).await else {
+        return Json(json!({ "success": false, "error": "Device not found or not connected" }));
+    };
+
+    if !slave.is_connected() {
+        return Json(json!({ "success": false, "error": "Not connected to XCP slave" }));
+    }
+
+    // Return cached original if already stored
+    {
+        let originals = slave.cal_original_values.read().await;
+        if let Some(orig) = originals.get(&idx) {
+            return Json(json!({ "success": true, "value": orig.clone() }));
+        }
+    }
+
+    // Not yet stored — read current value from slave and remember it as the original
+    let cal_manager = slave.cal_manager.read().await;
+    let Some(param) = cal_manager.params().get(idx).cloned() else {
+        return Json(json!({ "success": false, "error": "Parameter not found" }));
+    };
+    drop(cal_manager);
+
+    let client = state.client.lock().await;
+    let Some(xcp_slave) = client.get_slave(slave_id) else {
+        return Json(json!({ "success": false, "error": "Slave not available" }));
+    };
+    let xcp_slave_guard = xcp_slave.lock().await;
+    match read_calibration_from_slave(&xcp_slave_guard, &param).await {
+        Ok(value) => {
+            let formatted = value.format_scalar_str();
+            drop(xcp_slave_guard);
+            slave
+                .cal_original_values
+                .write()
+                .await
+                .insert(idx, formatted.clone());
+            Json(json!({ "success": true, "value": formatted }))
+        }
+        Err(e) => Json(json!({ "success": false, "error": format!("Read failed: {}", e) })),
     }
 }
 

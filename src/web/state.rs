@@ -168,6 +168,8 @@ pub struct SlaveState {
     pub daq_running: Arc<RwLock<bool>>,
     /// A2L file path
     pub a2l_path: Arc<RwLock<String>>,
+    /// Original calibration values captured at first read (experiment page change tracking)
+    pub cal_original_values: Arc<RwLock<HashMap<usize, String>>>,
 }
 
 impl SlaveState {
@@ -182,6 +184,7 @@ impl SlaveState {
             cal_values: Arc::new(RwLock::new(HashMap::new())),
             daq_running: Arc::new(RwLock::new(false)),
             a2l_path: Arc::new(RwLock::new(String::new())),
+            cal_original_values: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
