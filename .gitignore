@@ -20,6 +20,9 @@ Thumbs.db
 # DAQ output
 daq_data.csv
 
+# dcm_utils debug output (generated in debug builds by write_dcm_data)
+/output/
+
 # A2L/AML files
 *.a2l
 *.aml

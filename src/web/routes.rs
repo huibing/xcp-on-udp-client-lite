@@ -5387,6 +5387,10 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue)]) 
         }
     }
 
+    // dcm_utils writes ./output/data.json in debug builds; pre-create the directory.
+    #[cfg(debug_assertions)]
+    let _ = std::fs::create_dir_all("./output");
+
     // Write to a temp file and read it back as a String
     let temp_path = std::env::temp_dir().join(format!("{}.dcm", uuid::Uuid::new_v4()));
     write_dcm_data(&data, &temp_path);
@@ -5396,4 +5400,192 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue)]) 
     });
     let _ = std::fs::remove_file(&temp_path);
     content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::a2l::CharacteristicType;
+    use crate::calibration::{CalibrationParam, CalibrationValue, CalibrationType};
+
+    // ── cal_value_to_dcm_f64 ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_dcm_f64_scalar_types() {
+        assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::U8(42)), Some(42.0));
+        assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::I16(-100)), Some(-100.0));
+        assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::F32(1.5)), Some(1.5));
+        assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::F64(3.14)), Some(3.14));
+        assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::Bool(true)), Some(1.0));
+        assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::Bool(false)), Some(0.0));
+    }
+
+    #[test]
+    fn test_dcm_f64_returns_none_for_non_scalars() {
+        assert_eq!(
+            cal_value_to_dcm_f64(&CalibrationValue::U8Array(vec![1, 2, 3])),
+            None
+        );
+        assert_eq!(
+            cal_value_to_dcm_f64(&CalibrationValue::F64Matrix(vec![vec![1.0, 2.0]])),
+            None
+        );
+    }
+
+    // ── cal_value_to_dcm_f64_array ───────────────────────────────────────────
+
+    #[test]
+    fn test_dcm_f64_array_conversions() {
+        assert_eq!(
+            cal_value_to_dcm_f64_array(&CalibrationValue::U8Array(vec![1, 2, 3])),
+            Some(vec![1.0, 2.0, 3.0])
+        );
+        assert_eq!(
+            cal_value_to_dcm_f64_array(&CalibrationValue::F32Array(vec![1.5, 2.5])),
+            Some(vec![1.5, 2.5])
+        );
+        assert_eq!(
+            cal_value_to_dcm_f64_array(&CalibrationValue::BoolArray(vec![true, false])),
+            Some(vec![1.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn test_dcm_f64_array_returns_none_for_scalars_and_matrices() {
+        assert_eq!(cal_value_to_dcm_f64_array(&CalibrationValue::U8(5)), None);
+        assert_eq!(
+            cal_value_to_dcm_f64_array(&CalibrationValue::U16Matrix(vec![vec![1, 2], vec![3, 4]])),
+            None
+        );
+    }
+
+    // ── cal_value_to_dcm_f64_matrix ──────────────────────────────────────────
+
+    #[test]
+    fn test_dcm_f64_matrix_conversions() {
+        let m = vec![vec![1u8, 2], vec![3, 4]];
+        let result = cal_value_to_dcm_f64_matrix(&CalibrationValue::U8Matrix(m));
+        assert_eq!(result, Some(vec![vec![1.0, 2.0], vec![3.0, 4.0]]));
+
+        let fm = vec![vec![1.5f64, 2.5]];
+        let result = cal_value_to_dcm_f64_matrix(&CalibrationValue::F64Matrix(fm.clone()));
+        assert_eq!(result, Some(fm));
+
+        let bm = vec![vec![true, false]];
+        let result = cal_value_to_dcm_f64_matrix(&CalibrationValue::BoolMatrix(bm));
+        assert_eq!(result, Some(vec![vec![1.0, 0.0]]));
+    }
+
+    #[test]
+    fn test_dcm_f64_matrix_returns_none_for_non_matrices() {
+        assert_eq!(cal_value_to_dcm_f64_matrix(&CalibrationValue::F64(1.0)), None);
+        assert_eq!(
+            cal_value_to_dcm_f64_matrix(&CalibrationValue::F64Array(vec![1.0, 2.0])),
+            None
+        );
+    }
+
+    // ── generate_dcm ─────────────────────────────────────────────────────────
+
+    fn scalar_param(name: &str) -> CalibrationParam {
+        CalibrationParam::new(name, 0x1000, 0, CalibrationType::F64)
+            .with_description("test scalar")
+            .with_unit("rpm")
+    }
+
+    fn array_param(name: &str, n: usize) -> CalibrationParam {
+        let mut p =
+            CalibrationParam::new(name, 0x2000, 0, CalibrationType::U8Array(n))
+                .with_description("test array")
+                .with_unit("km/h");
+        p.characteristic_type = CharacteristicType::ValBlk;
+        p
+    }
+
+    fn curve_param(name: &str, n: usize) -> CalibrationParam {
+        let mut p = CalibrationParam::new(name, 0x3000, 0, CalibrationType::F64)
+            .with_description("test curve")
+            .with_unit("°C");
+        p.characteristic_type = CharacteristicType::Curve;
+        // No axis_info → synthetic integer axis used
+        let _ = n;
+        p
+    }
+
+    fn map_param(name: &str) -> CalibrationParam {
+        let mut p = CalibrationParam::new(name, 0x4000, 0, CalibrationType::F64)
+            .with_description("test map")
+            .with_unit("bar");
+        p.characteristic_type = CharacteristicType::Map;
+        p
+    }
+
+    #[test]
+    fn test_generate_dcm_scalar() {
+        let entries = vec![(scalar_param("RPM_LIMIT"), CalibrationValue::F64(5500.0))];
+        let dcm = generate_dcm("my_test", &entries);
+
+        assert!(dcm.contains("KONSERVIERUNG_FORMAT 2.0"), "missing header");
+        assert!(dcm.contains("FESTWERT RPM_LIMIT"), "missing FESTWERT block");
+        assert!(dcm.contains("test scalar"), "missing description");
+        assert!(dcm.contains("rpm"), "missing unit");
+        assert!(dcm.contains("5500"), "missing value");
+        assert!(dcm.contains("END"), "missing END keyword");
+    }
+
+    #[test]
+    fn test_generate_dcm_val_blk() {
+        let entries = vec![(
+            array_param("LOOKUP_TBL", 4),
+            CalibrationValue::F64Array(vec![1.0, 2.0, 3.0, 4.0]),
+        )];
+        let dcm = generate_dcm("test", &entries);
+
+        assert!(dcm.contains("FESTWERTEBLOCK LOOKUP_TBL"), "missing FESTWERTEBLOCK");
+        assert!(dcm.contains("km/h"), "missing unit");
+    }
+
+    #[test]
+    fn test_generate_dcm_curve() {
+        let entries = vec![(
+            curve_param("TEMP_CURVE", 3),
+            CalibrationValue::F64Array(vec![10.0, 20.0, 30.0]),
+        )];
+        let dcm = generate_dcm("test", &entries);
+
+        assert!(dcm.contains("GRUPPENKENNLINIE TEMP_CURVE"), "missing GRUPPENKENNLINIE");
+        assert!(dcm.contains("ST/X"), "missing X axis");
+        assert!(dcm.contains("°C"), "missing unit");
+    }
+
+    #[test]
+    fn test_generate_dcm_map() {
+        let entries = vec![(
+            map_param("PRESSURE_MAP"),
+            CalibrationValue::F64Matrix(vec![vec![1.0, 2.0], vec![3.0, 4.0]]),
+        )];
+        let dcm = generate_dcm("test", &entries);
+
+        assert!(dcm.contains("GRUPPENKENNFELD PRESSURE_MAP"), "missing GRUPPENKENNFELD");
+        assert!(dcm.contains("ST/X"), "missing X axis");
+        assert!(dcm.contains("ST/Y"), "missing Y axis");
+        assert!(dcm.contains("bar"), "missing unit");
+    }
+
+    #[test]
+    fn test_generate_dcm_empty() {
+        let dcm = generate_dcm("empty_export", &[]);
+        assert!(dcm.contains("KONSERVIERUNG_FORMAT 2.0"), "header always present");
+    }
+
+    #[test]
+    fn test_generate_dcm_skips_type_mismatch() {
+        // Scalar param with an array value → block should be skipped (no FESTWERT emitted)
+        let entries = vec![(
+            scalar_param("BROKEN"),
+            CalibrationValue::F64Array(vec![1.0, 2.0]),
+        )];
+        let dcm = generate_dcm("test", &entries);
+        assert!(!dcm.contains("FESTWERT BROKEN"), "should skip mismatched types");
+    }
 }
