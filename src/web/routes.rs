@@ -5067,3 +5067,373 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
         "results": results,
     }))
 }
+
+/// Return all calibration variables that have changed from their original values
+/// GET /api/experiment/cal/changed
+pub async fn experiment_cal_changed(State(state): State<AppState>) -> impl IntoResponse {
+    let devices = state.all_devices().await;
+    let mut device_results: Vec<serde_json::Value> = Vec::new();
+
+    for device in &devices {
+        if !device.connected {
+            continue;
+        }
+
+        let slave_id = match device.slave_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        let Some(slave_state) = state.get_slave(slave_id).await else {
+            continue;
+        };
+
+        let original_values = slave_state.cal_original_values.read().await;
+        let cal_values = slave_state.cal_values.read().await;
+        let cal_manager = slave_state.cal_manager.read().await;
+        let params = cal_manager.params();
+
+        let mut indices: Vec<usize> = original_values.keys().cloned().collect();
+        indices.sort();
+
+        let mut variables: Vec<serde_json::Value> = Vec::new();
+
+        for idx in indices {
+            let original_value = match original_values.get(&idx) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+
+            let param = match params.get(idx) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let current_value = cal_values
+                .get(&param.name)
+                .map(|v| v.format_scalar_str())
+                .unwrap_or_default();
+
+            // Skip scalars whose value is unchanged
+            if !current_value.is_empty() && current_value == original_value {
+                continue;
+            }
+
+            variables.push(json!({
+                "idx": idx,
+                "name": param.name,
+                "description": param.description,
+                "unit": param.unit.as_deref().unwrap_or(""),
+                "type_name": param.data_type.type_name(),
+                "characteristic_type": param.characteristic_type.as_str(),
+                "original_value": original_value,
+                "current_value": current_value,
+            }));
+        }
+
+        let dev_id = device
+            .slave_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| device.id.clone());
+        let dev_name = device.display_name_or_custom().await;
+
+        device_results.push(json!({
+            "device_id": dev_id,
+            "device_name": dev_name,
+            "variables": variables,
+        }));
+    }
+
+    Json(json!({
+        "success": true,
+        "devices": device_results,
+    }))
+}
+
+/// Generate and download a DCM (Konservierung Format 2.0) file
+/// POST /api/experiment/dcm/export
+pub async fn experiment_dcm_export(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{header, StatusCode};
+
+    let title = payload
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("export")
+        .to_string();
+
+    let variables = match payload.get("variables").and_then(|v| v.as_array()) {
+        Some(v) => v.clone(),
+        None => {
+            return (StatusCode::BAD_REQUEST, "Missing 'variables' field").into_response();
+        }
+    };
+
+    let mut entries: Vec<(CalibrationParam, CalibrationValue)> = Vec::new();
+
+    for var in &variables {
+        let device_id_str = match var.get("device_id").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let idx = match var.get("idx").and_then(|v| v.as_u64()) {
+            Some(i) => i as usize,
+            None => continue,
+        };
+
+        let uuid = match uuid::Uuid::parse_str(device_id_str) {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+
+        let slave_id = SlaveId(uuid);
+        let Some(slave_state) = state.get_slave(slave_id).await else {
+            continue;
+        };
+
+        let cal_manager = slave_state.cal_manager.read().await;
+        let param = match cal_manager.params().get(idx).cloned() {
+            Some(p) => p,
+            None => continue,
+        };
+        drop(cal_manager);
+
+        let cal_values = slave_state.cal_values.read().await;
+        let value = match cal_values.get(&param.name).cloned() {
+            Some(v) => v,
+            None => continue,
+        };
+        drop(cal_values);
+
+        entries.push((param, value));
+    }
+
+    let dcm_content = generate_dcm(&title, &entries);
+
+    let now = chrono::Local::now();
+    let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
+    let safe_title = title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let filename = format!("{}_{}.dcm", safe_title, timestamp);
+
+    let headers = [
+        (
+            header::CONTENT_TYPE,
+            "application/octet-stream".to_string(),
+        ),
+        (
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        ),
+    ];
+
+    (StatusCode::OK, headers, Body::from(dcm_content.into_bytes())).into_response()
+}
+
+// ── DCM helpers ──────────────────────────────────────────────────────────────
+
+/// Format a scalar `CalibrationValue` as a DCM token.
+/// Returns `None` for non-scalar variants.
+fn cal_value_to_dcm_scalar(value: &CalibrationValue) -> Option<String> {
+    match value {
+        CalibrationValue::U8(v) => Some(v.to_string()),
+        CalibrationValue::U16(v) => Some(v.to_string()),
+        CalibrationValue::U32(v) => Some(v.to_string()),
+        CalibrationValue::U64(v) => Some(v.to_string()),
+        CalibrationValue::I8(v) => Some(v.to_string()),
+        CalibrationValue::I16(v) => Some(v.to_string()),
+        CalibrationValue::I32(v) => Some(v.to_string()),
+        CalibrationValue::I64(v) => Some(v.to_string()),
+        CalibrationValue::F32(v) => Some(format!("{:.10}", v)),
+        CalibrationValue::F64(v) => Some(format!("{:.10}", v)),
+        CalibrationValue::Bool(v) => Some(if *v { "1" } else { "0" }.to_string()),
+        _ => None,
+    }
+}
+
+/// Flatten a 1-D `CalibrationValue` into DCM-formatted tokens.
+/// Returns `None` for scalar or matrix variants.
+fn cal_value_to_dcm_array(value: &CalibrationValue) -> Option<Vec<String>> {
+    match value {
+        CalibrationValue::U8Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
+        CalibrationValue::U16Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
+        CalibrationValue::U32Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
+        CalibrationValue::U64Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
+        CalibrationValue::I8Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
+        CalibrationValue::I16Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
+        CalibrationValue::I32Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
+        CalibrationValue::I64Array(a) => Some(a.iter().map(|v| v.to_string()).collect()),
+        CalibrationValue::F32Array(a) => Some(a.iter().map(|v| format!("{:.10}", v)).collect()),
+        CalibrationValue::F64Array(a) => Some(a.iter().map(|v| format!("{:.10}", v)).collect()),
+        CalibrationValue::BoolArray(a) => Some(
+            a.iter()
+                .map(|v| if *v { "1" } else { "0" }.to_string())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Convert a 2-D `CalibrationValue` into a row-major grid of DCM tokens.
+/// Returns `None` for non-matrix variants.
+fn cal_value_to_dcm_matrix(value: &CalibrationValue) -> Option<Vec<Vec<String>>> {
+    macro_rules! fmt_int_matrix {
+        ($m:expr) => {
+            Some(
+                $m.iter()
+                    .map(|r| r.iter().map(|v| v.to_string()).collect())
+                    .collect(),
+            )
+        };
+    }
+    macro_rules! fmt_float_matrix {
+        ($m:expr) => {
+            Some(
+                $m.iter()
+                    .map(|r| r.iter().map(|v| format!("{:.10}", v)).collect())
+                    .collect(),
+            )
+        };
+    }
+    match value {
+        CalibrationValue::U8Matrix(m) => fmt_int_matrix!(m),
+        CalibrationValue::U16Matrix(m) => fmt_int_matrix!(m),
+        CalibrationValue::U32Matrix(m) => fmt_int_matrix!(m),
+        CalibrationValue::U64Matrix(m) => fmt_int_matrix!(m),
+        CalibrationValue::I8Matrix(m) => fmt_int_matrix!(m),
+        CalibrationValue::I16Matrix(m) => fmt_int_matrix!(m),
+        CalibrationValue::I32Matrix(m) => fmt_int_matrix!(m),
+        CalibrationValue::I64Matrix(m) => fmt_int_matrix!(m),
+        CalibrationValue::F32Matrix(m) => fmt_float_matrix!(m),
+        CalibrationValue::F64Matrix(m) => fmt_float_matrix!(m),
+        CalibrationValue::BoolMatrix(m) => Some(
+            m.iter()
+                .map(|r| {
+                    r.iter()
+                        .map(|v| if *v { "1" } else { "0" }.to_string())
+                        .collect()
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Generate the full text of a DCM (Konservierung Format 2.0) file.
+fn generate_dcm(title: &str, entries: &[(CalibrationParam, CalibrationValue)]) -> String {
+    use crate::a2l::CharacteristicType;
+
+    let now = chrono::Local::now();
+    let date_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let mut dcm = String::new();
+    dcm.push_str("KONSERVIERUNG_FORMAT 2.0\n\n");
+    dcm.push_str(&format!("* Exported by xcp-client on {}\n", date_str));
+    dcm.push_str(&format!("* Title: {}\n", title));
+
+    for (param, value) in entries {
+        dcm.push('\n');
+        let unit = param.unit.as_deref().unwrap_or("");
+
+        match param.characteristic_type {
+            CharacteristicType::Value => {
+                if let Some(scalar_str) = cal_value_to_dcm_scalar(value) {
+                    dcm.push_str(&format!("FESTWERT {}\n", param.name));
+                    dcm.push_str(&format!("   LANGNAME \"{}\"\n", param.description));
+                    dcm.push_str(&format!("   EINHEIT_W \"{}\"\n", unit));
+                    dcm.push_str(&format!("   WERT   {}\n", scalar_str));
+                    dcm.push_str("END\n");
+                }
+            }
+
+            CharacteristicType::Curve => {
+                if let Some(values) = cal_value_to_dcm_array(value) {
+                    let num_cols = values.len();
+                    let axis = param.axis_info.first();
+                    let axis_unit = axis.and_then(|a| a.unit.as_deref()).unwrap_or("");
+                    let axis_vals = axis
+                        .and_then(|a| a.get_static_values())
+                        .unwrap_or_else(|| (0..num_cols).map(|i| i as f64).collect());
+                    let axis_strs: Vec<String> =
+                        axis_vals.iter().map(|v| format!("{:.10}", v)).collect();
+
+                    dcm.push_str(&format!("KENNLINIE {} 1 {}\n", param.name, num_cols));
+                    dcm.push_str(&format!("   LANGNAME \"{}\"\n", param.description));
+                    dcm.push_str(&format!("   EINHEIT_X \"{}\"\n", axis_unit));
+                    dcm.push_str(&format!("   EINHEIT_W \"{}\"\n", unit));
+                    dcm.push_str(&format!("   ST/X   {}\n", axis_strs.join(" ")));
+                    dcm.push_str(&format!("   WERT   {}\n", values.join(" ")));
+                    dcm.push_str("END\n");
+                }
+            }
+
+            CharacteristicType::Map => {
+                if let Some(matrix) = cal_value_to_dcm_matrix(value) {
+                    let num_rows = matrix.len();
+                    let num_cols = matrix.first().map(|r| r.len()).unwrap_or(0);
+                    let x_axis = param.axis_info.first();
+                    let y_axis = param.axis_info.get(1);
+                    let x_unit = x_axis.and_then(|a| a.unit.as_deref()).unwrap_or("");
+                    let y_unit = y_axis.and_then(|a| a.unit.as_deref()).unwrap_or("");
+                    let x_vals = x_axis
+                        .and_then(|a| a.get_static_values())
+                        .unwrap_or_else(|| (0..num_cols).map(|i| i as f64).collect());
+                    let y_vals = y_axis
+                        .and_then(|a| a.get_static_values())
+                        .unwrap_or_else(|| (0..num_rows).map(|i| i as f64).collect());
+                    let x_strs: Vec<String> =
+                        x_vals.iter().map(|v| format!("{:.10}", v)).collect();
+
+                    dcm.push_str(&format!(
+                        "KENNFELD {} {} {}\n",
+                        param.name, num_rows, num_cols
+                    ));
+                    dcm.push_str(&format!("   LANGNAME \"{}\"\n", param.description));
+                    dcm.push_str(&format!("   EINHEIT_X \"{}\"\n", x_unit));
+                    dcm.push_str(&format!("   EINHEIT_Y \"{}\"\n", y_unit));
+                    dcm.push_str(&format!("   EINHEIT_W \"{}\"\n", unit));
+                    dcm.push_str(&format!("   ST/X   {}\n", x_strs.join(" ")));
+                    for (r, row) in matrix.iter().enumerate() {
+                        let y_val = y_vals.get(r).copied().unwrap_or(r as f64);
+                        dcm.push_str(&format!("   ST/Y   {:.10}\n", y_val));
+                        dcm.push_str(&format!("   WERT   {}\n", row.join(" ")));
+                    }
+                    dcm.push_str("END\n");
+                }
+            }
+
+            CharacteristicType::ValBlk => {
+                if let Some(values) = cal_value_to_dcm_array(value) {
+                    let num_cols = values.len();
+                    dcm.push_str(&format!("FESTWERTEBLOCK {} {}\n", param.name, num_cols));
+                    dcm.push_str(&format!("   LANGNAME \"{}\"\n", param.description));
+                    dcm.push_str(&format!("   EINHEIT_W \"{}\"\n", unit));
+                    dcm.push_str(&format!("   WERT   {}\n", values.join(" ")));
+                    dcm.push_str("END\n");
+                } else if let Some(matrix) = cal_value_to_dcm_matrix(value) {
+                    let all_values: Vec<String> =
+                        matrix.into_iter().flatten().collect();
+                    let num_cols = all_values.len();
+                    dcm.push_str(&format!("FESTWERTEBLOCK {} {}\n", param.name, num_cols));
+                    dcm.push_str(&format!("   LANGNAME \"{}\"\n", param.description));
+                    dcm.push_str(&format!("   EINHEIT_W \"{}\"\n", unit));
+                    dcm.push_str(&format!("   WERT   {}\n", all_values.join(" ")));
+                    dcm.push_str("END\n");
+                }
+            }
+        }
+    }
+
+    dcm
+}

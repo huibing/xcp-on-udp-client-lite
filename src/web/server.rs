@@ -161,6 +161,14 @@ impl WebServer {
                 post(routes::experiment_checksum),
             )
             .route(
+                "/api/experiment/cal/changed",
+                get(routes::experiment_cal_changed),
+            )
+            .route(
+                "/api/experiment/dcm/export",
+                post(routes::experiment_dcm_export),
+            )
+            .route(
                 "/api/experiment/cal/write/:device_id/:idx",
                 post(routes::cal_write_json_api),
             )

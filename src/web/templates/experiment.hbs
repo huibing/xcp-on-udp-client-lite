@@ -548,6 +548,7 @@ a.exp-sb-btn { text-decoration: none; }
             <button class="exp-sb-btn" onclick="expLoad()" title="Load experiment from JSON">📂</button>
             <div class="sidebar-separator"></div>
             <button class="exp-sb-btn" onclick="expChecksum()" title="Verify checksum on all slaves">✓</button>
+            <button class="exp-sb-btn" onclick="expOpenDcmExport()" title="Export changed calibrations to DCM file">📤</button>
             <button class="exp-sb-btn" onclick="expAddTab()" title="Add new tab">+</button>
             <div style="flex:1;"></div>
             <a href="/experiment/help" class="exp-sb-btn" title="Help &amp; user guide">❓</a>
@@ -654,6 +655,37 @@ a.exp-sb-btn { text-decoration: none; }
 
 <!-- Tab Rename Input (floating) -->
 <input type="text" id="expTabRenameInput" style="display:none; position:absolute; z-index:100; background:#1a1a2e; border:1px solid #00ff88; color:#fff; padding:2px 6px; font-size:0.85rem; border-radius:3px;">
+
+<!-- DCM Export Modal -->
+<div id="expDcmModal" class="exp-modal" style="display:none;">
+    <div class="exp-modal-content" style="width:700px; max-width:95vw;">
+        <div class="exp-modal-header">
+            <h3 style="margin:0;">📤 Export Changed Calibrations to DCM</h3>
+            <button class="exp-modal-close" onclick="expCloseDcmModal()">&times;</button>
+        </div>
+        <div class="exp-modal-body">
+            <p style="color:#888; font-size:0.85rem; margin-bottom:0.75rem;">
+                The following calibration variables have been modified from their original values.
+                Select which to include in the DCM export.
+            </p>
+            <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.75rem; padding-bottom:0.5rem; border-bottom:1px solid #333;">
+                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; font-size:0.85rem; color:#aaa;">
+                    <input type="checkbox" id="dcmSelectAll" onchange="expDcmSelectAll(this.checked)">
+                    Select All
+                </label>
+                <span id="dcmSelectedCount" style="color:#888; font-size:0.8rem;"></span>
+            </div>
+            <div id="expDcmVarList" style="max-height:380px; overflow-y:auto; display:flex; flex-direction:column; gap:0.4rem;"></div>
+            <p id="expDcmEmpty" style="display:none; color:#888; text-align:center; padding:1.5rem;">
+                No changed calibration variables found.
+            </p>
+        </div>
+        <div class="exp-modal-footer">
+            <button class="secondary" onclick="expCloseDcmModal()">Cancel</button>
+            <button id="btnDcmExport" onclick="expDoDcmExport()">Export DCM</button>
+        </div>
+    </div>
+</div>
 
 <!-- Device Mapping Modal (used during experiment load) -->
 <div id="expDeviceMapModal" class="exp-modal" style="display:none;">
@@ -2371,7 +2403,132 @@ function expChecksum() {
     .catch(function(e) { expToast('Checksum failed: ' + e, 'error'); });
 }
 
-// ===== Toast Notifications =====
+// ===== DCM Export =====
+var expDcmChangedData = []; // cached list from /api/experiment/cal/changed
+
+function expOpenDcmExport() {
+    document.getElementById('expDcmVarList').innerHTML = '<p style="color:#888; text-align:center; padding:1rem;">Loading changed variables...</p>';
+    document.getElementById('expDcmEmpty').style.display = 'none';
+    document.getElementById('expDcmModal').style.display = 'flex';
+
+    fetch('/api/experiment/cal/changed')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            expDcmChangedData = data.devices || [];
+            expRenderDcmVarList();
+        })
+        .catch(function(e) {
+            document.getElementById('expDcmVarList').innerHTML = '<p style="color:#ff4444;">Failed to load: ' + escapeHtml(String(e)) + '</p>';
+        });
+}
+
+function expCloseDcmModal() {
+    document.getElementById('expDcmModal').style.display = 'none';
+}
+
+function expRenderDcmVarList() {
+    var list = document.getElementById('expDcmVarList');
+    var total = 0;
+    var html = '';
+
+    expDcmChangedData.forEach(function(device) {
+        if (!device.variables || device.variables.length === 0) return;
+        html += '<div style="margin-bottom:0.75rem;">' +
+            '<div style="font-size:0.75rem; color:#888; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:0.4rem; padding-bottom:0.2rem; border-bottom:1px solid #333;">' +
+            escapeHtml(device.device_name) + '</div>';
+
+        device.variables.forEach(function(v) {
+            total++;
+            var changeText = v.current_value !== '' && v.original_value !== ''
+                ? escapeHtml(v.original_value) + ' → ' + escapeHtml(v.current_value)
+                : escapeHtml(v.type_name);
+            html += '<label style="display:flex; align-items:flex-start; gap:0.6rem; padding:0.3rem 0.4rem; border-radius:3px; cursor:pointer; transition:background 0.15s;" ' +
+                'onmouseover="this.style.background=\'#1a1a2e\'" onmouseout="this.style.background=\'\'">' +
+                '<input type="checkbox" checked class="dcm-var-cb" ' +
+                'data-device-id="' + escapeHtml(device.device_id) + '" ' +
+                'data-idx="' + v.idx + '" ' +
+                'onchange="expDcmUpdateCount()">' +
+                '<div style="min-width:0;">' +
+                '<span style="color:#00ff88; font-size:0.85rem; font-family:monospace;">' + escapeHtml(v.name) + '</span>' +
+                '<span style="color:#888; font-size:0.75rem; margin-left:0.5rem;">[' + escapeHtml(v.characteristic_type) + ']</span>' +
+                '<div style="color:#aaa; font-size:0.75rem; margin-top:0.1rem;">' + changeText + '</div>' +
+                (v.description ? '<div style="color:#666; font-size:0.7rem;">' + escapeHtml(v.description) + '</div>' : '') +
+                '</div></label>';
+        });
+        html += '</div>';
+    });
+
+    if (total === 0) {
+        list.innerHTML = '';
+        document.getElementById('expDcmEmpty').style.display = 'block';
+        document.getElementById('dcmSelectAll').checked = false;
+        document.getElementById('dcmSelectedCount').textContent = '';
+        return;
+    }
+
+    list.innerHTML = html;
+    document.getElementById('dcmSelectAll').checked = true;
+    document.getElementById('dcmSelectedCount').textContent = total + ' variable' + (total !== 1 ? 's' : '') + ' selected';
+}
+
+function expDcmSelectAll(checked) {
+    document.querySelectorAll('.dcm-var-cb').forEach(function(cb) { cb.checked = checked; });
+    expDcmUpdateCount();
+}
+
+function expDcmUpdateCount() {
+    var total = document.querySelectorAll('.dcm-var-cb').length;
+    var selected = document.querySelectorAll('.dcm-var-cb:checked').length;
+    document.getElementById('dcmSelectedCount').textContent = selected + '/' + total + ' selected';
+    document.getElementById('dcmSelectAll').checked = selected === total;
+    document.getElementById('dcmSelectAll').indeterminate = selected > 0 && selected < total;
+}
+
+function expDoDcmExport() {
+    var selected = [];
+    document.querySelectorAll('.dcm-var-cb:checked').forEach(function(cb) {
+        selected.push({ device_id: cb.dataset.deviceId, idx: parseInt(cb.dataset.idx, 10) });
+    });
+    if (selected.length === 0) {
+        expToast('No variables selected', 'error');
+        return;
+    }
+
+    var title = (document.getElementById('expTitle').value || 'experiment').trim();
+    document.getElementById('btnDcmExport').disabled = true;
+    document.getElementById('btnDcmExport').textContent = 'Generating...';
+
+    fetch('/api/experiment/dcm/export', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ title: title, variables: selected }),
+    })
+    .then(function(r) {
+        if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Export failed'); });
+        // Extract filename from Content-Disposition header
+        var cd = r.headers.get('Content-Disposition') || '';
+        var match = cd.match(/filename="?([^";]+)"?/);
+        var filename = match ? match[1] : title + '.dcm';
+        return r.blob().then(function(blob) { return { blob: blob, filename: filename }; });
+    })
+    .then(function(result) {
+        var url = URL.createObjectURL(result.blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = result.filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        expCloseDcmModal();
+        expToast('DCM exported: ' + result.filename, 'success');
+    })
+    .catch(function(e) { expToast('Export failed: ' + e, 'error'); })
+    .finally(function() {
+        document.getElementById('btnDcmExport').disabled = false;
+        document.getElementById('btnDcmExport').textContent = 'Export DCM';
+    });
+}
 function expToast(msg, type) {
     var toast = document.querySelector('.exp-toast');
     if (!toast) {
