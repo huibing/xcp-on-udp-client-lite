@@ -3083,6 +3083,12 @@ pub async fn cal_value_api(
 
                     // Check if this is an enum type and get options
                     let is_enum = param.is_enum();
+                    tracing::info!(
+                        "cal_value_api: param '{}' is_enum={}, enum_options_count={}",
+                        param.name,
+                        is_enum,
+                        param.enum_count()
+                    );
                     let enum_options: Vec<serde_json::Value> = param
                         .enum_options()
                         .map(|opts| {

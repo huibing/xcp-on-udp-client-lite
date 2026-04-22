@@ -294,6 +294,11 @@ impl CompuMethodFactory {
                 // Look up COMPU_VTAB reference
                 if let Some(ref compu_tab_ref) = compu_method.compu_tab_ref {
                     let table_name = &compu_tab_ref.conversion_table;
+                    tracing::debug!(
+                        "CompuMethod TAB_VERB '{}': looking up VTAB '{}'",
+                        &compu_method.name,
+                        table_name
+                    );
                     if let Some(vtab) = vtabs.get(table_name) {
                         // Extract entries from COMPU_VTAB
                         let entries: Vec<(i64, String)> = vtab
@@ -302,10 +307,27 @@ impl CompuMethodFactory {
                             .map(|vp| (vp.in_val as i64, vp.out_val.clone()))
                             .collect();
 
+                        tracing::debug!(
+                            "CompuMethod TAB_VERB '{}': found {} entries",
+                            &compu_method.name,
+                            entries.len()
+                        );
                         if !entries.is_empty() {
                             return CompuMethod::compu_vtab(entries);
                         }
+                    } else {
+                        tracing::warn!(
+                            "CompuMethod TAB_VERB '{}': VTAB '{}' not found in {} available vtabs",
+                            &compu_method.name,
+                            table_name,
+                            vtabs.len()
+                        );
                     }
+                } else {
+                    tracing::warn!(
+                        "CompuMethod TAB_VERB '{}': no COMPU_TAB_REF",
+                        &compu_method.name
+                    );
                 }
                 CompuMethod::Identical
             }

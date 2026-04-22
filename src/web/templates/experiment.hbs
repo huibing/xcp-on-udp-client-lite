@@ -1177,14 +1177,12 @@ function expRefreshVariables() {
             if (data.success) {
                 ExpState.allMeasurements = data.measurements || [];
                 ExpState.allCalibrations = data.calibrations || [];
-                // Build enum options lookup tables
-                ExpState.calEnumOptions = {};
+                // Merge enum options lookup tables (don't reset — expReadAllCalValues may have already populated some)
                 (data.calibrations || []).forEach(function(c) {
                     if (c.is_enum && c.enum_options && c.enum_options.length > 0) {
                         ExpState.calEnumOptions[c.device_id + ':' + c.idx] = c.enum_options;
                     }
                 });
-                ExpState.measEnumOptions = {};
                 (data.measurements || []).forEach(function(m) {
                     if (m.is_enum && m.enum_options && m.enum_options.length > 0) {
                         ExpState.measEnumOptions[m.device_id + ':' + m.name] = m.enum_options;
