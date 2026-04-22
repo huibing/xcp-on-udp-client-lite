@@ -788,6 +788,7 @@ const ExpState = {
     calValues: {},         // "device_id:idx" -> value string
     calOriginalValues: {}, // "device_id:idx" -> original value string (from backend)
     calOriginalMatrix: {}, // "device_id:idx:row:col" -> original cell value string
+    sessionChangedParams: {}, // "device_id:idx" -> {device_id, idx, name, calType, device_name, unit, description, original_value, current_value}
     pageModeResults: {},   // device_id -> {success, read_only}
     config: {
         mf4Pattern: '{title}_{YYYYMMDD}_{HHMMSS}.mf4',
@@ -1034,6 +1035,20 @@ function formatValue(val) {
 }
 
 // ===== Calibration Change Marks =====
+
+// Find a calibration variable in any tab by device_id + idx.
+function expFindVarInTabs(deviceId, idx) {
+    for (var i = 0; i < ExpState.tabs.length; i++) {
+        var tab = ExpState.tabs[i];
+        for (var j = 0; j < (tab.variables || []).length; j++) {
+            var v = tab.variables[j];
+            if (v.kind === 'calibration' && v.device_id === deviceId && String(v.idx) === String(idx)) {
+                return v;
+            }
+        }
+    }
+    return null;
+}
 
 // Returns the CSS extra class for the change-mark span, or '' for no mark.
 function expGetChangeMark(calKey) {
@@ -1694,6 +1709,26 @@ function expSaveCalEdit() {
                 el.textContent = value;
             });
             expUpdateChangeMark(key);
+            // Track (or un-track) this write as a session-changed parameter
+            var varInfo = expFindVarInTabs(deviceId, idx);
+            if (varInfo) {
+                var origVal = ExpState.calOriginalValues[key] || '';
+                if (value === origVal) {
+                    // Written back to original — remove from session-changed tracking
+                    delete ExpState.sessionChangedParams[key];
+                } else {
+                    ExpState.sessionChangedParams[key] = {
+                        device_id: deviceId,
+                        idx: idx,
+                        name: varInfo.name,
+                        calType: varInfo.calType || '',
+                        device_name: varInfo.device_name || '',
+                        unit: varInfo.unit || '',
+                        original_value: origVal,
+                        current_value: value,
+                    };
+                }
+            }
             expCloseCalEdit();
             expToast('Value written successfully', 'success');
         } else {
@@ -1980,6 +2015,23 @@ function expSaveMatrixCell(row, col, newVal, inputEl) {
     .then(function(data) {
         if (data.success) {
             expToast('Cell updated', 'success');
+            // Track this matrix parameter as session-changed (once, on first cell write)
+            var mKey = expMatrixDeviceId + ':' + expMatrixIdx;
+            if (!ExpState.sessionChangedParams[mKey]) {
+                var varInfo = expFindVarInTabs(expMatrixDeviceId, String(expMatrixIdx));
+                if (varInfo) {
+                    ExpState.sessionChangedParams[mKey] = {
+                        device_id: expMatrixDeviceId,
+                        idx: expMatrixIdx,
+                        name: varInfo.name,
+                        calType: varInfo.calType || '',
+                        device_name: varInfo.device_name || '',
+                        unit: varInfo.unit || '',
+                        original_value: '',
+                        current_value: '',
+                    };
+                }
+            }
             // Update cell mark in-place
             if (inputEl) {
                 var td = inputEl.closest ? inputEl.closest('td') : inputEl.parentNode;
@@ -2407,19 +2459,33 @@ function expChecksum() {
 var expDcmChangedData = []; // cached list from /api/experiment/cal/changed
 
 function expOpenDcmExport() {
-    document.getElementById('expDcmVarList').innerHTML = '<p style="color:#888; text-align:center; padding:1rem;">Loading changed variables...</p>';
+    document.getElementById('expDcmVarList').innerHTML = '';
     document.getElementById('expDcmEmpty').style.display = 'none';
     document.getElementById('expDcmModal').style.display = 'flex';
 
-    fetch('/api/experiment/cal/changed')
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            expDcmChangedData = data.devices || [];
-            expRenderDcmVarList();
-        })
-        .catch(function(e) {
-            document.getElementById('expDcmVarList').innerHTML = '<p style="color:#ff4444;">Failed to load: ' + escapeHtml(String(e)) + '</p>';
+    // Build changed-variable list from session tracking (no backend call needed)
+    var deviceMap = {};
+    Object.values(ExpState.sessionChangedParams).forEach(function(p) {
+        if (!deviceMap[p.device_id]) {
+            deviceMap[p.device_id] = {
+                device_id: p.device_id,
+                device_name: p.device_name || p.device_id,
+                variables: []
+            };
+        }
+        deviceMap[p.device_id].variables.push({
+            idx: p.idx,
+            name: p.name,
+            characteristic_type: p.calType || '',
+            description: '',
+            unit: p.unit || '',
+            original_value: p.original_value || '',
+            current_value: p.current_value || '',
+            type_name: p.calType || '',
         });
+    });
+    expDcmChangedData = Object.values(deviceMap);
+    expRenderDcmVarList();
 }
 
 function expCloseDcmModal() {
@@ -2439,9 +2505,12 @@ function expRenderDcmVarList() {
 
         device.variables.forEach(function(v) {
             total++;
-            var changeText = v.current_value !== '' && v.original_value !== ''
-                ? escapeHtml(v.original_value) + ' → ' + escapeHtml(v.current_value)
-                : escapeHtml(v.type_name);
+            var isMatrixCurve = v.current_value === '' && v.original_value === '';
+            var changeText = isMatrixCurve
+                ? '<em style="color:#888;">[map/curve: elements edited]</em>'
+                : (v.current_value !== '' && v.original_value !== '')
+                    ? escapeHtml(v.original_value) + ' → ' + escapeHtml(v.current_value)
+                    : escapeHtml(v.type_name || v.characteristic_type);
             html += '<label style="display:flex; align-items:flex-start; gap:0.6rem; padding:0.3rem 0.4rem; border-radius:3px; cursor:pointer; transition:background 0.15s;" ' +
                 'onmouseover="this.style.background=\'#1a1a2e\'" onmouseout="this.style.background=\'\'">' +
                 '<input type="checkbox" checked class="dcm-var-cb" ' +
