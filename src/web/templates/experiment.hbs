@@ -719,6 +719,7 @@ a.exp-sb-btn { text-decoration: none; }
             <div class="form-group">
                 <label id="expCalEditLabel">Current value:</label>
                 <input type="text" id="expCalEditValue" style="font-family:monospace;">
+                <select id="expCalEditSelect" style="display:none; font-family:monospace; width:100%; padding:0.4rem; background:#1a1a2e; color:#e0e0e0; border:1px solid #444; border-radius:4px;"></select>
             </div>
         </div>
         <div class="exp-modal-footer">
@@ -784,12 +785,14 @@ const ExpState = {
     activeTabId: null,
     allMeasurements: [],
     allCalibrations: [],
-    liveValues: {},        // "device_id:name" -> value
-    calValues: {},         // "device_id:idx" -> value string
-    calOriginalValues: {}, // "device_id:idx" -> original value string (from backend)
+    liveValues: {},        // "device_id:name" -> value (raw float)
+    calValues: {},         // "device_id:idx" -> display value string (enum text or number)
+    calOriginalValues: {}, // "device_id:idx" -> original display value string
     calOriginalMatrix: {}, // "device_id:idx:row:col" -> original cell value string
     sessionChangedParams: {}, // "device_id:idx" -> {device_id, idx, name, calType, device_name, unit, description, original_value, current_value}
     pageModeResults: {},   // device_id -> {success, read_only}
+    calEnumOptions: {},    // "device_id:idx" -> [{raw, text}, ...]
+    measEnumOptions: {},   // "device_id:name" -> [{raw, text}, ...]
     config: {
         mf4Pattern: '{title}_{YYYYMMDD}_{HHMMSS}.mf4',
         mf4Dir: 'records/',
@@ -966,7 +969,7 @@ function expRenderTabContent() {
         measurements.forEach(function(v) {
             var key = v.device_id + ':' + v.name;
             var val = ExpState.liveValues[key];
-            var displayVal = val !== undefined ? formatValue(val) : '—';
+            var displayVal = val !== undefined ? expMeasDisplayVal(key, val) : '—';
             html +=
                 '<div class="exp-var-card measurement" title="' + escapeHtml(v.device_name + ' / ' + v.name) + '">' +
                 '<div class="card-device">' + escapeHtml(v.device_name) + '</div>' +
@@ -1034,6 +1037,24 @@ function formatValue(val) {
     return String(val);
 }
 
+// Lookup enum text from options array by raw numeric value.
+// Returns the text label, or null if not found.
+function expEnumLookup(opts, rawVal) {
+    if (!opts || opts.length === 0) return null;
+    var raw = Math.round(parseFloat(String(rawVal)));
+    if (isNaN(raw)) return null;
+    for (var i = 0; i < opts.length; i++) {
+        if (opts[i].raw === raw) return opts[i].text;
+    }
+    return null;
+}
+
+// Display a live measurement value, converting to enum text when applicable.
+function expMeasDisplayVal(measKey, rawVal) {
+    var text = expEnumLookup(ExpState.measEnumOptions[measKey], rawVal);
+    return text !== null ? text : formatValue(rawVal);
+}
+
 // ===== Calibration Change Marks =====
 
 // Find a calibration variable in any tab by device_id + idx.
@@ -1094,7 +1115,9 @@ function expFetchOriginalValues() {
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.success && data.value !== undefined) {
-                    ExpState.calOriginalValues[key] = data.value;
+                    // Convert to enum text if applicable (backend returns raw number string)
+                    var text = expEnumLookup(ExpState.calEnumOptions[key], data.value);
+                    ExpState.calOriginalValues[key] = text !== null ? text : data.value;
                     expUpdateChangeMark(key);
                 }
             })
@@ -1154,6 +1177,19 @@ function expRefreshVariables() {
             if (data.success) {
                 ExpState.allMeasurements = data.measurements || [];
                 ExpState.allCalibrations = data.calibrations || [];
+                // Build enum options lookup tables
+                ExpState.calEnumOptions = {};
+                (data.calibrations || []).forEach(function(c) {
+                    if (c.is_enum && c.enum_options && c.enum_options.length > 0) {
+                        ExpState.calEnumOptions[c.device_id + ':' + c.idx] = c.enum_options;
+                    }
+                });
+                ExpState.measEnumOptions = {};
+                (data.measurements || []).forEach(function(m) {
+                    if (m.is_enum && m.enum_options && m.enum_options.length > 0) {
+                        ExpState.measEnumOptions[m.device_id + ':' + m.name] = m.enum_options;
+                    }
+                });
                 expPopulateVarFilterDevices();
             }
         })
@@ -1553,7 +1589,7 @@ function expPollData() {
             document.querySelectorAll('[data-live-key]').forEach(function(el) {
                 var key = el.dataset.liveKey;
                 if (ExpState.liveValues[key] !== undefined) {
-                    el.textContent = formatValue(ExpState.liveValues[key]);
+                    el.textContent = expMeasDisplayVal(key, ExpState.liveValues[key]);
                 }
             });
         }
@@ -1659,9 +1695,17 @@ function expReadAllCalValues() {
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.value !== undefined) {
-                    ExpState.calValues[key] = data.value;
+                    // Update enum options cache if provided by this endpoint
+                    if (data.is_enum && data.enum_options && data.enum_options.length > 0) {
+                        ExpState.calEnumOptions[key] = data.enum_options;
+                    }
+                    // Extract scalar from array format [rawVal] returned by cal_value_api
+                    var rawVal = Array.isArray(data.value) ? data.value[0] : data.value;
+                    var text = expEnumLookup(ExpState.calEnumOptions[key], rawVal);
+                    var displayVal = text !== null ? text : String(rawVal);
+                    ExpState.calValues[key] = displayVal;
                     document.querySelectorAll('[data-cal-key="' + key + '"]').forEach(function(el) {
-                        el.textContent = String(data.value);
+                        el.textContent = displayVal;
                     });
                     expUpdateChangeMark(key);
                 }
@@ -1679,9 +1723,30 @@ function expEditCal(deviceId, idx, name) {
     currentCalEdit = { deviceId: deviceId, idx: idx, name: name };
     document.getElementById('expCalEditTitle').textContent = 'Edit: ' + name;
     var key = deviceId + ':' + idx;
-    document.getElementById('expCalEditValue').value = ExpState.calValues[key] || '';
-    document.getElementById('expCalEditModal').style.display = 'flex';
-    document.getElementById('expCalEditValue').focus();
+    var opts = ExpState.calEnumOptions[key];
+    var inputEl = document.getElementById('expCalEditValue');
+    var selectEl = document.getElementById('expCalEditSelect');
+    if (opts && opts.length > 0) {
+        // Enum var — show dropdown selector
+        document.getElementById('expCalEditLabel').textContent = 'Select value:';
+        inputEl.style.display = 'none';
+        selectEl.innerHTML = opts.map(function(opt) {
+            return '<option value="' + escapeHtml(opt.text) + '">' + escapeHtml(opt.text) + '</option>';
+        }).join('');
+        var curVal = ExpState.calValues[key] || '';
+        selectEl.value = curVal;
+        selectEl.style.display = '';
+        document.getElementById('expCalEditModal').style.display = 'flex';
+        selectEl.focus();
+    } else {
+        // Scalar var — show text input
+        document.getElementById('expCalEditLabel').textContent = 'Current value:';
+        selectEl.style.display = 'none';
+        inputEl.value = ExpState.calValues[key] || '';
+        inputEl.style.display = '';
+        document.getElementById('expCalEditModal').style.display = 'flex';
+        inputEl.focus();
+    }
 }
 
 function expCloseCalEdit() {
@@ -1693,7 +1758,13 @@ function expSaveCalEdit() {
     if (!currentCalEdit) return;
     var deviceId = currentCalEdit.deviceId;
     var idx = currentCalEdit.idx;
-    var value = document.getElementById('expCalEditValue').value;
+    var key = deviceId + ':' + idx;
+    // Read value from select (enum) or text input (scalar)
+    var opts = ExpState.calEnumOptions[key];
+    var selectEl = document.getElementById('expCalEditSelect');
+    var value = (opts && opts.length > 0 && selectEl && selectEl.style.display !== 'none')
+        ? selectEl.value
+        : document.getElementById('expCalEditValue').value;
 
     fetch('/api/experiment/cal/write/' + deviceId + '/' + idx, {
         method: 'POST',

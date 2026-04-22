@@ -440,6 +440,17 @@ impl CalibrationParam {
     ) -> serde_json::Value {
         let axis_info: Vec<serde_json::Value> =
             self.axis_info.iter().map(|axis| axis.to_json()).collect();
+        let enum_options: Vec<serde_json::Value> = self
+            .compu_method
+            .enum_options()
+            .map(|opts| {
+                opts.iter()
+                    .map(|opt| {
+                        serde_json::json!({"raw": opt.raw_value, "text": opt.text_value})
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         serde_json::json!({
             "device_id": device_id,
             "device_name": device_name,
@@ -458,6 +469,8 @@ impl CalibrationParam {
             "axis_info": axis_info,
             "storage_order": self.storage_order.as_str(),
             "data_size": self.data_type.size(),
+            "is_enum": self.compu_method.is_enum(),
+            "enum_options": enum_options,
         })
     }
 

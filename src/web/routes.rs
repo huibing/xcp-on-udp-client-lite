@@ -4383,6 +4383,15 @@ pub async fn experiment_variables(State(state): State<AppState>) -> impl IntoRes
         // Get measurements
         let daq_mgr = device.daq_manager.read().await;
         for (i, m) in daq_mgr.all_measurements().iter().enumerate() {
+            let meas_enum_options: Vec<serde_json::Value> = m
+                .compu_method
+                .enum_options()
+                .map(|opts| {
+                    opts.iter()
+                        .map(|opt| json!({"raw": opt.raw_value, "text": opt.text_value}))
+                        .collect()
+                })
+                .unwrap_or_default();
             measurements.push(json!({
                 "device_id": device_id,
                 "device_name": device_name,
@@ -4392,6 +4401,8 @@ pub async fn experiment_variables(State(state): State<AppState>) -> impl IntoRes
                 "address_hex": format!("{:08X}", m.address),
                 "connected": connected,
                 "unit": m.unit.as_deref().unwrap_or(""),
+                "is_enum": m.compu_method.is_enum(),
+                "enum_options": meas_enum_options,
             }));
         }
 
