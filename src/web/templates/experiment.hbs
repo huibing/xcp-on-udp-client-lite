@@ -1959,12 +1959,27 @@ function expRenderMatrix(data) {
 // Store original matrix values for change tracking (only stores if not yet captured)
 function expCaptureMatrixOriginals(deviceId, idx, data) {
     var values = data.value;
+    var enumOpts = data.enum_options || [];
     if (!values) return;
+
+    function toOrigStr(v) {
+        var s = String(v !== undefined ? v : '-');
+        if (enumOpts.length > 0) {
+            var raw = Math.round(parseFloat(s));
+            if (!isNaN(raw)) {
+                for (var i = 0; i < enumOpts.length; i++) {
+                    if (enumOpts[i].raw === raw) return enumOpts[i].text;
+                }
+            }
+        }
+        return s;
+    }
+
     if (data.is_1d) {
         for (var c = 0; c < data.cols; c++) {
             var origKey = deviceId + ':' + idx + ':0:' + c;
             if (ExpState.calOriginalMatrix[origKey] === undefined) {
-                ExpState.calOriginalMatrix[origKey] = String(values[c] !== undefined ? values[c] : '-');
+                ExpState.calOriginalMatrix[origKey] = toOrigStr(values[c]);
             }
         }
     } else {
@@ -1973,7 +1988,7 @@ function expCaptureMatrixOriginals(deviceId, idx, data) {
                 var origKey = deviceId + ':' + idx + ':' + r + ':' + c;
                 if (ExpState.calOriginalMatrix[origKey] === undefined) {
                     var rowVals = values[r];
-                    ExpState.calOriginalMatrix[origKey] = String(rowVals && rowVals[c] !== undefined ? rowVals[c] : '-');
+                    ExpState.calOriginalMatrix[origKey] = toOrigStr(rowVals && rowVals[c] !== undefined ? rowVals[c] : '-');
                 }
             }
         }
@@ -1993,9 +2008,34 @@ function expGetMatrixCellMark(origStr, curStr) {
 function expRender1DTable(container, data, isWorking, axisValues, axisInfo) {
     var values = data.value;
     var cols = data.cols;
+    var enumOpts = data.enum_options || [];
     var xLabels = [];
     if (axisValues.length > 0 && axisValues[0]) {
         xLabels = axisValues[0].map(function(v) { return String(v); });
+    }
+
+    function cellDisplay(val) {
+        if (!enumOpts.length) return String(val);
+        var raw = Math.round(parseFloat(String(val)));
+        if (isNaN(raw)) return String(val);
+        for (var i = 0; i < enumOpts.length; i++) {
+            if (enumOpts[i].raw === raw) return enumOpts[i].text;
+        }
+        return String(val);
+    }
+
+    function cellInput(row, col, val) {
+        var displayText = cellDisplay(val);
+        if (enumOpts.length > 0) {
+            var opts = enumOpts.map(function(o) {
+                var sel = o.text === displayText ? ' selected' : '';
+                return '<option value="' + escapeHtml(o.text) + '"' + sel + '>' + escapeHtml(o.text) + '</option>';
+            }).join('');
+            return '<select style="background:#1e1e1e; border:1px solid #0f3460; color:#00ff88; padding:0.25rem; max-width:140px;" ' +
+                'onchange="expSaveMatrixCell(' + row + ', ' + col + ', this.value, this)">' + opts + '</select>';
+        }
+        return '<input type="text" value="' + escapeHtml(String(val)) + '" style="width:80px; text-align:center; background:#1e1e1e; border:1px solid #0f3460; color:#00ff88; padding:0.25rem;" ' +
+            'onchange="expSaveMatrixCell(' + row + ', ' + col + ', this.value, this)">';
     }
 
     var html = '<table style="width:100%; border-collapse:collapse;"><thead><tr>' +
@@ -2006,15 +2046,14 @@ function expRender1DTable(container, data, isWorking, axisValues, axisInfo) {
     html += '</tr></thead><tbody><tr><td style="padding:0.5rem; background:#1e1e1e; border:1px solid #444; font-weight:bold;">Value</td>';
     for (var c = 0; c < cols; c++) {
         var val = values[c] !== undefined ? values[c] : '-';
+        var dispVal = cellDisplay(val);
         var origKey = expMatrixDeviceId + ':' + expMatrixIdx + ':0:' + c;
-        var markClass = expGetMatrixCellMark(ExpState.calOriginalMatrix[origKey], String(val));
+        var markClass = expGetMatrixCellMark(ExpState.calOriginalMatrix[origKey], dispVal);
         if (isWorking) {
             html += '<td style="padding:0.25rem; border:1px solid #444; text-align:center;" class="' + markClass + '" data-cell-key="' + escapeHtml(origKey) + '">' +
-                '<input type="text" value="' + val + '" style="width:80px; text-align:center; background:#1e1e1e; border:1px solid #0f3460; color:#00ff88; padding:0.25rem;" ' +
-                'onchange="expSaveMatrixCell(0, ' + c + ', this.value, this)">' +
-                '</td>';
+                cellInput(0, c, val) + '</td>';
         } else {
-            html += '<td style="padding:0.5rem; border:1px solid #444; text-align:center; color:#00ff88;" class="' + markClass + '">' + val + '</td>';
+            html += '<td style="padding:0.5rem; border:1px solid #444; text-align:center; color:#00ff88;" class="' + markClass + '">' + escapeHtml(dispVal) + '</td>';
         }
     }
     html += '</tr></tbody></table>';
@@ -2025,12 +2064,37 @@ function expRender2DTable(container, data, isWorking, axisValues, axisInfo) {
     var values = data.value;
     var rows = data.rows;
     var cols = data.cols;
+    var enumOpts = data.enum_options || [];
     var xLabels = [], yLabels = [];
     if (axisValues.length > 1) {
         xLabels = axisValues[0] ? axisValues[0].map(function(v) { return String(v); }) : [];
         yLabels = axisValues[1] ? axisValues[1].map(function(v) { return String(v); }) : [];
     } else if (axisValues.length > 0) {
         yLabels = axisValues[0] ? axisValues[0].map(function(v) { return String(v); }) : [];
+    }
+
+    function cellDisplay(val) {
+        if (!enumOpts.length) return String(val);
+        var raw = Math.round(parseFloat(String(val)));
+        if (isNaN(raw)) return String(val);
+        for (var i = 0; i < enumOpts.length; i++) {
+            if (enumOpts[i].raw === raw) return enumOpts[i].text;
+        }
+        return String(val);
+    }
+
+    function cellInput(row, col, val) {
+        var displayText = cellDisplay(val);
+        if (enumOpts.length > 0) {
+            var opts = enumOpts.map(function(o) {
+                var sel = o.text === displayText ? ' selected' : '';
+                return '<option value="' + escapeHtml(o.text) + '"' + sel + '>' + escapeHtml(o.text) + '</option>';
+            }).join('');
+            return '<select style="background:#1e1e1e; border:1px solid #0f3460; color:#00ff88; padding:0.25rem; max-width:140px;" ' +
+                'onchange="expSaveMatrixCell(' + row + ', ' + col + ', this.value, this)">' + opts + '</select>';
+        }
+        return '<input type="text" value="' + escapeHtml(String(val)) + '" style="width:80px; text-align:center; background:#1e1e1e; border:1px solid #0f3460; color:#00ff88; padding:0.25rem;" ' +
+            'onchange="expSaveMatrixCell(' + row + ', ' + col + ', this.value, this)">';
     }
 
     // Transpose for correct display (values[r][c] where r=X_points, c=Y_points -> display r=Y, c=X)
@@ -2055,16 +2119,15 @@ function expRender2DTable(container, data, isWorking, axisValues, axisInfo) {
         html += '<tr><td style="padding:0.5rem; background:#2a2a2a; border:1px solid #444; font-weight:bold;">' + escapeHtml(yLabels[dr] || String(dr)) + '</td>';
         for (var dc = 0; dc < displayCols; dc++) {
             var val = transposed[dr] ? (transposed[dr][dc] !== undefined ? transposed[dr][dc] : '-') : '-';
+            var dispVal = cellDisplay(val);
             // original matrix stores [original_row][original_col]; transpose mapping: dc=row, dr=col
             var origKey = expMatrixDeviceId + ':' + expMatrixIdx + ':' + dc + ':' + dr;
-            var markClass = expGetMatrixCellMark(ExpState.calOriginalMatrix[origKey], String(val));
+            var markClass = expGetMatrixCellMark(ExpState.calOriginalMatrix[origKey], dispVal);
             if (isWorking) {
                 html += '<td style="padding:0.25rem; border:1px solid #444; text-align:center;" class="' + markClass + '" data-cell-key="' + escapeHtml(origKey) + '">' +
-                    '<input type="text" value="' + val + '" style="width:80px; text-align:center; background:#1e1e1e; border:1px solid #0f3460; color:#00ff88; padding:0.25rem;" ' +
-                    'onchange="expSaveMatrixCell(' + dc + ', ' + dr + ', this.value, this)">' +
-                    '</td>';
+                    cellInput(dc, dr, val) + '</td>';
             } else {
-                html += '<td style="padding:0.5rem; border:1px solid #444; text-align:center; color:#00ff88;" class="' + markClass + '">' + val + '</td>';
+                html += '<td style="padding:0.5rem; border:1px solid #444; text-align:center; color:#00ff88;" class="' + markClass + '">' + escapeHtml(dispVal) + '</td>';
             }
         }
         html += '</tr>';

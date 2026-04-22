@@ -331,7 +331,14 @@ impl CompuMethodFactory {
                 }
                 CompuMethod::Identical
             }
-            _ => CompuMethod::Identical,
+            _ => {
+                tracing::debug!(
+                    "CompuMethod '{}': unhandled conversion_type={:?}, using Identical",
+                    &compu_method.name,
+                    compu_method.conversion_type
+                );
+                CompuMethod::Identical
+            }
         }
     }
 }

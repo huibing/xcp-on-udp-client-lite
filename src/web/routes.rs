@@ -2658,7 +2658,7 @@ pub async fn a2l_load(
         // Create calibration and DAQ managers for this device
         let mut cal_manager = CalibrationManager::new();
         for ch in characteristics {
-            if let Some(param) = convert_characteristic(ch) {
+            if let Some(param) = convert_characteristic(ch, &reader) {
                 cal_manager.add_param(param);
             }
         }
@@ -2669,7 +2669,7 @@ pub async fn a2l_load(
 
         let mut daq_manager = DaqManager::new();
         for m in measurements {
-            if let Some(meas) = convert_measurement(m) {
+            if let Some(meas) = convert_measurement(m, &reader) {
                 daq_manager.add_measurement(meas);
             }
         }
@@ -2897,6 +2897,7 @@ async fn serve_file_download(
 /// Convert A2L characteristic to calibration parameter
 fn convert_characteristic(
     ch: crate::a2l::A2lCharacteristic,
+    reader: &crate::a2l::A2lReader,
 ) -> Option<crate::calibration::CalibrationParam> {
     use crate::calibration::{CalibrationParam, CalibrationType};
 
@@ -2949,18 +2950,21 @@ fn convert_characteristic(
     param.axis_info = ch.axis_info;
     param.storage_order = ch.storage_order;
 
+    // Resolve COMPU_METHOD for value conversion (enum, linear, etc.)
+    param.compu_method = reader.get_compu_method(&ch.conversion_name);
+
     Some(param)
 }
 
 /// Convert A2L measurement to DAQ measurement
-fn convert_measurement(m: crate::a2l::A2lMeasurement) -> Option<crate::daq::Measurement> {
+fn convert_measurement(m: crate::a2l::A2lMeasurement, reader: &crate::a2l::A2lReader) -> Option<crate::daq::Measurement> {
     Some(crate::daq::Measurement::with_type(
         &m.name,
         m.address,
         m.address_ext,
         m.data_type,
         m.unit,
-        crate::CompuMethod::Identical,
+        reader.get_compu_method(&m.conversion_name),
     ))
 }
 

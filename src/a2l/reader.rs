@@ -1452,11 +1452,19 @@ impl A2lReader {
             // Find the COMPU_METHOD
             for cm in &module.compu_method {
                 if cm.get_name() == conversion_name {
-                    return CompuMethodFactory::from_a2l(cm, &vtabs);
+                    let result = CompuMethodFactory::from_a2l(cm, &vtabs);
+                    tracing::debug!(
+                        "get_compu_method '{}': type={:?} -> is_enum={}",
+                        conversion_name,
+                        cm.conversion_type,
+                        result.is_enum()
+                    );
+                    return result;
                 }
             }
         }
 
+        tracing::warn!("get_compu_method '{}': not found in A2L", conversion_name);
         // Default to Identical if not found
         super::compute_method::CompuMethod::Identical
     }
