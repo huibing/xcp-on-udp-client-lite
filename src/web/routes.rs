@@ -1005,7 +1005,6 @@ async fn read_calibration_from_slave(
     slave: &crate::slave::XcpSlave,
     param: &crate::calibration::CalibrationParam,
 ) -> Result<CalibrationValue, String> {
-    use crate::calibration::{CalibrationType, CalibrationValue};
     use crate::protocol::Mta;
 
     let mta = Mta::new(param.address, param.address_ext);
@@ -1044,8 +1043,17 @@ async fn read_calibration_from_slave(
         ));
     }
 
-    // Parse based on type
-    let value = match &param.data_type {
+    bytes_to_calibration_value(&data, &param.data_type)
+}
+
+/// Convert raw bytes to a CalibrationValue based on the expected data type.
+/// Shared by the XCP-slave path and the HEX-file path.
+fn bytes_to_calibration_value(
+    data: &[u8],
+    cal_type: &CalibrationType,
+) -> Result<CalibrationValue, String> {
+    use crate::calibration::CalibrationValue;
+    let value = match cal_type {
         // Scalar types
         CalibrationType::U8 => CalibrationValue::U8(data[0]),
         CalibrationType::U16 => CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]])),
@@ -1072,100 +1080,78 @@ async fn read_calibration_from_slave(
         CalibrationType::Bool => CalibrationValue::Bool(data[0] != 0),
 
         // Array types
-        CalibrationType::U8Array(_len) => CalibrationValue::U8Array(data.clone()),
-        CalibrationType::U16Array(_len) => {
-            let vals: Vec<u16> = data
-                .chunks_exact(2)
+        CalibrationType::U8Array(_) => CalibrationValue::U8Array(data.to_vec()),
+        CalibrationType::U16Array(_) => CalibrationValue::U16Array(
+            data.chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            CalibrationValue::U16Array(vals)
-        }
-        CalibrationType::U32Array(_len) => {
-            let vals: Vec<u32> = data
-                .chunks_exact(4)
+                .collect(),
+        ),
+        CalibrationType::U32Array(_) => CalibrationValue::U32Array(
+            data.chunks_exact(4)
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            CalibrationValue::U32Array(vals)
-        }
-        CalibrationType::U64Array(_len) => {
-            let vals: Vec<u64> = data
-                .chunks_exact(8)
+                .collect(),
+        ),
+        CalibrationType::U64Array(_) => CalibrationValue::U64Array(
+            data.chunks_exact(8)
                 .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-                .collect();
-            CalibrationValue::U64Array(vals)
-        }
-        CalibrationType::I8Array(_len) => {
+                .collect(),
+        ),
+        CalibrationType::I8Array(_) => {
             CalibrationValue::I8Array(data.iter().map(|&v| v as i8).collect())
         }
-        CalibrationType::I16Array(_len) => {
-            let vals: Vec<i16> = data
-                .chunks_exact(2)
+        CalibrationType::I16Array(_) => CalibrationValue::I16Array(
+            data.chunks_exact(2)
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            CalibrationValue::I16Array(vals)
-        }
-        CalibrationType::I32Array(_len) => {
-            let vals: Vec<i32> = data
-                .chunks_exact(4)
+                .collect(),
+        ),
+        CalibrationType::I32Array(_) => CalibrationValue::I32Array(
+            data.chunks_exact(4)
                 .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            CalibrationValue::I32Array(vals)
-        }
-        CalibrationType::I64Array(_len) => {
-            let vals: Vec<i64> = data
-                .chunks_exact(8)
+                .collect(),
+        ),
+        CalibrationType::I64Array(_) => CalibrationValue::I64Array(
+            data.chunks_exact(8)
                 .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-                .collect();
-            CalibrationValue::I64Array(vals)
-        }
-        CalibrationType::F32Array(_len) => {
-            let vals: Vec<f32> = data
-                .chunks_exact(4)
+                .collect(),
+        ),
+        CalibrationType::F32Array(_) => CalibrationValue::F32Array(
+            data.chunks_exact(4)
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            CalibrationValue::F32Array(vals)
-        }
-        CalibrationType::F64Array(_len) => {
-            let vals: Vec<f64> = data
-                .chunks_exact(8)
+                .collect(),
+        ),
+        CalibrationType::F64Array(_) => CalibrationValue::F64Array(
+            data.chunks_exact(8)
                 .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-                .collect();
-            CalibrationValue::F64Array(vals)
-        }
-        CalibrationType::BoolArray(_len) => {
+                .collect(),
+        ),
+        CalibrationType::BoolArray(_) => {
             CalibrationValue::BoolArray(data.iter().map(|&v| v != 0).collect())
         }
 
-        // Matrix types - flatten to 2D vectors
-        CalibrationType::U8Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<u8>> = data.chunks_exact(*cols).map(|c| c.to_vec()).collect();
-            CalibrationValue::U8Matrix(matrix)
-        }
-        CalibrationType::U16Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<u16>> = data
-                .chunks_exact(cols * 2)
+        // Matrix types - row-major
+        CalibrationType::U8Matrix(_, cols) => CalibrationValue::U8Matrix(
+            data.chunks_exact(*cols).map(|c| c.to_vec()).collect(),
+        ),
+        CalibrationType::U16Matrix(_, cols) => CalibrationValue::U16Matrix(
+            data.chunks_exact(cols * 2)
                 .map(|row| {
                     row.chunks_exact(2)
                         .map(|c| u16::from_le_bytes([c[0], c[1]]))
                         .collect()
                 })
-                .collect();
-            CalibrationValue::U16Matrix(matrix)
-        }
-        CalibrationType::U32Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<u32>> = data
-                .chunks_exact(cols * 4)
+                .collect(),
+        ),
+        CalibrationType::U32Matrix(_, cols) => CalibrationValue::U32Matrix(
+            data.chunks_exact(cols * 4)
                 .map(|row| {
                     row.chunks_exact(4)
                         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect()
                 })
-                .collect();
-            CalibrationValue::U32Matrix(matrix)
-        }
-        CalibrationType::U64Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<u64>> = data
-                .chunks_exact(cols * 8)
+                .collect(),
+        ),
+        CalibrationType::U64Matrix(_, cols) => CalibrationValue::U64Matrix(
+            data.chunks_exact(cols * 8)
                 .map(|row| {
                     row.chunks_exact(8)
                         .map(|c| {
@@ -1173,41 +1159,33 @@ async fn read_calibration_from_slave(
                         })
                         .collect()
                 })
-                .collect();
-            CalibrationValue::U64Matrix(matrix)
-        }
-        CalibrationType::I8Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<i8>> = data
-                .chunks_exact(*cols)
+                .collect(),
+        ),
+        CalibrationType::I8Matrix(_, cols) => CalibrationValue::I8Matrix(
+            data.chunks_exact(*cols)
                 .map(|row| row.iter().map(|&v| v as i8).collect())
-                .collect();
-            CalibrationValue::I8Matrix(matrix)
-        }
-        CalibrationType::I16Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<i16>> = data
-                .chunks_exact(cols * 2)
+                .collect(),
+        ),
+        CalibrationType::I16Matrix(_, cols) => CalibrationValue::I16Matrix(
+            data.chunks_exact(cols * 2)
                 .map(|row| {
                     row.chunks_exact(2)
                         .map(|c| i16::from_le_bytes([c[0], c[1]]))
                         .collect()
                 })
-                .collect();
-            CalibrationValue::I16Matrix(matrix)
-        }
-        CalibrationType::I32Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<i32>> = data
-                .chunks_exact(cols * 4)
+                .collect(),
+        ),
+        CalibrationType::I32Matrix(_, cols) => CalibrationValue::I32Matrix(
+            data.chunks_exact(cols * 4)
                 .map(|row| {
                     row.chunks_exact(4)
                         .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect()
                 })
-                .collect();
-            CalibrationValue::I32Matrix(matrix)
-        }
-        CalibrationType::I64Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<i64>> = data
-                .chunks_exact(cols * 8)
+                .collect(),
+        ),
+        CalibrationType::I64Matrix(_, cols) => CalibrationValue::I64Matrix(
+            data.chunks_exact(cols * 8)
                 .map(|row| {
                     row.chunks_exact(8)
                         .map(|c| {
@@ -1215,23 +1193,19 @@ async fn read_calibration_from_slave(
                         })
                         .collect()
                 })
-                .collect();
-            CalibrationValue::I64Matrix(matrix)
-        }
-        CalibrationType::F32Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<f32>> = data
-                .chunks_exact(cols * 4)
+                .collect(),
+        ),
+        CalibrationType::F32Matrix(_, cols) => CalibrationValue::F32Matrix(
+            data.chunks_exact(cols * 4)
                 .map(|row| {
                     row.chunks_exact(4)
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect()
                 })
-                .collect();
-            CalibrationValue::F32Matrix(matrix)
-        }
-        CalibrationType::F64Matrix(_rows, cols) => {
-            let matrix: Vec<Vec<f64>> = data
-                .chunks_exact(cols * 8)
+                .collect(),
+        ),
+        CalibrationType::F64Matrix(_, cols) => CalibrationValue::F64Matrix(
+            data.chunks_exact(cols * 8)
                 .map(|row| {
                     row.chunks_exact(8)
                         .map(|c| {
@@ -1239,19 +1213,75 @@ async fn read_calibration_from_slave(
                         })
                         .collect()
                 })
-                .collect();
-            CalibrationValue::F64Matrix(matrix)
-        }
-        CalibrationType::BoolMatrix(_rows, cols) => {
-            let matrix: Vec<Vec<bool>> = data
-                .chunks_exact(*cols)
+                .collect(),
+        ),
+        CalibrationType::BoolMatrix(_, cols) => CalibrationValue::BoolMatrix(
+            data.chunks_exact(*cols)
                 .map(|row| row.iter().map(|&v| v != 0).collect())
-                .collect();
-            CalibrationValue::BoolMatrix(matrix)
-        }
+                .collect(),
+        ),
     };
-
     Ok(value)
+}
+
+/// Read a calibration parameter value from a HEX image.
+fn read_calibration_from_hex(
+    hex: &crate::hex::HexImage,
+    param: &CalibrationParam,
+) -> Result<CalibrationValue, String> {
+    let size = param.data_type.size();
+    if size == 0 {
+        return Err(format!(
+            "Invalid parameter size (0 bytes) for '{}'",
+            param.name
+        ));
+    }
+    let data = hex.extract_range(param.address, size as u32, 0xFF);
+    bytes_to_calibration_value(&data, &param.data_type)
+}
+
+/// Read axis values from a HEX image (mirrors read_axis_values_from_slave).
+fn read_axis_values_from_hex(
+    hex: &crate::hex::HexImage,
+    param: &CalibrationParam,
+) -> Vec<Vec<f64>> {
+    use crate::a2l::AxisPointSource;
+
+    let mut result = Vec::new();
+    for axis in &param.axis_info {
+        if let Some(values) = axis.get_static_values() {
+            result.push(values);
+            continue;
+        }
+        if let AxisPointSource::Memory {
+            address,
+            data_type,
+            num_points,
+            ..
+        } = &axis.point_source
+        {
+            let element_size = match data_type {
+                crate::a2l::A2lDataType::U8
+                | crate::a2l::A2lDataType::I8
+                | crate::a2l::A2lDataType::Bool => 1,
+                crate::a2l::A2lDataType::U16 | crate::a2l::A2lDataType::I16 => 2,
+                crate::a2l::A2lDataType::U32
+                | crate::a2l::A2lDataType::I32
+                | crate::a2l::A2lDataType::F32 => 4,
+                crate::a2l::A2lDataType::U64
+                | crate::a2l::A2lDataType::I64
+                | crate::a2l::A2lDataType::F64 => 8,
+                _ => 4,
+            };
+            let total_size = (element_size * num_points) as u32;
+            let data = hex.extract_range(*address, total_size, 0xFF);
+            let values = parse_axis_values(&data, data_type, *num_points);
+            result.push(values);
+        } else {
+            result.push((0..axis.num_points).map(|i| i as f64).collect());
+        }
+    }
+    result
 }
 
 /// Write calibration page (GET /cal/write/:device_id/:idx)
@@ -1481,13 +1511,37 @@ pub async fn cal_original_api(
     };
 
     let slave_id = SlaveId(uuid);
-    let Some(slave) = state.get_slave(slave_id).await else {
-        return Json(json!({ "success": false, "error": "Device not found or not connected" }));
-    };
+    let slave = state.get_slave(slave_id).await;
+    let is_connected = slave.as_ref().map_or(false, |s| s.is_connected());
 
-    if !slave.is_connected() {
-        return Json(json!({ "success": false, "error": "Not connected to XCP slave" }));
+    if !is_connected {
+        // Not connected — use HEX as the reference/original value
+        let devices = state.devices.read().await;
+        let device = devices.iter().find(|d| {
+            d.id == device_id_str
+                || d.slave_id.map(|s| s.to_string()) == Some(device_id_str.to_string())
+        });
+        let Some(device) = device else {
+            return Json(json!({ "success": false, "error": "Device not found" }));
+        };
+        let cal_manager = device.cal_manager.read().await;
+        let Some(param) = cal_manager.params().get(idx).cloned() else {
+            return Json(json!({ "success": false, "error": "Parameter not found" }));
+        };
+        drop(cal_manager);
+        let hex_guard = device.hex_image.read().await;
+        let Some(ref hex) = *hex_guard else {
+            return Json(json!({ "success": false, "no_hex": true }));
+        };
+        return match read_calibration_from_hex(hex, &param) {
+            Ok(value) => Json(json!({ "success": true, "value": value.format_scalar_str() })),
+            Err(e) => {
+                Json(json!({ "success": false, "error": format!("HEX read failed: {}", e) }))
+            }
+        };
     }
+
+    let slave = slave.unwrap();
 
     // Return cached original if already stored
     {
@@ -2761,6 +2815,116 @@ fn convert_measurement(m: crate::a2l::A2lMeasurement, reader: &crate::a2l::A2lRe
     ))
 }
 
+/// Build a cal_value_api response from a HEX image when the slave is not connected.
+/// Returns `{"success": false, "no_hex": true}` when no HEX is available.
+async fn cal_value_from_hex_or_empty(
+    state: &AppState,
+    device_id_str: &str,
+    idx: usize,
+) -> Json<serde_json::Value> {
+    let devices = state.devices.read().await;
+    let device = devices.iter().find(|d| {
+        d.id == device_id_str
+            || d.slave_id.map(|s| s.to_string()) == Some(device_id_str.to_string())
+    });
+    let Some(device) = device else {
+        return Json(json!({"success": false, "error": "Device not found"}));
+    };
+
+    let cal_manager = device.cal_manager.read().await;
+    let Some(param) = cal_manager.params().get(idx).cloned() else {
+        return Json(json!({
+            "success": false,
+            "error": format!("Parameter index {} not found", idx)
+        }));
+    };
+    drop(cal_manager);
+
+    let hex_guard = device.hex_image.read().await;
+    let Some(ref hex) = *hex_guard else {
+        // No HEX loaded — frontend will show "—"
+        return Json(json!({"success": false, "no_hex": true}));
+    };
+
+    match read_calibration_from_hex(hex, &param) {
+        Ok(value) => {
+            let (rows, cols) = match &param.data_type {
+                CalibrationType::U8Array(n)
+                | CalibrationType::I8Array(n)
+                | CalibrationType::U16Array(n)
+                | CalibrationType::I16Array(n)
+                | CalibrationType::U32Array(n)
+                | CalibrationType::I32Array(n)
+                | CalibrationType::U64Array(n)
+                | CalibrationType::I64Array(n)
+                | CalibrationType::F32Array(n)
+                | CalibrationType::F64Array(n)
+                | CalibrationType::BoolArray(n) => (1, *n),
+                CalibrationType::U8Matrix(r, c)
+                | CalibrationType::I8Matrix(r, c)
+                | CalibrationType::U16Matrix(r, c)
+                | CalibrationType::I16Matrix(r, c)
+                | CalibrationType::U32Matrix(r, c)
+                | CalibrationType::I32Matrix(r, c)
+                | CalibrationType::U64Matrix(r, c)
+                | CalibrationType::I64Matrix(r, c)
+                | CalibrationType::F32Matrix(r, c)
+                | CalibrationType::F64Matrix(r, c)
+                | CalibrationType::BoolMatrix(r, c) => (*r, *c),
+                _ => (1, 1),
+            };
+            let is_1d = matches!(
+                param.data_type,
+                CalibrationType::U8Array(_)
+                    | CalibrationType::I8Array(_)
+                    | CalibrationType::U16Array(_)
+                    | CalibrationType::I16Array(_)
+                    | CalibrationType::U32Array(_)
+                    | CalibrationType::I32Array(_)
+                    | CalibrationType::U64Array(_)
+                    | CalibrationType::I64Array(_)
+                    | CalibrationType::F32Array(_)
+                    | CalibrationType::F64Array(_)
+                    | CalibrationType::BoolArray(_)
+            );
+            let value_json = calibration_value_to_json(&value, is_1d);
+            let axis_info: Vec<serde_json::Value> =
+                param.axis_info.iter().map(|a| a.to_json()).collect();
+            let axis_values = read_axis_values_from_hex(hex, &param);
+            let is_enum = param.is_enum();
+            let enum_options: Vec<serde_json::Value> = param
+                .enum_options()
+                .map(|opts| {
+                    opts.iter()
+                        .map(|opt| json!({"raw": opt.raw_value, "text": opt.text_value}))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            Json(json!({
+                "success": true,
+                "source": "hex",
+                "name": param.name,
+                "type": param.data_type.type_name(),
+                "value": value_json,
+                "rows": rows,
+                "cols": cols,
+                "is_1d": is_1d,
+                "is_working_page": false,
+                "axis_info": axis_info,
+                "axis_values": axis_values,
+                "characteristic_type": param.characteristic_type.as_str(),
+                "is_enum": is_enum,
+                "enum_options": enum_options,
+            }))
+        }
+        Err(e) => Json(json!({
+            "success": false,
+            "error": format!("HEX read failed: {}", e)
+        })),
+    }
+}
+
 /// Get full calibration parameter value (GET /api/cal/value/:device_id/:idx)
 /// Returns complete value with axis info and dimensions for matrix editor
 pub async fn cal_value_api(
@@ -2780,20 +2944,14 @@ pub async fn cal_value_api(
 
     let slave_id = SlaveId(uuid);
     let slave = state.get_slave(slave_id).await;
+    let is_connected = slave.as_ref().map_or(false, |s| s.is_connected());
 
-    let Some(slave) = slave else {
-        return Json(json!({
-            "success": false,
-            "error": "Device not found or not connected"
-        }));
-    };
-
-    if !slave.is_connected() {
-        return Json(json!({
-            "success": false,
-            "error": "Not connected to XCP slave"
-        }));
+    if !is_connected {
+        // Slave not connected — try to read from HEX image, or return empty if none loaded
+        return cal_value_from_hex_or_empty(&state, &device_id_str, idx).await;
     }
+
+    let slave = slave.unwrap();
 
     let client = state.client.lock().await;
     let cal_manager = slave.cal_manager.read().await;
