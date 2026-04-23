@@ -5019,25 +5019,46 @@ pub async fn experiment_dcm_export(
         };
 
         let slave_id = SlaveId(uuid);
-        let Some(slave_state) = state.get_slave(slave_id).await else {
-            continue;
-        };
+        let slave_state = state.get_slave(slave_id).await;
+        let is_connected = slave_state.as_ref().map_or(false, |s| s.is_connected());
 
-        let cal_manager = slave_state.cal_manager.read().await;
-        let param = match cal_manager.params().get(idx).cloned() {
-            Some(p) => p,
-            None => continue,
-        };
-        drop(cal_manager);
+        if is_connected {
+            let slave = slave_state.unwrap();
+            let cal_manager = slave.cal_manager.read().await;
+            let param = match cal_manager.params().get(idx).cloned() {
+                Some(p) => p,
+                None => continue,
+            };
+            drop(cal_manager);
 
-        let cal_values = slave_state.cal_values.read().await;
-        let value = match cal_values.get(&param.name).cloned() {
-            Some(v) => v,
-            None => continue,
-        };
-        drop(cal_values);
-
-        entries.push((param, value));
+            let cal_values = slave.cal_values.read().await;
+            let value = match cal_values.get(&param.name).cloned() {
+                Some(v) => v,
+                None => continue,
+            };
+            drop(cal_values);
+            entries.push((param, value));
+        } else {
+            // Disconnected — find DeviceState and read from HEX image
+            let devices = state.devices.read().await;
+            let device = devices.iter().find(|d| {
+                d.id == device_id_str
+                    || d.slave_id.map(|s| s.to_string()) == Some(device_id_str.to_string())
+            });
+            let Some(device) = device else { continue };
+            let cal_manager = device.cal_manager.read().await;
+            let param = match cal_manager.params().get(idx).cloned() {
+                Some(p) => p,
+                None => continue,
+            };
+            drop(cal_manager);
+            let hex_guard = device.hex_image.read().await;
+            let Some(ref hex) = *hex_guard else { continue };
+            match read_calibration_from_hex(hex, &param) {
+                Ok(value) => entries.push((param, value)),
+                Err(_) => continue,
+            }
+        }
     }
 
     let dcm_content = generate_dcm(&title, &entries);
