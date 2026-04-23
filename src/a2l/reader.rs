@@ -1126,9 +1126,10 @@ impl A2lReader {
     ///    - CURVE characteristic type → 1D array
     ///    - MAP characteristic type → 2D matrix
     ///    - VALUE/VALBLK → infer from record layout name patterns (Lookup1D_*, Lookup2D_*, Scalar_*, etc.)
-    /// 4. Combine base type with dimensions from:
+    /// 4. Combine base type with dimensions from (in priority order):
     ///    a) matrix_dim if available (preferred)
-    ///    b) AXIS_DESCR max_axis_points (fallback for MAP/CURVE types)
+    ///    b) NUMBER keyword (VAL_BLK flat arrays)
+    ///    c) AXIS_DESCR max_axis_points (CURVE/MAP)
     fn parse_characteristic_datatype(
         &self,
         ch: &a2lfile::Characteristic,
@@ -1161,7 +1162,7 @@ impl A2lReader {
         };
 
         // Step 3: Combine base type with dimensions
-        // Priority: matrix_dim > AXIS_DESCR dimensions
+        // Priority: matrix_dim > number (VAL_BLK) > AXIS_DESCR dimensions
 
         // Try matrix_dim first
         if let Some(matrix_dim) = &ch.matrix_dim {
@@ -1171,6 +1172,13 @@ impl A2lReader {
                 2 => Self::wrap_as_matrix(base_type, dims[0] as usize, dims[1] as usize),
                 _ => Some(base_type),
             };
+        }
+
+        // Try NUMBER keyword (VAL_BLK with flat array of n elements)
+        if let Some(n) = ch.number.as_ref().map(|n| n.number as usize) {
+            if n > 1 {
+                return Self::wrap_as_array(base_type, n);
+            }
         }
 
         // Fallback: get dimensions from AXIS_DESCR
