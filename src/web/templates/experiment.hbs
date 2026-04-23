@@ -660,12 +660,13 @@ a.exp-sb-btn { text-decoration: none; }
 <div id="expDcmModal" class="exp-modal" style="display:none;">
     <div class="exp-modal-content" style="width:700px; max-width:95vw;">
         <div class="exp-modal-header">
-            <h3 style="margin:0;">📤 Export Changed Calibrations to DCM</h3>
+            <h3 style="margin:0;">📤 Export Calibrations to DCM</h3>
             <button class="exp-modal-close" onclick="expCloseDcmModal()">&times;</button>
         </div>
         <div class="exp-modal-body">
             <p style="color:#888; font-size:0.85rem; margin-bottom:0.75rem;">
-                The following calibration variables have been modified from their original values.
+                All calibration variables in the experiment are listed below.
+                Variables modified during this session are marked <span style="color:#ffaa00; font-size:0.75rem; font-weight:600;">●&nbsp;MODIFIED</span>.
                 Select which to include in the DCM export.
             </p>
             <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.75rem; padding-bottom:0.5rem; border-bottom:1px solid #333;">
@@ -677,7 +678,7 @@ a.exp-sb-btn { text-decoration: none; }
             </div>
             <div id="expDcmVarList" style="max-height:380px; overflow-y:auto; display:flex; flex-direction:column; gap:0.4rem;"></div>
             <p id="expDcmEmpty" style="display:none; color:#888; text-align:center; padding:1.5rem;">
-                No changed calibration variables found.
+                No calibration variables in the experiment.
             </p>
         </div>
         <div class="exp-modal-footer">
@@ -2549,32 +2550,42 @@ function expChecksum() {
 }
 
 // ===== DCM Export =====
-var expDcmChangedData = []; // cached list from /api/experiment/cal/changed
+var expDcmChangedData = []; // cached list of all cal vars in experiment (with changed flag)
 
 function expOpenDcmExport() {
     document.getElementById('expDcmVarList').innerHTML = '';
     document.getElementById('expDcmEmpty').style.display = 'none';
     document.getElementById('expDcmModal').style.display = 'flex';
 
-    // Build changed-variable list from session tracking (no backend call needed)
+    // Collect ALL calibration variables from all tabs (deduplicated by device_id:idx)
+    var seen = {};
     var deviceMap = {};
-    Object.values(ExpState.sessionChangedParams).forEach(function(p) {
-        if (!deviceMap[p.device_id]) {
-            deviceMap[p.device_id] = {
-                device_id: p.device_id,
-                device_name: p.device_name || p.device_id,
-                variables: []
-            };
-        }
-        deviceMap[p.device_id].variables.push({
-            idx: p.idx,
-            name: p.name,
-            characteristic_type: p.calType || '',
-            description: '',
-            unit: p.unit || '',
-            original_value: p.original_value || '',
-            current_value: p.current_value || '',
-            type_name: p.calType || '',
+    ExpState.tabs.forEach(function(tab) {
+        if (!tab.variables) return;
+        tab.variables.forEach(function(v) {
+            if (v.kind !== 'calibration') return;
+            var key = v.device_id + ':' + v.idx;
+            if (seen[key]) return;
+            seen[key] = true;
+
+            if (!deviceMap[v.device_id]) {
+                deviceMap[v.device_id] = {
+                    device_id: v.device_id,
+                    device_name: v.device_name || v.device_id,
+                    variables: []
+                };
+            }
+            var changed = ExpState.sessionChangedParams[key];
+            deviceMap[v.device_id].variables.push({
+                idx: v.idx,
+                name: v.name,
+                characteristic_type: v.calType || v.type || '',
+                unit: v.unit || '',
+                type_name: v.calType || v.type || '',
+                original_value: changed ? (changed.original_value || '') : '',
+                current_value: changed ? (changed.current_value || '') : '',
+                is_changed: !!changed,
+            });
         });
     });
     expDcmChangedData = Object.values(deviceMap);
@@ -2598,23 +2609,29 @@ function expRenderDcmVarList() {
 
         device.variables.forEach(function(v) {
             total++;
-            var isMatrixCurve = v.current_value === '' && v.original_value === '';
-            var changeText = isMatrixCurve
-                ? '<em style="color:#888;">[map/curve: elements edited]</em>'
-                : (v.current_value !== '' && v.original_value !== '')
-                    ? escapeHtml(v.original_value) + ' → ' + escapeHtml(v.current_value)
-                    : escapeHtml(v.type_name || v.characteristic_type);
+            var changedBadge = v.is_changed
+                ? '<span style="color:#ffaa00; font-size:0.7rem; font-weight:600; margin-left:0.4rem;">● MODIFIED</span>'
+                : '';
+            var changeDetail = '';
+            if (v.is_changed) {
+                var isMatrixCurve = v.current_value === '' && v.original_value === '';
+                changeDetail = isMatrixCurve
+                    ? '<em style="color:#888;">[map/curve: elements edited]</em>'
+                    : (v.current_value !== '' && v.original_value !== '')
+                        ? escapeHtml(v.original_value) + ' → ' + escapeHtml(v.current_value)
+                        : '';
+            }
             html += '<label style="display:flex; align-items:flex-start; gap:0.6rem; padding:0.3rem 0.4rem; border-radius:3px; cursor:pointer; transition:background 0.15s;" ' +
                 'onmouseover="this.style.background=\'#1a1a2e\'" onmouseout="this.style.background=\'\'">' +
                 '<input type="checkbox" checked class="dcm-var-cb" ' +
                 'data-device-id="' + escapeHtml(device.device_id) + '" ' +
                 'data-idx="' + v.idx + '" ' +
                 'onchange="expDcmUpdateCount()">' +
-                '<div style="min-width:0;">' +
+                '<div style="min-width:0; flex:1;">' +
                 '<span style="color:#00ff88; font-size:0.85rem; font-family:monospace;">' + escapeHtml(v.name) + '</span>' +
                 '<span style="color:#888; font-size:0.75rem; margin-left:0.5rem;">[' + escapeHtml(v.characteristic_type) + ']</span>' +
-                '<div style="color:#aaa; font-size:0.75rem; margin-top:0.1rem;">' + changeText + '</div>' +
-                (v.description ? '<div style="color:#666; font-size:0.7rem;">' + escapeHtml(v.description) + '</div>' : '') +
+                changedBadge +
+                (changeDetail ? '<div style="color:#aaa; font-size:0.75rem; margin-top:0.1rem;">' + changeDetail + '</div>' : '') +
                 '</div></label>';
         });
         html += '</div>';
