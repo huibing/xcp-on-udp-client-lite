@@ -1122,11 +1122,10 @@ impl A2lReader {
     /// Strategy:
     /// 1. First, try to get the base data type from FNC_VALUES.datatype (most accurate)
     /// 2. If FNC_VALUES is not available, infer from record layout name
-    /// 3. Determine dimensionality (scalar/array/matrix) from name patterns:
-    ///    - Scalar_* -> scalar
-    ///    - Lookup1D_* -> 1D array
-    ///    - Lookup2D_* -> 2D matrix
-    ///    - LAYOUT_* -> scalar (simple layout)
+    /// 3. Determine dimensionality (scalar/array/matrix):
+    ///    - CURVE characteristic type → 1D array
+    ///    - MAP characteristic type → 2D matrix
+    ///    - VALUE/VALBLK → infer from record layout name patterns (Lookup1D_*, Lookup2D_*, Scalar_*, etc.)
     /// 4. Combine base type with dimensions from:
     ///    a) matrix_dim if available (preferred)
     ///    b) AXIS_DESCR max_axis_points (fallback for MAP/CURVE types)
@@ -1153,8 +1152,13 @@ impl A2lReader {
             Self::infer_type_from_layout_name(layout_name)
         };
 
-        // Step 2: Determine dimensionality from name patterns
-        let dimension_kind = Self::infer_dimension_kind(layout_name);
+        // Step 2: Determine dimensionality — A2L CharacteristicType is authoritative;
+        // fall back to layout name patterns only for VALUE/VALBLK types.
+        let dimension_kind = match ch.characteristic_type {
+            a2lfile::CharacteristicType::Curve => DimensionKind::Array,
+            a2lfile::CharacteristicType::Map => DimensionKind::Matrix,
+            _ => Self::infer_dimension_kind(layout_name),
+        };
 
         // Step 3: Combine base type with dimensions
         // Priority: matrix_dim > AXIS_DESCR dimensions
