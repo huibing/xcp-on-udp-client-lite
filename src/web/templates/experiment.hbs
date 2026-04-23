@@ -2284,7 +2284,7 @@ function expResolveAndLoad(data) {
         })
         .then(function(r) { return r.json(); })
         .then(function(statusData) {
-            var currentDevices = (statusData.devices || []).filter(function(d) { return d.connected; });
+            var currentDevices = statusData.devices || [];
             var deviceMap = {};
             var unmapped = [];
 
@@ -2340,7 +2340,8 @@ function expShowDeviceMapDialog(unmapped, savedDevices, currentDevices) {
             '<select data-saved-id="' + escapeHtml(savedId) + '" style="flex:1; font-size:0.85rem;">' +
             '<option value="">(Skip - drop variables)</option>';
         currentDevices.forEach(function(d) {
-            html += '<option value="' + escapeHtml(d.device_id) + '">' + escapeHtml(d.device_name) + '</option>';
+            var label = escapeHtml(d.device_name) + (d.connected ? ' ✓' : ' (disconnected)');
+            html += '<option value="' + escapeHtml(d.device_id) + '">' + label + '</option>';
         });
         html += '</select></div>';
     });
