@@ -62,12 +62,6 @@ impl WebServer {
             .route("/logout", get(routes::logout))
             // Slave management
             .route("/slaves", get(routes::slaves_page))
-            .route("/api/slave/select/:id", get(routes::select_slave_api))
-            .route("/api/disconnect/:id", get(routes::disconnect_slave_api))
-            // Connection (device-based)
-            .route("/connect", get(routes::connect_page))
-            .route("/api/connect", post(routes::connect_api))
-            .route("/api/disconnect", get(routes::disconnect_api))
             // Device management
             .route(
                 "/api/devices/connect-all",
@@ -76,6 +70,9 @@ impl WebServer {
             .route("/api/devices/connect", post(routes::connect_device))
             .route("/api/devices/disconnect", post(routes::disconnect_device))
             .route("/api/devices/remove", post(routes::remove_device))
+            .route("/api/devices/add", post(routes::add_device_entry))
+            .route("/api/devices/rename", post(routes::rename_device))
+            .route("/api/devices/list", get(routes::list_devices))
             // Calibration (with device ID)
             .route("/calibration", get(routes::calibration_page))
             .route("/api/cal/available", get(routes::cal_available))
@@ -124,7 +121,6 @@ impl WebServer {
             .route("/api/daq/download/csv", get(routes::daq_download_csv))
             .route("/api/daq/download/mf4", get(routes::daq_download_mf4))
             // A2L
-            .route("/a2l", get(routes::a2l_page))
             .route("/api/a2l/load", post(routes::a2l_load))
             // Checksum verification
             .route("/checksum", get(routes::checksum_page))

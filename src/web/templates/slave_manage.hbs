@@ -1,0 +1,362 @@
+<!-- Slave Manage Page -->
+<div style="margin-bottom: 1.5rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+    <h2 style="color: #00ff88; margin: 0;">Slave Management</h2>
+    <button type="button" onclick="addSlave()" style="margin-left: auto;">+ Add Slave</button>
+    <button type="button" class="secondary" onclick="connectAll()">Connect All</button>
+    <button type="button" class="secondary" onclick="refreshPage()">↻ Refresh</button>
+</div>
+
+<div id="devices-container">
+    <p style="color: #888; text-align: center; padding: 2rem;">Loading...</p>
+</div>
+
+<div id="upload-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
+    <div class="card" style="min-width:360px; max-width:500px;">
+        <h2 id="overlay-title">Load File</h2>
+        <input type="file" id="overlay-file-input" style="margin-bottom:1rem; width:100%;">
+        <div style="display:flex; gap:0.5rem;">
+            <button type="button" onclick="submitUpload()">Upload</button>
+            <button type="button" class="secondary" onclick="closeOverlay()">Cancel</button>
+        </div>
+        <div id="overlay-status" style="margin-top:0.75rem; color:#888; font-size:0.9em;"></div>
+    </div>
+</div>
+
+<script>
+let _overlayDeviceId = null;
+let _overlayType = null; // 'a2l' or 'hex'
+
+async function loadDevices() {
+    try {
+        const resp = await fetch('/api/devices/list');
+        const result = await resp.json();
+        if (!result.success) throw new Error(result.error || 'Failed to load devices');
+        renderDevices(result.devices);
+    } catch (e) {
+        document.getElementById('devices-container').innerHTML =
+            `<div class="status error">Error: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderDevices(devices) {
+    const container = document.getElementById('devices-container');
+    if (!devices || devices.length === 0) {
+        container.innerHTML = `<div class="card" style="text-align:center; color:#888; padding:2rem;">
+            No slaves configured. Click <strong>+ Add Slave</strong> to get started.
+        </div>`;
+        return;
+    }
+
+    container.innerHTML = devices.map(d => renderDeviceCard(d)).join('');
+}
+
+function renderDeviceCard(d) {
+    const a2lBadge = d.a2l_loaded
+        ? `<span style="color:#00ff88;">&#x2713; ${escapeHtml(d.a2l_name || 'loaded')}</span>`
+        : `<span style="color:#888;">Not loaded</span>`;
+
+    const hexBadge = d.hex_loaded
+        ? `<span style="color:#00ff88;">&#x2713; ${escapeHtml(d.hex_name || 'loaded')}</span>`
+        : `<span style="color:#888;">Not loaded</span>`;
+
+    const connBadge = d.connected
+        ? `<span class="tag connected">Connected</span>`
+        : `<span class="tag disconnected">Disconnected</span>`;
+
+    let checksumBadge = '';
+    if (d.checksum_status === 'passed') {
+        checksumBadge = `<span class="tag connected">&#x2713; Passed</span>`;
+    } else if (d.checksum_status === 'failed') {
+        checksumBadge = `<span class="tag disconnected">&#x2717; Failed</span>`;
+    } else {
+        checksumBadge = `<span class="tag stopped">Not run</span>`;
+    }
+
+    // Transport options
+    const transportOpts = (d.transport_options || []).map(opt =>
+        `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label)}</option>`
+    ).join('');
+
+    return `
+    <div class="card" id="card-${d.id}" style="border: 1px solid ${d.connected ? '#00ff88' : '#0f3460'};">
+        <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:1rem; flex-wrap:wrap;">
+            <input
+                id="name-${d.id}"
+                type="text"
+                value="${escapeHtml(d.name)}"
+                style="font-size:1.1em; font-weight:600; width:220px; background:transparent; border:1px solid transparent; color:#fff; padding:0.25rem 0.5rem; border-radius:4px;"
+                onblur="renameSlave('${d.id}', this.value)"
+                onkeydown="if(event.key==='Enter')this.blur()"
+                title="Click to rename"
+            >
+            ${connBadge}
+            <span style="color:#888; font-size:0.85em; margin-left:auto;">${escapeHtml(d.address || '')}</span>
+        </div>
+
+        <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:0.75rem; margin-bottom:1rem;">
+            <div style="background:#1a1a2e; padding:0.75rem; border-radius:4px;">
+                <div style="color:#888; font-size:0.8em; margin-bottom:0.25rem;">A2L File <span style="color:#ff4444;">*</span></div>
+                <div style="margin-bottom:0.5rem;">${a2lBadge}</div>
+                <button type="button" class="secondary" style="padding:0.4rem 0.75rem; font-size:0.85em;"
+                    onclick="openUpload('${d.id}', 'a2l')">
+                    ${d.a2l_loaded ? '&#x21BB; Replace A2L' : 'Load A2L'}
+                </button>
+                ${d.a2l_loaded ? `<div style="color:#888; font-size:0.8em; margin-top:0.35rem;">${d.cal_count} cal / ${d.meas_count} meas</div>` : ''}
+            </div>
+
+            <div style="background:#1a1a2e; padding:0.75rem; border-radius:4px;">
+                <div style="color:#888; font-size:0.8em; margin-bottom:0.25rem;">HEX File (optional)</div>
+                <div style="margin-bottom:0.5rem;">${hexBadge}</div>
+                <button type="button" class="secondary" style="padding:0.4rem 0.75rem; font-size:0.85em;"
+                    onclick="openUpload('${d.id}', 'hex')">
+                    ${d.hex_loaded ? '&#x21BB; Replace HEX' : 'Load HEX'}
+                </button>
+            </div>
+
+            <div style="background:#1a1a2e; padding:0.75rem; border-radius:4px;">
+                <div style="color:#888; font-size:0.8em; margin-bottom:0.25rem;">Checksum</div>
+                <div style="margin-bottom:0.5rem;">${checksumBadge}</div>
+                <button type="button" class="secondary" style="padding:0.4rem 0.75rem; font-size:0.85em;"
+                    id="verify-btn-${d.id}"
+                    onclick="runVerify('${d.id}')"
+                    ${(!d.connected || !d.hex_loaded) ? 'disabled title="Requires connection and HEX file"' : ''}>
+                    Run Verify
+                </button>
+            </div>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+            ${d.connected ? '' : `
+            <select id="transport-${d.id}" style="width:auto; min-width:200px;">
+                ${transportOpts}
+            </select>`}
+            ${d.connected
+                ? `<button type="button" class="secondary" onclick="disconnectDevice('${d.id}')">Disconnect</button>`
+                : `<button type="button" onclick="connectDevice('${d.id}')" ${!d.a2l_loaded ? 'disabled title="Load A2L first"' : ''}>Connect</button>`
+            }
+            <button type="button" class="danger" style="margin-left:auto;" onclick="removeDevice('${d.id}')">Remove</button>
+        </div>
+    </div>`;
+}
+
+async function addSlave() {
+    const name = prompt('Enter slave name (e.g. ECU1):');
+    if (!name || !name.trim()) return;
+
+    try {
+        const resp = await fetch('/api/devices/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim() }),
+        });
+        const result = await resp.json();
+        if (result.success) {
+            await loadDevices();
+        } else {
+            alert('Error: ' + result.error);
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function renameSlave(deviceId, newName) {
+    newName = newName.trim();
+    if (!newName) return;
+    try {
+        const resp = await fetch('/api/devices/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId, name: newName }),
+        });
+        const result = await resp.json();
+        if (!result.success) {
+            alert('Rename failed: ' + result.error);
+            await loadDevices();
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function connectDevice(deviceId) {
+    const transportSelect = document.getElementById(`transport-${deviceId}`);
+    const transport = transportSelect ? transportSelect.value : '';
+    try {
+        const resp = await fetch('/api/devices/connect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId, transport_protocol: transport }),
+        });
+        const result = await resp.json();
+        if (result.success) {
+            await loadDevices();
+        } else {
+            alert('Connect failed: ' + result.error);
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function disconnectDevice(deviceId) {
+    try {
+        const resp = await fetch('/api/devices/disconnect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId }),
+        });
+        const result = await resp.json();
+        if (result.success) {
+            await loadDevices();
+        } else {
+            alert('Disconnect failed: ' + result.error);
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function removeDevice(deviceId) {
+    if (!confirm('Remove this slave entry? This will also disconnect it if connected.')) return;
+    try {
+        const resp = await fetch('/api/devices/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId }),
+        });
+        const result = await resp.json();
+        if (result.success) {
+            await loadDevices();
+        } else {
+            alert('Remove failed: ' + result.error);
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function connectAll() {
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = 'Connecting...';
+    try {
+        const transportProtocols = {};
+        document.querySelectorAll('select[id^="transport-"]').forEach(s => {
+            if (s.value) transportProtocols[s.id.replace('transport-', '')] = s.value;
+        });
+        const resp = await fetch('/api/devices/connect-all', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ transport_protocols: transportProtocols }),
+        });
+        const result = await resp.json();
+        alert(result.message || (result.success ? 'Done' : result.error));
+        await loadDevices();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Connect All';
+    }
+}
+
+function openUpload(deviceId, type) {
+    _overlayDeviceId = deviceId;
+    _overlayType = type;
+    const title = type === 'a2l' ? 'Load A2L File' : 'Load HEX File';
+    const accept = type === 'a2l' ? '.a2l' : '.hex,.ihex,.h86';
+    document.getElementById('overlay-title').textContent = title;
+    document.getElementById('overlay-file-input').accept = accept;
+    document.getElementById('overlay-file-input').value = '';
+    document.getElementById('overlay-status').textContent = '';
+    const el = document.getElementById('upload-overlay');
+    el.style.display = 'flex';
+}
+
+function closeOverlay() {
+    document.getElementById('upload-overlay').style.display = 'none';
+    _overlayDeviceId = null;
+    _overlayType = null;
+}
+
+async function submitUpload() {
+    const fileInput = document.getElementById('overlay-file-input');
+    const statusEl = document.getElementById('overlay-status');
+    if (!fileInput.files[0]) {
+        statusEl.textContent = 'Please select a file first.';
+        return;
+    }
+    const formData = new FormData();
+    if (_overlayType === 'a2l') {
+        formData.append('device_id', _overlayDeviceId);
+        formData.append('a2l_file', fileInput.files[0]);
+        statusEl.textContent = 'Uploading and parsing A2L...';
+        try {
+            const resp = await fetch('/api/a2l/load', { method: 'POST', body: formData });
+            const result = await resp.json();
+            if (result.success) {
+                statusEl.style.color = '#00ff88';
+                statusEl.textContent = result.message;
+                setTimeout(async () => {
+                    closeOverlay();
+                    await loadDevices();
+                }, 800);
+            } else {
+                statusEl.style.color = '#ff4444';
+                statusEl.textContent = 'Error: ' + (result.error || 'Unknown error');
+            }
+        } catch (e) {
+            statusEl.style.color = '#ff4444';
+            statusEl.textContent = 'Error: ' + e.message;
+        }
+    } else {
+        formData.append('hex_file', fileInput.files[0]);
+        statusEl.textContent = 'Uploading HEX...';
+        try {
+            const resp = await fetch('/api/hex/load/' + encodeURIComponent(_overlayDeviceId), { method: 'POST', body: formData });
+            const result = await resp.json();
+            if (result.success) {
+                statusEl.style.color = '#00ff88';
+                statusEl.textContent = result.message;
+                setTimeout(async () => {
+                    closeOverlay();
+                    await loadDevices();
+                }, 800);
+            } else {
+                statusEl.style.color = '#ff4444';
+                statusEl.textContent = 'Error: ' + (result.error || 'Unknown error');
+            }
+        } catch (e) {
+            statusEl.style.color = '#ff4444';
+            statusEl.textContent = 'Error: ' + e.message;
+        }
+    }
+}
+
+async function runVerify(deviceId) {
+    const btn = document.getElementById(`verify-btn-${deviceId}`);
+    btn.disabled = true;
+    btn.textContent = 'Verifying...';
+    try {
+        const resp = await fetch('/api/checksum/verify/' + encodeURIComponent(deviceId), { method: 'POST' });
+        const result = await resp.json();
+        if (!result.success) {
+            alert('Verification failed: ' + (result.error || 'Unknown error'));
+        }
+        await loadDevices();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Run Verify';
+    }
+}
+
+async function refreshPage() {
+    await loadDevices();
+}
+
+// Initial load
+loadDevices();
+</script>

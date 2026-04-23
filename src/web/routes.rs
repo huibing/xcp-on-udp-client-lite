@@ -19,7 +19,7 @@ use crate::a2l::A2lTransportConfig;
 use crate::calibration::{CalibrationManager, CalibrationParam, CalibrationType, CalibrationValue};
 use crate::daq::DaqManager;
 use crate::slave::SlaveId;
-use crate::transport::{TransportConfig, TransportType};
+use crate::transport::TransportType;
 use crate::web::auth::{clear_session, try_create_session, verify_credentials};
 use crate::web::state::{AppState, DeviceState, SlaveState};
 use crate::web::templates;
@@ -111,7 +111,7 @@ pub async fn login_api(
         match try_create_session(&client_ip) {
             Ok(token) => {
                 let cookie = format!("session={}; Path=/; HttpOnly; SameSite=Strict", token);
-                (AppendHeaders([(SET_COOKIE, cookie)]), Redirect::to("/")).into_response()
+                (AppendHeaders([(SET_COOKIE, cookie)]), Redirect::to("/?fresh=1")).into_response()
             }
             Err(error_msg) => {
                 // Another user is already connected
@@ -190,240 +190,6 @@ pub async fn dashboard(State(state): State<AppState>) -> Html<String> {
         status.as_deref(),
         error.as_deref(),
     ))
-}
-
-/// Connect page (GET /connect)
-pub async fn connect_page(State(state): State<AppState>) -> Html<String> {
-    // Get all devices
-    let devices = state.all_devices().await;
-
-    // Build device list for template
-    let device_list: Vec<serde_json::Value> = devices
-        .iter()
-        .map(|d| {
-            json!({
-                "id": d.id,
-                "name": d.name,
-                "address": d.address,
-                "a2l_name": d.original_filename,
-                "connected": d.connected,
-                "transport_options": build_transport_options(d),
-            })
-        })
-        .collect();
-
-    // Calculate next ECU name
-    let next_ecu_num = devices.len() + 1;
-    let default_name = format!("ECU{}", next_ecu_num);
-
-    let status = state.take_status().await;
-    let error = state.take_error().await;
-
-    let content = templates::connect_page_devices(&device_list, &default_name);
-    Html(templates::page(
-        "Connect",
-        &content,
-        status.as_deref(),
-        error.as_deref(),
-    ))
-}
-
-/// Connect API (POST /api/connect)
-pub async fn connect_api(
-    State(state): State<AppState>,
-    Form(form): Form<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let requested_transport =
-        match parse_transport_type(form.get("transport_protocol").map(String::as_str)) {
-            Ok(transport) => transport,
-            Err(error) => {
-                state.set_error(error).await;
-                return Redirect::to("/");
-            }
-        };
-
-    let (transport_config, address_label, slave_name) =
-        if let Some(device_id) = form.get("device_id").filter(|value| !value.is_empty()) {
-            let Some(device) = state.get_device(device_id).await else {
-                state.set_error("Device not found".to_string()).await;
-                return Redirect::to("/");
-            };
-
-            let resolved = match device.resolve_transport_config(requested_transport) {
-                Ok(config) => config,
-                Err(error) => {
-                    state.set_error(error).await;
-                    return Redirect::to("/");
-                }
-            };
-
-            let name = form
-                .get("name")
-                .cloned()
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| device.name.clone());
-
-            (
-                resolved.to_transport_config(),
-                display_device_address(&resolved),
-                name,
-            )
-        } else {
-            let address = form
-                .get("custom")
-                .filter(|s| !s.is_empty())
-                .or_else(|| form.get("address"))
-                .cloned()
-                .unwrap_or_else(|| "127.0.0.1:5555".to_string());
-
-            let transport_config = match requested_transport {
-                Some(TransportType::Tcp) => TransportConfig::Tcp {
-                    addr: address.clone(),
-                },
-                Some(TransportType::Can) => {
-                    state
-                        .set_error("Manual CAN connect is not supported from this form".to_string())
-                        .await;
-                    return Redirect::to("/");
-                }
-                Some(TransportType::Udp) | None => TransportConfig::Udp {
-                    addr: address.clone(),
-                },
-            };
-
-            let slave_name = form
-                .get("name")
-                .cloned()
-                .unwrap_or_else(|| format!("Slave {}", address));
-
-            (transport_config, address, slave_name)
-        };
-
-    let mut client = state.client.lock().await;
-
-    match client.connect_slave(&slave_name, transport_config).await {
-        Ok(slave_id) => {
-            // Get the slave info from the connected slave
-            if let Some(xcp_slave) = client.get_slave(slave_id) {
-                let xcp_slave_guard = xcp_slave.lock().await;
-                let info = xcp_slave_guard.info.clone();
-                let connect_info = xcp_slave_guard.info.connect_info.clone();
-                drop(xcp_slave_guard);
-
-                // Create slave state
-                let slave_state = SlaveState::new(slave_id, info);
-                state.add_slave_state(slave_state).await;
-                state.set_current_slave(Some(slave_id)).await;
-
-                if let Some(ref ci) = connect_info {
-                    state
-                        .set_status(format!(
-                            "Connected to {} (max CTO={}, max DTO={})",
-                            slave_name, ci.max_cto, ci.max_dto
-                        ))
-                        .await;
-                } else {
-                    state
-                        .set_status(format!("Connected to {} via {}", slave_name, address_label))
-                        .await;
-                }
-            }
-        }
-        Err(e) => {
-            state.set_error(format!("Connection failed: {}", e)).await;
-        }
-    }
-
-    Redirect::to("/")
-}
-
-/// Disconnect API (GET /api/disconnect)
-/// Disconnects current slave
-pub async fn disconnect_api(State(state): State<AppState>) -> impl IntoResponse {
-    let current_id = *state.current_slave_id.read().await;
-
-    if let Some(id) = current_id {
-        let mut client = state.client.lock().await;
-
-        if let Err(e) = client.disconnect_slave(id).await {
-            state.set_error(format!("Disconnect error: {}", e)).await;
-        } else {
-            state.remove_slave_state(id).await;
-            // Update device connection status
-            state.update_device_connection_by_slave_id(id, false).await;
-
-            // Select another slave if available
-            let remaining = state.all_slaves().await;
-            if remaining.is_empty() {
-                state.set_current_slave(None).await;
-                state
-                    .set_status("All slaves disconnected".to_string())
-                    .await;
-            } else {
-                state.set_current_slave(Some(remaining[0].id)).await;
-                state
-                    .set_status(format!(
-                        "Disconnected, now using {}",
-                        remaining[0].display_name()
-                    ))
-                    .await;
-            }
-        }
-    } else {
-        state.set_error("No slave selected".to_string()).await;
-    }
-
-    Redirect::to("/")
-}
-
-/// Disconnect specific slave API (GET /api/disconnect/:id)
-pub async fn disconnect_slave_api(
-    State(state): State<AppState>,
-    Path(id_str): Path<String>,
-) -> impl IntoResponse {
-    if let Ok(id) = uuid::Uuid::parse_str(&id_str) {
-        let slave_id = SlaveId(id);
-        let mut client = state.client.lock().await;
-
-        if let Err(e) = client.disconnect_slave(slave_id).await {
-            state.set_error(format!("Disconnect error: {}", e)).await;
-        } else {
-            state.remove_slave_state(slave_id).await;
-            // Update device connection status
-            state
-                .update_device_connection_by_slave_id(slave_id, false)
-                .await;
-            state.set_status("Slave disconnected".to_string()).await;
-        }
-    } else {
-        state.set_error("Invalid slave ID".to_string()).await;
-    }
-
-    Redirect::to("/")
-}
-
-/// Select slave API (GET /api/slave/select/:id)
-pub async fn select_slave_api(
-    State(state): State<AppState>,
-    Path(id_str): Path<String>,
-) -> impl IntoResponse {
-    if let Ok(id) = uuid::Uuid::parse_str(&id_str) {
-        let slave_id = SlaveId(id);
-        if state.get_slave(slave_id).await.is_some() {
-            state.set_current_slave(Some(slave_id)).await;
-            if let Some(slave) = state.get_slave(slave_id).await {
-                state
-                    .set_status(format!("Selected: {}", slave.display_name()))
-                    .await;
-            }
-        } else {
-            state.set_error("Slave not found".to_string()).await;
-        }
-    } else {
-        state.set_error("Invalid slave ID".to_string()).await;
-    }
-
-    Redirect::to("/")
 }
 
 // ============== Device Management Routes ==============
@@ -837,36 +603,140 @@ pub async fn remove_device(
     }))
 }
 
-/// Slaves list page (GET /slaves)
-pub async fn slaves_page(State(state): State<AppState>) -> Html<String> {
-    let slaves = state.all_slaves().await;
-    let current_id = *state.current_slave_id.read().await;
+/// Add new device entry by name (POST /api/devices/add)
+pub async fn add_device_entry(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if name.is_empty() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "Name cannot be empty"
+        }));
+    }
+
+    let device_id = uuid::Uuid::new_v4().to_string();
+    let device = crate::web::state::DeviceState::new_empty(device_id.clone(), name.clone());
+    state.add_device(device).await;
+
+    Json(serde_json::json!({
+        "success": true,
+        "device_id": device_id,
+        "message": format!("Added slave '{}'", name),
+    }))
+}
+
+/// Rename a device entry (POST /api/devices/rename)
+pub async fn rename_device(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let device_id = payload
+        .get("device_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let new_name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if new_name.is_empty() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "Name cannot be empty"
+        }));
+    }
+
+    if state.get_device(device_id).await.is_none() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "Device not found"
+        }));
+    }
+
+    state.update_device_name(device_id, &new_name).await;
+
+    Json(serde_json::json!({
+        "success": true,
+        "message": format!("Renamed to '{}'", new_name),
+    }))
+}
+
+/// List all devices as JSON (GET /api/devices/list)
+pub async fn list_devices(State(state): State<AppState>) -> impl IntoResponse {
+    let devices = state.all_devices().await;
+    let mut device_list: Vec<serde_json::Value> = Vec::new();
+
+    for d in &devices {
+        let hex_filename = d.hex_filename.read().await.clone();
+        let checksum_report = d.checksum_report.read().await;
+        let checksum_status = if let Some(ref report) = *checksum_report {
+            if report.all_passed() {
+                "passed"
+            } else {
+                "failed"
+            }
+        } else {
+            "not_run"
+        };
+        drop(checksum_report);
+        let cal_count = d.cal_manager.read().await.params().len();
+        let meas_count = d.daq_manager.read().await.available_count();
+
+        device_list.push(serde_json::json!({
+            "id": d.id,
+            "name": d.name,
+            "address": d.address,
+            "a2l_loaded": !d.a2l_path.is_empty(),
+            "a2l_name": d.original_filename,
+            "hex_loaded": hex_filename.is_some(),
+            "hex_name": hex_filename,
+            "connected": d.connected,
+            "checksum_status": checksum_status,
+            "cal_count": cal_count,
+            "meas_count": meas_count,
+            "transport_options": build_transport_options(&d),
+        }));
+    }
+
+    Json(serde_json::json!({
+        "success": true,
+        "devices": device_list,
+    }))
+}
+
+/// Slave Manage page (GET /slaves)
+pub async fn slaves_page(State(state): State<AppState>) -> impl IntoResponse {
+    // Guard: cannot change slave config while DAQ is running
+    if state.is_any_daq_running().await {
+        state
+            .set_error(
+                "Cannot manage slaves while measurement is running. Stop DAQ first.".to_string(),
+            )
+            .await;
+        return Redirect::to("/").into_response();
+    }
 
     let status = state.take_status().await;
     let error = state.take_error().await;
 
-    // Convert SlaveState to tuple format for template
-    let mut slaves_data = Vec::new();
-    for s in &slaves {
-        let cal_count = s.cal_manager.read().await.params().len();
-        let meas_count = s.daq_manager.read().await.available_count();
-        slaves_data.push((
-            s.id.to_string(),
-            s.display_name(),
-            s.is_connected(),
-            cal_count,
-            meas_count,
-        ));
-    }
-
-    let content = templates::slaves_page(&slaves_data, current_id);
-
+    let content = templates::slave_manage_page();
     Html(templates::page(
         "Slaves",
         &content,
         status.as_deref(),
         error.as_deref(),
     ))
+    .into_response()
 }
 
 /// Calibration page (GET /calibration)
@@ -2471,75 +2341,30 @@ pub async fn daq_data(
     }))
 }
 
-/// A2L page (GET /a2l)
-pub async fn a2l_page(State(state): State<AppState>) -> Html<String> {
-    let devices = state.all_devices().await;
-    let selected_device = state
-        .current_device()
-        .await
-        .or_else(|| devices.first().cloned());
-
-    // Get path from current device or first device
-    let (path, cal_count, meas_count) = if let Some(device) = selected_device.as_ref() {
-        let cal_mgr = device.cal_manager.read().await;
-        let daq_mgr = device.daq_manager.read().await;
-        (
-            device.a2l_path.clone(),
-            cal_mgr.params().len(),
-            daq_mgr.available_count(),
-        )
-    } else {
-        (String::new(), 0, 0)
-    };
-
-    // Build current device info for template
-    let current_device_info = selected_device
-        .as_ref()
-        .map(|d| (d.id.clone(), d.name.clone()));
-    let transport_options = selected_device
-        .as_ref()
-        .map(build_transport_options)
-        .unwrap_or_default();
-
-    let status = state.take_status().await;
-    let error = state.take_error().await;
-
-    let content = templates::a2l_page(
-        &path,
-        current_device_info.as_ref(),
-        &transport_options,
-        cal_count,
-        meas_count,
-    );
-    Html(templates::page(
-        "A2L",
-        &content,
-        status.as_deref(),
-        error.as_deref(),
-    ))
-}
-
 /// A2L load API (POST /api/a2l/load)
+/// Loads an A2L file for an existing device (identified by device_id form field).
 pub async fn a2l_load(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let mut file_data = None;
-    let mut file_name = None;
+    let mut file_data: Option<bytes::Bytes> = None;
+    let mut file_name: Option<String> = None;
+    let mut device_id: Option<String> = None;
 
-    // Process multipart form data
     while let Some(field) = multipart.next_field().await.unwrap_or(None) {
         let name = field.name().unwrap_or("").to_string();
-
-        if name == "a2l_file" {
-            // Get the filename and file content
-            if let Some(filename) = field.file_name() {
-                file_name = Some(filename.to_string());
-                // Read the file content
+        match name.as_str() {
+            "device_id" => {
+                if let Ok(text) = field.text().await {
+                    device_id = Some(text);
+                }
+            }
+            "a2l_file" => {
+                if let Some(filename) = field.file_name() {
+                    file_name = Some(filename.to_string());
+                }
                 match field.bytes().await {
-                    Ok(bytes) => {
-                        file_data = Some(bytes);
-                    }
+                    Ok(bytes) => file_data = Some(bytes),
                     Err(e) => {
                         return axum::Json(serde_json::json!({
                             "success": false,
@@ -2548,12 +2373,30 @@ pub async fn a2l_load(
                     }
                 }
             }
+            _ => {}
         }
     }
 
-    // Save uploaded file to temp location and load it
+    let device_id = match device_id {
+        Some(id) if !id.trim().is_empty() => id,
+        _ => {
+            return axum::Json(serde_json::json!({
+                "success": false,
+                "error": "device_id is required"
+            }));
+        }
+    };
+
+    // Verify device exists
+    if state.get_device(&device_id).await.is_none() {
+        return axum::Json(serde_json::json!({
+            "success": false,
+            "error": "Device not found"
+        }));
+    }
+
+    // Save uploaded file to temp location
     let temp_path = if let (Some(name), Some(data)) = (&file_name, &file_data) {
-        // Create temp directory if not exists
         let temp_dir = std::env::temp_dir().join("xcp_client");
         if let Err(e) = tokio::fs::create_dir_all(&temp_dir).await {
             return axum::Json(serde_json::json!({
@@ -2561,189 +2404,139 @@ pub async fn a2l_load(
                 "error": format!("Failed to create temp dir: {}", e)
             }));
         }
-
-        // Generate unique filename to avoid collisions
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         let safe_name = name.replace(['/', '\\', ':'], "_");
         let temp_file = temp_dir.join(format!("{}_{}", timestamp, safe_name));
-
-        // Write file content
         if let Err(e) = tokio::fs::write(&temp_file, data).await {
             return axum::Json(serde_json::json!({
                 "success": false,
                 "error": format!("Failed to save temp file: {}", e)
             }));
         }
-
-        Some(temp_file)
+        temp_file
     } else {
-        None
+        return axum::Json(serde_json::json!({
+            "success": false,
+            "error": "No A2L file uploaded"
+        }));
     };
 
-    let path = temp_path;
+    use crate::A2lReader;
+    let reader = match tokio::task::spawn_blocking({
+        let path = temp_path.clone();
+        move || A2lReader::load(&path).map_err(|e| format!("A2L parse error: {:?}", e))
+    })
+    .await
+    {
+        Ok(Ok(reader)) => reader,
+        Ok(Err(e)) => {
+            return axum::Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to parse A2L: {}", e)
+            }));
+        }
+        Err(e) => {
+            return axum::Json(serde_json::json!({
+                "success": false,
+                "error": format!("Task error: {}", e)
+            }));
+        }
+    };
 
-    if let Some(path) = path {
-        use crate::A2lReader;
+    let transport_configs = reader.get_transport_configs();
+    let device_addr = transport_configs
+        .first()
+        .map(display_device_address)
+        .or_else(|| reader.get_slave_addresses().first().cloned())
+        .unwrap_or_else(|| "127.0.0.1:5555".to_string());
 
-        // Parse A2L file and extract transport metadata
-        let reader = match tokio::task::spawn_blocking({
-            let path = path.clone();
-            move || A2lReader::load(&path).map_err(|e| format!("A2L parse error: {:?}", e))
-        })
-        .await
-        {
-            Ok(Ok(reader)) => reader,
-            Ok(Err(e)) => {
-                return axum::Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Failed to parse A2L: {}", e)
-                }));
-            }
-            Err(e) => {
-                return axum::Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Task error: {}", e)
-                }));
-            }
-        };
-
-        let transport_configs = reader.get_transport_configs();
-        let device_addr = transport_configs
-            .first()
-            .map(display_device_address)
-            .or_else(|| reader.get_slave_addresses().first().cloned())
-            .unwrap_or_else(|| "127.0.0.1:5555".to_string());
-
-        // Check for duplicate IP address
-        if state.address_exists(&device_addr).await {
+    // Check for duplicate address excluding this device
+    {
+        let devices = state.devices.read().await;
+        let dup = devices
+            .iter()
+            .filter(|d| d.id != device_id)
+            .any(|d| d.address == device_addr);
+        if dup {
             return axum::Json(serde_json::json!({
                 "success": false,
                 "error": format!(
-                    "Device with address {} already exists. Each device must have a unique IP address.",
+                    "Another device already uses address {}. Each device must have a unique address.",
                     device_addr
                 )
             }));
         }
+    }
 
-        // Get A2L data
-        let characteristics = reader.get_characteristics();
-        let measurements = reader.get_measurements();
-        let a2l_events = reader.get_events();
+    let characteristics = reader.get_characteristics();
+    let measurements = reader.get_measurements();
+    let a2l_events = reader.get_events();
+    let max_cto = reader.get_max_cto().unwrap_or(255);
+    let cal_count = characteristics.len();
+    let meas_count = measurements.len();
+    let original_filename = file_name.clone().unwrap_or_else(|| "unknown.a2l".to_string());
 
-        // Get MAX_CTO from A2L (default to 255 if not specified)
-        let max_cto = reader.get_max_cto().unwrap_or(255);
+    let mut cal_manager = CalibrationManager::new();
+    for ch in characteristics {
+        if let Some(param) = convert_characteristic(ch, &reader) {
+            cal_manager.add_param(param);
+        }
+    }
+    let memory_segments = reader.get_memory_segments();
+    cal_manager.set_memory_segments(memory_segments);
 
-        // Store counts before consuming vectors
-        let cal_count = characteristics.len();
-        let meas_count = measurements.len();
+    let mut daq_manager = DaqManager::new();
+    for m in measurements {
+        if let Some(meas) = convert_measurement(m, &reader) {
+            daq_manager.add_measurement(meas);
+        }
+    }
+    if !a2l_events.is_empty() {
+        daq_manager.set_available_events(a2l_events);
+    }
 
-        // Generate device ID and name
-        let device_id = uuid::Uuid::new_v4().to_string();
-
-        // Use original filename from user upload
-        let original_filename = file_name
-            .clone()
-            .unwrap_or_else(|| "unknown.a2l".to_string());
-
-        // Get current device count for naming (synchronous approximation)
-        let device_count = state.devices.read().await.len();
-        let device_name = std::path::Path::new(&original_filename)
-            .file_stem()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| format!("Device{}", device_count + 1));
-
-        // Create calibration and DAQ managers for this device
-        let mut cal_manager = CalibrationManager::new();
-        for ch in characteristics {
-            if let Some(param) = convert_characteristic(ch, &reader) {
-                cal_manager.add_param(param);
+    // Update the existing device
+    let slave_id_opt = {
+        let mut devices = state.devices.write().await;
+        let device = match devices.iter_mut().find(|d| d.id == device_id) {
+            Some(d) => d,
+            None => {
+                return axum::Json(serde_json::json!({
+                    "success": false,
+                    "error": "Device not found (race condition)"
+                }));
             }
-        }
-
-        // Copy memory segments from A2L reader (needed for page switching)
-        let memory_segments = reader.get_memory_segments();
-        cal_manager.set_memory_segments(memory_segments);
-
-        let mut daq_manager = DaqManager::new();
-        for m in measurements {
-            if let Some(meas) = convert_measurement(m, &reader) {
-                daq_manager.add_measurement(meas);
-            }
-        }
-
-        // Parse A2L EVENT blocks and store in DaqManager
-        if !a2l_events.is_empty() {
-            tracing::info!("Found {} DAQ events in A2L file", a2l_events.len());
-            daq_manager.set_available_events(a2l_events);
-        }
-
-        // Create and add device
-        let device = DeviceState {
-            id: device_id.clone(),
-            name: device_name,
-            address: device_addr.clone(),
-            a2l_path: path.to_string_lossy().to_string(),
-            original_filename: original_filename.clone(),
-            max_cto,
-            transport_configs: transport_configs.clone(),
-            connected: false,
-            slave_id: None,
-            cal_manager: Arc::new(RwLock::new(cal_manager)),
-            daq_manager: Arc::new(RwLock::new(daq_manager)),
-            cal_values: Arc::new(RwLock::new(HashMap::new())),
-            daq_running: Arc::new(RwLock::new(false)),
-            page_mode: Arc::new(RwLock::new(crate::slave::PageMode::Reference)),
-            hex_image: Arc::new(RwLock::new(None)),
-            hex_filename: Arc::new(RwLock::new(None)),
-            checksum_report: Arc::new(RwLock::new(None)),
-            custom_name: Arc::new(RwLock::new(None)),
         };
+        device.address = device_addr.clone();
+        device.a2l_path = temp_path.to_string_lossy().to_string();
+        device.original_filename = original_filename.clone();
+        device.max_cto = max_cto;
+        device.transport_configs = transport_configs.clone();
+        *device.cal_manager.write().await = cal_manager;
+        *device.daq_manager.write().await = daq_manager;
+        device.slave_id
+    };
 
-        state.add_device(device).await;
-
-        state
-            .set_status(format!(
-                "Added device {} with address {} ({} cal params, {} measurements, protocols: {})",
-                original_filename,
-                device_addr,
-                cal_count,
-                meas_count,
-                if transport_configs.is_empty() {
-                    "default UDP".to_string()
-                } else {
-                    transport_configs
-                        .iter()
-                        .map(|config| config.transport_type().as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-            ))
-            .await;
-
-        return axum::Json(serde_json::json!({
-            "success": true,
-            "message": format!(
-                "Added device {} with address {}",
-                original_filename, device_addr
-            ),
-            "path": path,
-            "cal_count": cal_count,
-            "meas_count": meas_count,
-            "device_id": device_id,
-            "device_address": device_addr,
-            "transport_protocols": transport_configs
-                .iter()
-                .map(|config| transport_option_value(config.transport_type()))
-                .collect::<Vec<_>>(),
-        }));
+    // If connected, sync cal/daq managers to SlaveState
+    if let Some(slave_id) = slave_id_opt {
+        if let Some(device) = state.get_device(&device_id).await {
+            let mut slave_states = state.slave_states.write().await;
+            if let Some(slave_state) = slave_states.get_mut(&slave_id) {
+                slave_state.cal_manager = device.cal_manager.clone();
+                slave_state.daq_manager = device.daq_manager.clone();
+            }
+        }
     }
 
     axum::Json(serde_json::json!({
-        "success": false,
-        "error": "No file provided"
+        "success": true,
+        "message": format!("Loaded A2L: {} characteristics, {} measurements", cal_count, meas_count),
+        "cal_count": cal_count,
+        "meas_count": meas_count,
+        "address": device_addr,
     }))
 }
 
@@ -3981,155 +3774,12 @@ pub async fn daq_detail_api(
 // Checksum verification routes
 // ---------------------------------------------------------------------------
 
-/// Checksum page (GET /checksum)
+/// Checksum page (GET /checksum) — redirects to /slaves
 pub async fn checksum_page(
-    State(state): State<AppState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Html<String> {
-    let devices = state.all_devices().await;
-
-    // Determine selected device
-    let selected_device_id = params.get("device").cloned().or_else(|| {
-        // Try current device, then first device
-        None
-    });
-
-    let selected_device_id = if let Some(id) = selected_device_id {
-        Some(id)
-    } else if let Some(current) = state.current_device().await {
-        Some(current.id.clone())
-    } else {
-        devices.first().map(|d| d.id.clone())
-    };
-
-    let devices_data: Vec<serde_json::Value> = devices
-        .iter()
-        .map(|d| {
-            json!({
-                "id": d.id,
-                "name": d.name,
-                "connected": d.connected,
-                "selected": selected_device_id.as_deref() == Some(&d.id),
-            })
-        })
-        .collect();
-
-    let mut data = json!({
-        "devices": devices_data,
-    });
-
-    // If a device is selected, add its details
-    if let Some(ref sel_id) = selected_device_id {
-        if let Some(device) = state.get_device(sel_id).await {
-            let hex_filename = device.hex_filename.read().await.clone();
-            let report = device.checksum_report.read().await.clone();
-
-            // Count segments from A2L
-            let segment_count = {
-                let a2l_path = device.a2l_path.clone();
-                if !a2l_path.is_empty() {
-                    use crate::A2lReader;
-                    match A2lReader::load(&a2l_path) {
-                        Ok(reader) => reader.get_memory_segments().len(),
-                        Err(_) => 0,
-                    }
-                } else {
-                    0
-                }
-            };
-
-            data["selected_device"] = json!({
-                "id": device.id,
-                "name": device.name,
-                "connected": device.connected,
-            });
-            data["hex_filename"] = json!(hex_filename);
-            data["segment_count"] = json!(segment_count);
-
-            // Add report data if available
-            if let Some(ref report) = report {
-                let results_data: Vec<serde_json::Value> = report
-                    .results
-                    .iter()
-                    .map(|r| {
-                        let (is_pass, is_fail, is_skipped, is_error, status_detail) =
-                            match &r.status {
-                                crate::checksum::SegmentStatus::Pass => {
-                                    (true, false, false, false, None)
-                                }
-                                crate::checksum::SegmentStatus::Fail => {
-                                    (false, true, false, false, None)
-                                }
-                                crate::checksum::SegmentStatus::Skipped(reason) => {
-                                    (false, false, true, false, Some(reason.clone()))
-                                }
-                                crate::checksum::SegmentStatus::Error(msg) => {
-                                    (false, false, false, true, Some(msg.clone()))
-                                }
-                            };
-
-                        let (has_chunks, chunk_count, chunks_data) =
-                            if let Some(ref chunks) = r.chunks {
-                                let cd: Vec<serde_json::Value> = chunks
-                                    .iter()
-                                    .map(|c| {
-                                        json!({
-                                            "offset_hex": format!("{:08X}", c.offset),
-                                            "size": c.size,
-                                            "master_hex": format!("{:08X}", c.master_checksum),
-                                            "slave_hex": format!("{:08X}", c.slave_checksum),
-                                            "passed": c.passed,
-                                        })
-                                    })
-                                    .collect();
-                                (true, chunks.len(), Some(cd))
-                            } else {
-                                (false, 0, None)
-                            };
-
-                        json!({
-                            "name": r.name,
-                            "address_hex": format!("{:08X}", r.address),
-                            "size": r.size,
-                            "algorithm": r.algorithm,
-                            "page": r.page,
-                            "master_hex": format!("{:08X}", r.master_checksum),
-                            "slave_hex": format!("{:08X}", r.slave_checksum),
-                            "is_pass": is_pass,
-                            "is_fail": is_fail,
-                            "is_skipped": is_skipped,
-                            "is_error": is_error,
-                            "status_detail": status_detail,
-                            "has_chunks": has_chunks,
-                            "chunk_count": chunk_count,
-                            "chunks": chunks_data,
-                        })
-                    })
-                    .collect();
-
-                data["report"] = json!({
-                    "total": report.total_segments(),
-                    "passed": report.passed(),
-                    "failed_count": report.failed(),
-                    "skipped_count": report.skipped(),
-                    "error_count": report.errors(),
-                    "all_passed": report.all_passed(),
-                    "results": results_data,
-                });
-            }
-        }
-    }
-
-    let status = state.take_status().await;
-    let error = state.take_error().await;
-
-    let content = state.templates.checksum_page(&data);
-    Html(templates::page(
-        "Checksum",
-        &content,
-        status.as_deref(),
-        error.as_deref(),
-    ))
+    State(_state): State<AppState>,
+    Query(_params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    Redirect::to("/slaves")
 }
 
 /// HEX file upload API (POST /api/hex/load/:device_id)

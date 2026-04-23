@@ -232,10 +232,9 @@
         <h1>XCP Web Client</h1>
         <nav class="nav">
             <a href="/" {{#if active_dashboard}}class="active"{{/if}}>Dashboard</a>
+            <a href="/slaves" {{#if active_slaves}}class="active"{{/if}} data-daq-guard="true">Slaves</a>
             <a href="/calibration" {{#if active_calibration}}class="active"{{/if}}>Calibration</a>
             <a href="/daq" {{#if active_daq}}class="active"{{/if}}>DAQ</a>
-            <a href="/a2l" {{#if active_a2l}}class="active"{{/if}}>A2L</a>
-            <a href="/checksum" {{#if active_checksum}}class="active"{{/if}}>Checksum</a>
             <a href="/experiment" {{#if active_experiment}}class="active"{{/if}}>Experiment</a>
             <a href="/logout" onclick="clearLocalStorage()">Logout</a>
         </nav>
@@ -250,6 +249,33 @@
         {{{content}}}
     </div>
     <script>
+    // Clear localStorage after fresh login
+    (function() {
+        if (new URLSearchParams(window.location.search).get('fresh') === '1') {
+            localStorage.removeItem('cal_device_signature');
+            localStorage.removeItem('cal_selectedVars');
+            localStorage.removeItem('daq_device_signature');
+            localStorage.removeItem('daq_selectedVars');
+            history.replaceState({}, '', window.location.pathname);
+        }
+    })();
+
+    // DAQ guard: block navigation to Slaves page if DAQ is running
+    document.querySelectorAll('[data-daq-guard="true"]').forEach(function(link) {
+        link.addEventListener('click', async function(e) {
+            e.preventDefault();
+            try {
+                const resp = await fetch('/api/daq/status');
+                const data = await resp.json();
+                if (data.running) {
+                    alert('Cannot switch to Slave Management while measurement is running. Stop DAQ first.');
+                    return;
+                }
+            } catch (_) {}
+            window.location.href = link.href;
+        });
+    });
+
     // Shared utilities for calibration and DAQ pages
 
     // Clear localStorage on logout

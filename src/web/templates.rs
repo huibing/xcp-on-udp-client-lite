@@ -416,6 +416,11 @@ impl TemplateEngine {
     pub fn experiment_help_page(&self) -> String {
         self.render("experiment_help", &json!({}))
     }
+
+    /// Render slave manage page content
+    pub fn slave_manage_page(&self) -> String {
+        self.render("slave_manage", &json!({}))
+    }
 }
 
 impl Default for TemplateEngine {
@@ -433,6 +438,7 @@ pub fn page(title: &str, content: &str, status: Option<&str>, error: Option<&str
         "status_message": status,
         "error_message": error,
         "active_dashboard": title == "Dashboard",
+        "active_slaves": title == "Slaves",
         "active_calibration": title == "Calibration",
         "active_daq": title == "DAQ",
         "active_a2l": title == "A2L",
@@ -555,6 +561,11 @@ pub fn experiment_page() -> String {
 pub fn experiment_help_page() -> String {
     let engine = TemplateEngine::new();
     engine.experiment_help_page()
+}
+
+/// Render slave manage page content
+pub fn slave_manage_page() -> String {
+    TemplateEngine::new().slave_manage_page()
 }
 
 /// Escape HTML special characters

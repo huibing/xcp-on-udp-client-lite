@@ -91,6 +91,30 @@ impl DeviceState {
         }
     }
 
+    /// Create new device state with just a name — all A2L/HEX/transport fields are empty/default
+    pub fn new_empty(id: String, name: String) -> Self {
+        Self {
+            id,
+            name,
+            address: String::new(),
+            a2l_path: String::new(),
+            original_filename: String::new(),
+            max_cto: 255,
+            transport_configs: Vec::new(),
+            connected: false,
+            slave_id: None,
+            cal_manager: Arc::new(RwLock::new(CalibrationManager::new())),
+            daq_manager: Arc::new(RwLock::new(DaqManager::new())),
+            cal_values: Arc::new(RwLock::new(HashMap::new())),
+            daq_running: Arc::new(RwLock::new(false)),
+            page_mode: Arc::new(RwLock::new(PageMode::Reference)),
+            hex_image: Arc::new(RwLock::new(None)),
+            hex_filename: Arc::new(RwLock::new(None)),
+            checksum_report: Arc::new(RwLock::new(None)),
+            custom_name: Arc::new(RwLock::new(None)),
+        }
+    }
+
     /// Get display name, preferring custom name if set
     pub async fn display_name_or_custom(&self) -> String {
         if let Some(ref custom) = *self.custom_name.read().await {
@@ -427,6 +451,35 @@ impl AppState {
     /// Set current device
     pub async fn set_current_device(&self, id: Option<String>) {
         *self.current_device_id.write().await = id;
+    }
+
+    /// Update device name and sync to connected slave state
+    pub async fn update_device_name(&self, device_id: &str, new_name: &str) {
+        let slave_id = {
+            let mut devices = self.devices.write().await;
+            if let Some(device) = devices.iter_mut().find(|d| d.id == device_id) {
+                device.name = new_name.to_string();
+                device.slave_id
+            } else {
+                return;
+            }
+        };
+        if let Some(slave_id) = slave_id {
+            let mut slave_states = self.slave_states.write().await;
+            if let Some(slave_state) = slave_states.get_mut(&slave_id) {
+                slave_state.info.name = new_name.to_string();
+            }
+        }
+    }
+
+    /// Check if any device has DAQ running
+    pub async fn is_any_daq_running(&self) -> bool {
+        for device in self.devices.read().await.iter() {
+            if *device.daq_running.read().await {
+                return true;
+            }
+        }
+        false
     }
 
     /// Check if address already exists in any device

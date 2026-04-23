@@ -2448,7 +2448,7 @@ function expConfig() {
                 container.innerHTML = data.devices.map(function(d) {
                     return '<div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem; border-bottom:1px solid #333;">' +
                         '<span class="status-dot ' + (d.connected ? 'connected' : 'disconnected') + '"></span>' +
-                        '<input type="text" value="' + escapeHtml(d.device_name) + '" style="flex:1; font-size:0.85rem;" data-device-id="' + escapeHtml(d.device_id) + '" onblur="expRenameDevice(\'' + escapeHtml(d.device_id) + '\', this.value)">' +
+                        '<span style="flex:1; font-size:0.85rem; color:#e0e0e0;">' + escapeHtml(d.device_name) + '</span>' +
                         '<span style="color:#666; font-size:0.75rem;">' + escapeHtml(d.a2l_file || '') + '</span>' +
                         '</div>';
                 }).join('');
@@ -2465,49 +2465,9 @@ function expCloseConfig() {
 function expSaveConfig() {
     ExpState.config.mf4Pattern = document.getElementById('expMf4Pattern').value;
     ExpState.config.mf4Dir = document.getElementById('expMf4Dir').value;
-    // Apply any device renames from config inputs
-    var inputs = document.querySelectorAll('#expConfigDevices input[data-device-id]');
-    inputs.forEach(function(inp) {
-        var deviceId = inp.dataset.deviceId;
-        var newName = inp.value.trim();
-        if (newName) {
-            expRenameDevice(deviceId, newName);
-        }
-    });
     expCloseConfig();
     expToast('Configuration saved', 'success');
     expSaveStateToStorage();
-}
-
-function expRenameDevice(deviceId, newName) {
-    if (!newName.trim()) return;
-    fetch('/api/experiment/rename-slave/' + deviceId, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ name: newName.trim() }),
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-        if (data.success) {
-            var trimmed = newName.trim();
-            // Update tab variable names
-            ExpState.tabs.forEach(function(tab) {
-                tab.variables.forEach(function(v) {
-                    if (v.device_id === deviceId) v.device_name = trimmed;
-                });
-            });
-            // Update source lists so variable modal also reflects the new name
-            ExpState.allMeasurements.forEach(function(m) {
-                if (m.device_id === deviceId) m.device_name = trimmed;
-            });
-            ExpState.allCalibrations.forEach(function(c) {
-                if (c.device_id === deviceId) c.device_name = trimmed;
-            });
-            expRenderTabContent();
-            expToast('Device renamed to "' + trimmed + '"', 'success');
-        }
-    })
-    .catch(function() {});
 }
 
 // ===== Connect =====
