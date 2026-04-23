@@ -5001,7 +5001,8 @@ pub async fn experiment_dcm_export(
         }
     };
 
-    let mut entries: Vec<(CalibrationParam, CalibrationValue)> = Vec::new();
+    // entries: (param, value, axis_values) — axis_values may be empty for static axes
+    let mut entries: Vec<(CalibrationParam, CalibrationValue, Vec<Vec<f64>>)> = Vec::new();
 
     for var in &variables {
         let device_id_str = match var.get("device_id").and_then(|v| v.as_str()) {
@@ -5037,7 +5038,8 @@ pub async fn experiment_dcm_export(
                 None => continue,
             };
             drop(cal_values);
-            entries.push((param, value));
+            // axis values not cached for connected path; generate_dcm falls back to static values
+            entries.push((param, value, vec![]));
         } else {
             // Disconnected — find DeviceState and read from HEX image
             let devices = state.devices.read().await;
@@ -5054,8 +5056,9 @@ pub async fn experiment_dcm_export(
             drop(cal_manager);
             let hex_guard = device.hex_image.read().await;
             let Some(ref hex) = *hex_guard else { continue };
+            let axis_values = read_axis_values_from_hex(hex, &param);
             match read_calibration_from_hex(hex, &param) {
-                Ok(value) => entries.push((param, value)),
+                Ok(value) => entries.push((param, value, axis_values)),
                 Err(_) => continue,
             }
         }
@@ -5155,7 +5158,7 @@ fn cal_value_to_dcm_f64_matrix(value: &CalibrationValue) -> Option<Vec<Vec<f64>>
 }
 
 /// Generate the full text of a DCM (Konservierung Format 2.0) file using the `dcm_utils` crate.
-fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue)]) -> String {
+fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Vec<Vec<f64>>)]) -> String {
     use crate::a2l::CharacteristicType;
     use dcm_utils::block::Block;
     use dcm_utils::blocks::{FESTWERT, FESTWERTEBLOCK, GRUPPENKENNFELD, GRUPPENKENNLINIE};
@@ -5163,10 +5166,22 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue)]) 
 
     let mut data = DcmData::from_blocks(Default::default());
 
-    for (param, value) in entries {
+    for (param, value, preread_axes) in entries {
         let name = param.name.clone();
         let desc = param.description.clone();
         let unit = param.unit.clone().unwrap_or_default();
+
+        // Helper: get axis values — prefer pre-read (from HEX/slave), then static, then fallback
+        let get_axis = |axis_idx: usize, fallback_n: usize| -> Vec<f64> {
+            if let Some(vals) = preread_axes.get(axis_idx) {
+                if !vals.is_empty() {
+                    return vals.clone();
+                }
+            }
+            param.axis_info.get(axis_idx)
+                .and_then(|a| a.get_static_values())
+                .unwrap_or_else(|| (0..fallback_n).map(|i| i as f64).collect())
+        };
 
         let block_opt: Option<Block> = match param.characteristic_type {
             CharacteristicType::Value => cal_value_to_dcm_f64(value).map(|v| {
@@ -5176,9 +5191,7 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue)]) 
             CharacteristicType::Curve => cal_value_to_dcm_f64_array(value).map(|values| {
                 let n = values.len();
                 let axis_info = param.axis_info.first();
-                let axis = axis_info
-                    .and_then(|a| a.get_static_values())
-                    .unwrap_or_else(|| (0..n).map(|i| i as f64).collect());
+                let axis = get_axis(0, n);
                 let axis_name = axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
                 let unit_x = axis_info
                     .and_then(|a| a.unit.as_deref())
@@ -5194,12 +5207,8 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue)]) 
                 let cols = matrix.first().map(|r| r.len()).unwrap_or(0);
                 let x_axis_info = param.axis_info.first();
                 let y_axis_info = param.axis_info.get(1);
-                let x_axis = x_axis_info
-                    .and_then(|a| a.get_static_values())
-                    .unwrap_or_else(|| (0..cols).map(|i| i as f64).collect());
-                let y_axis = y_axis_info
-                    .and_then(|a| a.get_static_values())
-                    .unwrap_or_else(|| (0..rows).map(|i| i as f64).collect());
+                let x_axis = get_axis(0, cols);
+                let y_axis = get_axis(1, rows);
                 let x_name = x_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
                 let y_name = y_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
                 let unit_x = x_axis_info
@@ -5372,7 +5381,7 @@ mod tests {
 
     #[test]
     fn test_generate_dcm_scalar() {
-        let entries = vec![(scalar_param("RPM_LIMIT"), CalibrationValue::F64(5500.0))];
+        let entries = vec![(scalar_param("RPM_LIMIT"), CalibrationValue::F64(5500.0), vec![])];
         let dcm = generate_dcm("my_test", &entries);
 
         assert!(dcm.contains("KONSERVIERUNG_FORMAT 2.0"), "missing header");
@@ -5388,6 +5397,7 @@ mod tests {
         let entries = vec![(
             array_param("LOOKUP_TBL", 4),
             CalibrationValue::F64Array(vec![1.0, 2.0, 3.0, 4.0]),
+            vec![],
         )];
         let dcm = generate_dcm("test", &entries);
 
@@ -5400,6 +5410,7 @@ mod tests {
         let entries = vec![(
             curve_param("TEMP_CURVE", 3),
             CalibrationValue::F64Array(vec![10.0, 20.0, 30.0]),
+            vec![],
         )];
         let dcm = generate_dcm("test", &entries);
 
@@ -5413,6 +5424,7 @@ mod tests {
         let entries = vec![(
             map_param("PRESSURE_MAP"),
             CalibrationValue::F64Matrix(vec![vec![1.0, 2.0], vec![3.0, 4.0]]),
+            vec![],
         )];
         let dcm = generate_dcm("test", &entries);
 
@@ -5434,6 +5446,7 @@ mod tests {
         let entries = vec![(
             scalar_param("BROKEN"),
             CalibrationValue::F64Array(vec![1.0, 2.0]),
+            vec![],
         )];
         let dcm = generate_dcm("test", &entries);
         assert!(!dcm.contains("FESTWERT BROKEN"), "should skip mismatched types");
