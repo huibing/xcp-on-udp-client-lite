@@ -916,8 +916,8 @@ function compareAppendVariableRows(items, append) {
     const html = items.map(item => {
         const selected = CompareState.tempSelected.has(item.name);
         return `
-            <tr class="${selected ? 'selected' : ''}" onclick="compareToggleVariable('${encodeURIComponent(item.name)}')">
-                <td>${selected ? 'yes' : ''}</td>
+            <tr class="${selected ? 'selected' : ''}" onclick="compareToggleVariable(this,'${encodeURIComponent(item.name)}')">
+                <td>${selected ? '✓' : ''}</td>
                 <td>${escapeHtml(item.name)}</td>
                 <td>${escapeHtml(item.presence)}</td>
                 <td>${escapeHtml(item.left_type || '-')}</td>
@@ -929,14 +929,18 @@ function compareAppendVariableRows(items, append) {
     compareUpdateSelectedCount();
 }
 
-function compareToggleVariable(encodedName) {
+function compareToggleVariable(rowEl, encodedName) {
     const name = decodeURIComponent(encodedName);
     if (CompareState.tempSelected.has(name)) {
         CompareState.tempSelected.delete(name);
+        rowEl.className = '';
+        rowEl.cells[0].textContent = '';
     } else {
         CompareState.tempSelected.add(name);
+        rowEl.className = 'selected';
+        rowEl.cells[0].textContent = '✓';
     }
-    compareReloadVariables();
+    compareUpdateSelectedCount();
 }
 
 function compareMaybeLoadMoreVariables() {
