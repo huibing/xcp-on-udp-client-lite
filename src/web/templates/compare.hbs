@@ -102,6 +102,13 @@
 .compare-load-status-processing { color: #ffaa00; }
 .compare-load-status-success { color: #00ff88; }
 .compare-load-status-error { color: #ff7b72; }
+.compare-file-info {
+    font-size: 0.8rem;
+    color: #7ec8ff;
+    margin-top: 0.25rem;
+    min-height: 1rem;
+}
+.compare-file-info.warn { color: #ffa657; }
 .compare-spinner {
     display: inline-block;
     width: 13px;
@@ -493,17 +500,23 @@ function compareRenderSourceCard(session, side) {
             <div id="compareSourceA2lHex-${side}">
                 <div class="form-group">
                     <label>A2L File</label>
-                    <input type="file" id="compareA2lFile-${side}" accept=".a2l">
+                    <input type="file" id="compareA2lFile-${side}" accept=".a2l"
+                           onchange="compareShowFilePick(this,'compareFileInfo-a2l-${side}')">
+                    <div id="compareFileInfo-a2l-${side}" class="compare-file-info"></div>
                 </div>
                 <div class="form-group">
                     <label>HEX File</label>
-                    <input type="file" id="compareHexFile-${side}" accept=".hex,.s19,.ihex,.txt">
+                    <input type="file" id="compareHexFile-${side}" accept=".hex,.s19,.ihex,.txt"
+                           onchange="compareShowFilePick(this,'compareFileInfo-hex-${side}')">
+                    <div id="compareFileInfo-hex-${side}" class="compare-file-info"></div>
                 </div>
             </div>
             <div id="compareSourceDcm-${side}" class="compare-hidden">
                 <div class="form-group">
                     <label>DCM File</label>
-                    <input type="file" id="compareDcmFile-${side}" accept=".dcm,.DCM">
+                    <input type="file" id="compareDcmFile-${side}" accept=".dcm,.DCM"
+                           onchange="compareShowFilePick(this,'compareFileInfo-dcm-${side}')">
+                    <div id="compareFileInfo-dcm-${side}" class="compare-file-info"></div>
                 </div>
             </div>
             <div class="compare-upload-actions">
@@ -517,6 +530,17 @@ function compareRenderSourceCard(session, side) {
 
 function compareSyncSourceInputs() {
     ['left', 'right'].forEach(compareToggleSourceInputs);
+}
+
+function compareShowFilePick(input, infoId) {
+    const el = document.getElementById(infoId);
+    if (!el) return;
+    const file = input.files[0];
+    if (!file) { el.textContent = ''; el.className = 'compare-file-info'; return; }
+    const mb = (file.size / 1024 / 1024).toFixed(1);
+    const warn = file.size > 20 * 1024 * 1024; // warn if >20 MB
+    el.textContent = `✓ ${file.name}  (${mb} MB)${warn ? ' — large file, upload may take a moment' : ''}`;
+    el.className = `compare-file-info${warn ? ' warn' : ''}`;
 }
 
 function compareToggleSourceInputs(side) {
