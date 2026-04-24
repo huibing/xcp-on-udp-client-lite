@@ -172,6 +172,32 @@
     background: #1b284a;
     border-bottom: 1px solid #0f3460;
     border-radius: 8px 8px 0 0;
+    cursor: pointer;
+    user-select: none;
+}
+.compare-result-header:hover {
+    background: #1f3158;
+}
+.compare-result-card.collapsed .compare-result-header {
+    border-bottom: none;
+    border-radius: 8px;
+}
+.compare-result-card.collapsed .compare-merged-body {
+    display: none;
+}
+.compare-collapse-btn {
+    background: none;
+    border: none;
+    color: #8b97b8;
+    font-size: 1rem;
+    padding: 0 0.25rem;
+    cursor: pointer;
+    transition: transform 0.2s;
+    flex-shrink: 0;
+    line-height: 1;
+}
+.compare-result-card.collapsed .compare-collapse-btn {
+    transform: rotate(-90deg);
 }
 .compare-merged-body {
     padding: 1rem;
@@ -760,6 +786,10 @@ async function compareClearSource(side) {
     await compareRefreshSessions(session.id);
 }
 
+function compareToggleResultCard(headerEl) {
+    headerEl.closest('.compare-result-card').classList.toggle('collapsed');
+}
+
 async function compareRefreshResults() {
     const session = compareActiveSession();
     const container = document.getElementById('compareResults');
@@ -793,7 +823,7 @@ function compareRenderResultRow(row) {
     const badgeLabel = row.matches ? 'MATCH' : (row.presence === 'common' ? 'DIFF' : row.presence.toUpperCase());
     return `
         <div class="compare-result-card ${row.matches ? '' : 'diff'}">
-            <div class="compare-result-header">
+            <div class="compare-result-header" onclick="compareToggleResultCard(this)">
                 <div>
                     <strong>${escapeHtml(row.name)}</strong>
                     <span class="compare-legend">
@@ -801,7 +831,10 @@ function compareRenderResultRow(row) {
                         <span class="compare-legend-dot" style="background:#ffa657"></span>${escapeHtml(rightName)}
                     </span>
                 </div>
-                <span class="compare-badge ${badgeClass}">${badgeLabel}</span>
+                <div style="display:flex;align-items:center;gap:0.6rem">
+                    <span class="compare-badge ${badgeClass}">${badgeLabel}</span>
+                    <button class="compare-collapse-btn" title="Collapse / expand" onclick="event.stopPropagation();compareToggleResultCard(this.closest('.compare-result-card').querySelector('.compare-result-header'))">▼</button>
+                </div>
             </div>
             <div class="compare-merged-body">
                 ${compareRenderMergedValue(row.left, row.right, row.diff_positions || [], row.left?.axis_values || row.right?.axis_values || [])}
