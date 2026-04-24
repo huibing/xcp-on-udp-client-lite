@@ -56,6 +56,8 @@ pub enum AxisPointSource {
 pub struct AxisInfo {
     /// Input quantity name (the physical meaning of this axis)
     pub name: String,
+    /// AXIS_PTS_REF variable name (when axis points are stored in ECU memory via AXIS_PTS block)
+    pub pts_ref_name: Option<String>,
     /// Physical unit
     pub unit: Option<String>,
     /// Minimum axis value
@@ -109,6 +111,7 @@ impl AxisInfo {
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "name": &self.name,
+            "pts_ref_name": &self.pts_ref_name,
             "unit": &self.unit,
             "min": self.min,
             "max": self.max,
@@ -876,6 +879,7 @@ impl A2lReader {
         module: &a2lfile::Module,
     ) -> Option<AxisInfo> {
         let name = axis_descr.input_quantity.clone();
+        let pts_ref_name = axis_descr.axis_pts_ref.as_ref().map(|r| r.axis_points.clone());
         let num_points = axis_descr.max_axis_points as usize;
         let min = axis_descr.lower_limit;
         let max = axis_descr.upper_limit;
@@ -946,6 +950,7 @@ impl A2lReader {
         tracing::trace!("  -> Created AxisInfo for '{}'", name);
         Some(AxisInfo {
             name,
+            pts_ref_name,
             unit,
             min,
             max,
@@ -2518,6 +2523,7 @@ mod tests {
 
         let axis_info = AxisInfo {
             name: "test_axis".to_string(),
+            pts_ref_name: None,
             unit: Some("rpm".to_string()),
             min: 0.0,
             max: 1000.0,
@@ -2541,6 +2547,7 @@ mod tests {
 
         let axis_info = AxisInfo {
             name: "test_axis".to_string(),
+            pts_ref_name: None,
             unit: Some("Nm".to_string()),
             min: 100.0,
             max: 300.0,
@@ -2562,6 +2569,7 @@ mod tests {
 
         let axis_info = AxisInfo {
             name: "explicit_axis".to_string(),
+            pts_ref_name: None,
             unit: None,
             min: 0.0,
             max: 1000.0,
@@ -2586,6 +2594,7 @@ mod tests {
 
         let axis_info = AxisInfo {
             name: "memory_axis".to_string(),
+            pts_ref_name: Some("SPEED_AXIS_PTS".to_string()),
             unit: Some("deg".to_string()),
             min: -180.0,
             max: 180.0,

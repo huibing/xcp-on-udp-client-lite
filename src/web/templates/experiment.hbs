@@ -1871,7 +1871,7 @@ function expRenderInfo(detail, varType) {
                     axisRole = ' (X)';
                 }
                 html += '<tr><td colspan="2" style="padding:0.5rem; background:#2a2a2a; border:1px solid #444;">' +
-                    '<strong>Axis ' + (i + 1) + axisRole + ': ' + escapeHtml(axis.name) + '</strong>' +
+                    '<strong>Axis ' + (i + 1) + axisRole + ': ' + escapeHtml(axis.pts_ref_name || 'unnamed') + '</strong>' +
                     (axis.unit ? ' (' + escapeHtml(axis.unit) + ')' : '') +
                     '<br>Points: ' + axis.num_points + ', Range: ' + axis.min + ' ~ ' + axis.max +
                     '</td></tr>';
@@ -1937,9 +1937,12 @@ function expRenderMatrix(data) {
     // Axis info
     var axisInfoDiv = document.getElementById('expMatrixAxisInfo');
     if (axisInfo.length === 2) {
-        axisInfoDiv.innerHTML = 'X: ' + escapeHtml(axisInfo[0].name) + ' | Y: ' + escapeHtml(axisInfo[1].name);
+        var xLabel = axisInfo[0].pts_ref_name || 'unnamed';
+        var yLabel = axisInfo[1].pts_ref_name || 'unnamed';
+        axisInfoDiv.innerHTML = 'X: ' + escapeHtml(xLabel) + ' | Y: ' + escapeHtml(yLabel);
     } else if (axisInfo.length === 1) {
-        axisInfoDiv.innerHTML = 'X: ' + escapeHtml(axisInfo[0].name);
+        var xLabel = axisInfo[0].pts_ref_name || 'unnamed';
+        axisInfoDiv.innerHTML = 'X: ' + escapeHtml(xLabel);
     }
 
     // Update title with name if available
