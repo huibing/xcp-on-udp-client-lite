@@ -2130,6 +2130,7 @@ mod tests {
         // Add axis info
         let axis = crate::a2l::AxisInfo {
             name: "x_axis".to_string(),
+            pts_ref_name: None,
             unit: Some("rpm".to_string()),
             min: 0.0,
             max: 1000.0,
@@ -2165,6 +2166,7 @@ mod tests {
         // Add axis that requires memory read
         let axis = crate::a2l::AxisInfo {
             name: "memory_axis".to_string(),
+            pts_ref_name: None,
             unit: None,
             min: 0.0,
             max: 100.0,

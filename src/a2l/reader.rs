@@ -817,16 +817,20 @@ impl A2lReader {
         // Get index_mode from FNC_VALUES
         if let Some(rl) = record_layout {
             if let Some(fnc_values) = &rl.fnc_values {
+                // A2L COLUMN_DIR means "store column-by-column": for each X-column, all Y-rows are
+                // stored consecutively → flat[x * Y_count + y] → X-major → our RowDir.
+                // A2L ROW_DIR means "store row-by-row": for each Y-row, all X-columns are stored
+                // consecutively → flat[y * X_count + x] → Y-major → our ColumnDir.
                 return match fnc_values.index_mode {
-                    a2lfile::IndexMode::ColumnDir => StorageOrder::ColumnDir,
-                    a2lfile::IndexMode::RowDir => StorageOrder::RowDir,
+                    a2lfile::IndexMode::ColumnDir => StorageOrder::RowDir,
+                    a2lfile::IndexMode::RowDir => StorageOrder::ColumnDir,
                     // Other modes (ALTERNATE_*) default to RowDir
                     _ => StorageOrder::RowDir,
                 };
             }
         }
 
-        // Default to ROW_DIR
+        // Default to RowDir (X-major)
         StorageOrder::RowDir
     }
 
@@ -2179,7 +2183,7 @@ mod tests {
         assert_eq!(
             configs,
             vec![A2lTransportConfig::Udp {
-                addr: "0.0.0.0:5555".to_string(),
+                addr: "169.254.144.47:5555".to_string(),
             }]
         );
     }

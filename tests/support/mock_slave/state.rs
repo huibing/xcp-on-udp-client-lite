@@ -76,9 +76,13 @@ impl MockXcpState {
     }
 
     pub fn read_memory(&self, mta: Mta, length: usize) -> Result<Vec<u8>, String> {
-        if mta.extension == COUNTER_EXT && mta.address == COUNTER_ADDR {
-            let bytes = self.measurement_counter.to_le_bytes();
-            return Ok(bytes[..length.min(bytes.len())].to_vec());
+        if mta.extension == COUNTER_EXT {
+            if mta.address == COUNTER_ADDR {
+                let bytes = self.measurement_counter.to_le_bytes();
+                return Ok(bytes[..length.min(bytes.len())].to_vec());
+            }
+            // Other COUNTER_EXT addresses return zeros (simulating readable DAQ signals)
+            return Ok(vec![0u8; length]);
         }
 
         if mta.extension != 0 {

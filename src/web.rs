@@ -4,6 +4,8 @@
 //! Single-user access with simple session-based authentication.
 
 pub mod auth;
+pub mod calibration_data;
+pub mod compare;
 pub mod routes;
 pub mod server;
 pub mod state;

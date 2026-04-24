@@ -21,6 +21,7 @@ use crate::daq::DaqManager;
 use crate::slave::SlaveId;
 use crate::transport::TransportType;
 use crate::web::auth::{clear_session, try_create_session, verify_credentials};
+use crate::web::compare::{load_a2l_hex_source, load_dcm_source, ComparePresenceFilter, CompareSide};
 use crate::web::state::{AppState, DeviceState, SlaveState};
 use crate::web::templates;
 
@@ -132,6 +133,343 @@ pub async fn logout() -> impl IntoResponse {
         AppendHeaders([(SET_COOKIE, cookie)]),
         Redirect::to("/login"),
     )
+}
+
+async fn ensure_compare_session(state: &AppState) {
+    if state.all_compare_sessions().await.is_empty() {
+        state.create_compare_session().await;
+    }
+}
+
+/// Compare page (GET /compare)
+pub async fn compare_page(State(state): State<AppState>) -> Html<String> {
+    ensure_compare_session(&state).await;
+    let status = state.take_status().await;
+    let error = state.take_error().await;
+    let content = templates::compare_page();
+    Html(templates::page(
+        "Compare",
+        &content,
+        status.as_deref(),
+        error.as_deref(),
+    ))
+}
+
+/// Compare sessions state (GET /api/compare/sessions)
+pub async fn compare_sessions(State(state): State<AppState>) -> impl IntoResponse {
+    ensure_compare_session(&state).await;
+    let sessions = state
+        .all_compare_sessions()
+        .await
+        .into_iter()
+        .map(|session| session.to_json())
+        .collect::<Vec<_>>();
+    Json(json!({
+        "success": true,
+        "sessions": sessions,
+    }))
+}
+
+/// Create compare session (POST /api/compare/sessions)
+pub async fn compare_create_session(State(state): State<AppState>) -> impl IntoResponse {
+    let session = state.create_compare_session().await;
+    Json(json!({
+        "success": true,
+        "session": session.to_json(),
+    }))
+}
+
+/// Rename compare session (POST /api/compare/sessions/:session_id/rename)
+pub async fn compare_rename_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(name) = payload.get("name").and_then(|value| value.as_str()) else {
+        return Json(json!({
+            "success": false,
+            "error": "Missing session name",
+        }));
+    };
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Json(json!({
+            "success": false,
+            "error": "Session name cannot be empty",
+        }));
+    }
+    let Some(session) = state.rename_compare_session(&session_id, trimmed).await else {
+        return Json(json!({
+            "success": false,
+            "error": "Compare session not found",
+        }));
+    };
+    Json(json!({
+        "success": true,
+        "session": session.to_json(),
+    }))
+}
+
+/// Delete compare session (POST /api/compare/sessions/:session_id/delete)
+pub async fn compare_delete_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    if !state.delete_compare_session(&session_id).await {
+        return Json(json!({
+            "success": false,
+            "error": "Compare session not found",
+        }));
+    }
+    ensure_compare_session(&state).await;
+    Json(json!({
+        "success": true,
+    }))
+}
+
+/// Load compare source into a side of a compare session.
+/// POST /api/compare/sessions/:session_id/sources/:side/load
+pub async fn compare_load_source(
+    State(state): State<AppState>,
+    Path((session_id, side_str)): Path<(String, String)>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let side = match CompareSide::from_str(&side_str) {
+        Ok(side) => side,
+        Err(error) => {
+            return Json(json!({
+                "success": false,
+                "error": error,
+            }));
+        }
+    };
+
+    let mut source_type: Option<String> = None;
+    let mut a2l_name: Option<String> = None;
+    let mut a2l_bytes: Option<bytes::Bytes> = None;
+    let mut hex_name: Option<String> = None;
+    let mut hex_bytes: Option<bytes::Bytes> = None;
+    let mut dcm_name: Option<String> = None;
+    let mut dcm_bytes: Option<bytes::Bytes> = None;
+
+    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "source_type" => {
+                if let Ok(text) = field.text().await {
+                    source_type = Some(text);
+                }
+            }
+            "a2l_file" => {
+                if let Some(filename) = field.file_name() {
+                    a2l_name = Some(filename.to_string());
+                }
+                if let Ok(bytes) = field.bytes().await {
+                    a2l_bytes = Some(bytes);
+                }
+            }
+            "hex_file" => {
+                if let Some(filename) = field.file_name() {
+                    hex_name = Some(filename.to_string());
+                }
+                if let Ok(bytes) = field.bytes().await {
+                    hex_bytes = Some(bytes);
+                }
+            }
+            "dcm_file" => {
+                if let Some(filename) = field.file_name() {
+                    dcm_name = Some(filename.to_string());
+                }
+                if let Ok(bytes) = field.bytes().await {
+                    dcm_bytes = Some(bytes);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let source_type = source_type.unwrap_or_default();
+    let source = match source_type.as_str() {
+        "a2l_hex" => {
+            let (Some(a2l_name), Some(a2l_bytes), Some(hex_name), Some(hex_bytes)) =
+                (a2l_name, a2l_bytes, hex_name, hex_bytes)
+            else {
+                return Json(json!({
+                    "success": false,
+                    "error": "A2L + HEX source requires both files",
+                }));
+            };
+            match tokio::task::spawn_blocking(move || {
+                load_a2l_hex_source(&a2l_name, &a2l_bytes, &hex_name, &hex_bytes)
+            })
+            .await
+            {
+                Ok(Ok(source)) => source,
+                Ok(Err(error)) => {
+                    return Json(json!({
+                        "success": false,
+                        "error": error,
+                    }));
+                }
+                Err(error) => {
+                    return Json(json!({
+                        "success": false,
+                        "error": format!("Source load task failed: {}", error),
+                    }));
+                }
+            }
+        }
+        "dcm" => {
+            let (Some(dcm_name), Some(dcm_bytes)) = (dcm_name, dcm_bytes) else {
+                return Json(json!({
+                    "success": false,
+                    "error": "DCM source requires a DCM file",
+                }));
+            };
+            match tokio::task::spawn_blocking(move || load_dcm_source(&dcm_name, &dcm_bytes)).await {
+                Ok(Ok(source)) => source,
+                Ok(Err(error)) => {
+                    return Json(json!({
+                        "success": false,
+                        "error": error,
+                    }));
+                }
+                Err(error) => {
+                    return Json(json!({
+                        "success": false,
+                        "error": format!("Source load task failed: {}", error),
+                    }));
+                }
+            }
+        }
+        _ => {
+            return Json(json!({
+                "success": false,
+                "error": "Unsupported compare source type",
+            }));
+        }
+    };
+
+    let Some(session) = state.set_compare_source(&session_id, side, source).await else {
+        return Json(json!({
+            "success": false,
+            "error": "Compare session not found",
+        }));
+    };
+
+    Json(json!({
+        "success": true,
+        "session": session.to_json(),
+        "side": side.as_str(),
+    }))
+}
+
+/// Clear one compare source side.
+/// POST /api/compare/sessions/:session_id/sources/:side/clear
+pub async fn compare_clear_source(
+    State(state): State<AppState>,
+    Path((session_id, side_str)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let side = match CompareSide::from_str(&side_str) {
+        Ok(side) => side,
+        Err(error) => {
+            return Json(json!({
+                "success": false,
+                "error": error,
+            }));
+        }
+    };
+    let Some(session) = state.clear_compare_source(&session_id, side).await else {
+        return Json(json!({
+            "success": false,
+            "error": "Compare session not found",
+        }));
+    };
+    Json(json!({
+        "success": true,
+        "session": session.to_json(),
+    }))
+}
+
+/// Variable catalogue for compare picker.
+/// GET /api/compare/sessions/:session_id/variables
+pub async fn compare_variables(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(session) = state.get_compare_session(&session_id).await else {
+        return Json(json!({
+            "success": false,
+            "error": "Compare session not found",
+        }));
+    };
+    let search = params.get("search").cloned().unwrap_or_default();
+    let presence = ComparePresenceFilter::from_str(
+        params.get("presence").map_or("all", String::as_str),
+    );
+    let offset = params
+        .get("offset")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100);
+
+    Json(json!({
+        "success": true,
+        "page": session.page_variables(&search, presence, offset, limit),
+    }))
+}
+
+/// Replace selected variables for a compare session.
+/// POST /api/compare/sessions/:session_id/variables/select
+pub async fn compare_select_variables(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let names = payload
+        .get("names")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let Some(session) = state.set_compare_selected_variables(&session_id, names).await else {
+        return Json(json!({
+            "success": false,
+            "error": "Compare session not found",
+        }));
+    };
+    Json(json!({
+        "success": true,
+        "session": session.to_json(),
+    }))
+}
+
+/// Comparison result payload for a session.
+/// GET /api/compare/sessions/:session_id/result
+pub async fn compare_result(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    let Some(session) = state.get_compare_session(&session_id).await else {
+        return Json(json!({
+            "success": false,
+            "error": "Compare session not found",
+        }));
+    };
+    Json(json!({
+        "success": true,
+        "session": session.to_json(),
+        "rows": session.comparison_rows(),
+    }))
 }
 
 /// Dashboard page (GET /)
@@ -5203,12 +5541,14 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Ve
             }),
 
             CharacteristicType::Map => cal_value_to_dcm_f64_matrix(value).map(|matrix| {
-                let rows = matrix.len();
-                let cols = matrix.first().map(|r| r.len()).unwrap_or(0);
+                // matrix is CalibrationValue layout: matrix[x][y], outer = X axis, inner = Y axis
+                let x_count = matrix.len();
+                let y_count = matrix.first().map(|r| r.len()).unwrap_or(0);
                 let x_axis_info = param.axis_info.first();
                 let y_axis_info = param.axis_info.get(1);
-                let x_axis = get_axis(0, cols);
-                let y_axis = get_axis(1, rows);
+                // X axis has x_count breakpoints; Y axis has y_count breakpoints
+                let x_axis = get_axis(0, x_count);
+                let y_axis = get_axis(1, y_count);
                 let x_name = x_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
                 let y_name = y_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
                 let unit_x = x_axis_info
@@ -5219,8 +5559,18 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Ve
                     .and_then(|a| a.unit.as_deref())
                     .unwrap_or("")
                     .to_string();
+                // DCM GRUPPENKENNFELD stores data as [Y][X]: nrow=y_count rows of ncol=x_count values.
+                // Transpose from CalibrationValue [X][Y] → DCM [Y][X] so that dim=(x_count, y_count)
+                // matches the actual row/col layout written to the file.
+                let dcm_matrix: Vec<Vec<f64>> = (0..y_count)
+                    .map(|y| {
+                        (0..x_count)
+                            .map(|x| matrix.get(x).and_then(|r| r.get(y)).copied().unwrap_or(0.0))
+                            .collect()
+                    })
+                    .collect();
                 Block::Map(GRUPPENKENNFELD::from_f64(
-                    &name, matrix, x_axis, y_axis, &x_name, &y_name, &desc, &unit, &unit_x,
+                    &name, dcm_matrix, x_axis, y_axis, &x_name, &y_name, &desc, &unit, &unit_x,
                     &unit_y,
                 ))
             }),
@@ -5438,6 +5788,56 @@ mod tests {
     fn test_generate_dcm_empty() {
         let dcm = generate_dcm("empty_export", &[]);
         assert!(dcm.contains("KONSERVIERUNG_FORMAT 2.0"), "header always present");
+    }
+
+    /// Verify that a non-square MAP (X=3, Y=2) is written in DCM [Y][X] order so that
+    /// the DCM parser can read it back with correct dimensions and values.
+    #[test]
+    fn test_generate_dcm_map_roundtrip_non_square() {
+        // CalibrationValue matrix is [X][Y]: 3 X-rows × 2 Y-cols
+        // matrix[x][y]:  (0,0)=1  (0,1)=2
+        //                (1,0)=3  (1,1)=4
+        //                (2,0)=5  (2,1)=6
+        let cal_matrix = vec![vec![1.0_f64, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
+        let entries = vec![(
+            map_param("MY_MAP"),
+            CalibrationValue::F64Matrix(cal_matrix),
+            vec![],
+        )];
+        let dcm_text = generate_dcm("roundtrip", &entries);
+
+        // Header must declare dim_x=3 (X=ncol), dim_y=2 (Y=nrow)
+        assert!(
+            dcm_text.contains("GRUPPENKENNFELD MY_MAP 3 2"),
+            "header must be 'GRUPPENKENNFELD MY_MAP 3 2', got:\n{dcm_text}",
+        );
+
+        // Exactly 2 WERT rows (one per Y breakpoint), each with 3 values (one per X breakpoint).
+        // DCM [Y][X] layout after transpose:
+        //   row Y=0: [1, 3, 5]   (x=0→1, x=1→3, x=2→5)
+        //   row Y=1: [2, 4, 6]   (x=0→2, x=1→4, x=2→6)
+        let wert_lines: Vec<&str> = dcm_text
+            .lines()
+            .filter(|l| l.trim_start().starts_with("WERT"))
+            .collect();
+        assert_eq!(wert_lines.len(), 2, "must have exactly 2 WERT lines (nrow=y_count=2)");
+
+        let parse_wert = |line: &str| -> Vec<f64> {
+            line.split_whitespace()
+                .skip(1) // skip "WERT"
+                .map(|s| s.parse::<f64>().expect("f64 value"))
+                .collect()
+        };
+
+        let row0 = parse_wert(wert_lines[0]);
+        let row1 = parse_wert(wert_lines[1]);
+        assert_eq!(row0.len(), 3, "each WERT row must have 3 values (ncol=x_count=3)");
+        assert_eq!(row1.len(), 3);
+
+        // Y=0 row: x=0→1, x=1→3, x=2→5
+        assert_eq!(row0, vec![1.0, 3.0, 5.0], "Y=0 WERT row mismatch");
+        // Y=1 row: x=0→2, x=1→4, x=2→6
+        assert_eq!(row1, vec![2.0, 4.0, 6.0], "Y=1 WERT row mismatch");
     }
 
     #[test]

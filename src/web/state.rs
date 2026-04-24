@@ -11,6 +11,7 @@ use crate::daq::DaqManager;
 use crate::hex::HexImage;
 use crate::slave::{PageMode, SlaveId, SlaveInfo};
 use crate::transport::TransportType;
+use crate::web::compare::{CompareSession, CompareSide, CompareSource};
 use crate::variable::{DeviceVariable, VariableSearchManager};
 use crate::web::templates::TemplateEngine;
 use crate::XcpClient;
@@ -251,6 +252,8 @@ pub struct AppState {
     pub current_device_id: Arc<RwLock<Option<String>>>,
     /// Whether an experiment is currently active (DAQ running from experiment page)
     pub experiment_active: Arc<RwLock<bool>>,
+    /// In-memory calibration compare sessions
+    pub compare_sessions: Arc<RwLock<Vec<CompareSession>>>,
 }
 
 impl AppState {
@@ -271,6 +274,7 @@ impl AppState {
             devices: Arc::new(RwLock::new(Vec::new())),
             current_device_id: Arc::new(RwLock::new(None)),
             experiment_active: Arc::new(RwLock::new(false)),
+            compare_sessions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -518,6 +522,98 @@ impl AppState {
             .filter(|d| d.connected)
             .count()
     }
+
+    pub async fn all_compare_sessions(&self) -> Vec<CompareSession> {
+        self.compare_sessions.read().await.clone()
+    }
+
+    pub async fn get_compare_session(&self, id: &str) -> Option<CompareSession> {
+        self.compare_sessions
+            .read()
+            .await
+            .iter()
+            .find(|session| session.id == id)
+            .cloned()
+    }
+
+    pub async fn create_compare_session(&self) -> CompareSession {
+        let mut sessions = self.compare_sessions.write().await;
+        let session = CompareSession::new(sessions.len() + 1);
+        sessions.push(session.clone());
+        session
+    }
+
+    pub async fn rename_compare_session(
+        &self,
+        id: &str,
+        new_name: &str,
+    ) -> Option<CompareSession> {
+        let mut sessions = self.compare_sessions.write().await;
+        let session = sessions.iter_mut().find(|session| session.id == id)?;
+        session.name = new_name.trim().to_string();
+        Some(session.clone())
+    }
+
+    pub async fn delete_compare_session(&self, id: &str) -> bool {
+        let mut sessions = self.compare_sessions.write().await;
+        let before = sessions.len();
+        sessions.retain(|session| session.id != id);
+        before != sessions.len()
+    }
+
+    pub async fn set_compare_source(
+        &self,
+        id: &str,
+        side: CompareSide,
+        source: CompareSource,
+    ) -> Option<CompareSession> {
+        let mut sessions = self.compare_sessions.write().await;
+        let session = sessions.iter_mut().find(|session| session.id == id)?;
+        *session.source_mut(side) = Some(source);
+        session.selected_variables.retain(|name| {
+            session
+                .left_source
+                .as_ref()
+                .map_or(false, |source| source.variables.contains_key(name))
+                || session
+                    .right_source
+                    .as_ref()
+                    .map_or(false, |source| source.variables.contains_key(name))
+        });
+        Some(session.clone())
+    }
+
+    pub async fn clear_compare_source(
+        &self,
+        id: &str,
+        side: CompareSide,
+    ) -> Option<CompareSession> {
+        let mut sessions = self.compare_sessions.write().await;
+        let session = sessions.iter_mut().find(|session| session.id == id)?;
+        *session.source_mut(side) = None;
+        session.selected_variables.retain(|name| {
+            session
+                .left_source
+                .as_ref()
+                .map_or(false, |source| source.variables.contains_key(name))
+                || session
+                    .right_source
+                    .as_ref()
+                    .map_or(false, |source| source.variables.contains_key(name))
+        });
+        Some(session.clone())
+    }
+
+    pub async fn set_compare_selected_variables(
+        &self,
+        id: &str,
+        names: Vec<String>,
+    ) -> Option<CompareSession> {
+        let mut sessions = self.compare_sessions.write().await;
+        let session = sessions.iter_mut().find(|session| session.id == id)?;
+        session.selected_variables = names;
+        Some(session.clone())
+    }
 }
 
 #[cfg(test)]
@@ -599,5 +695,33 @@ mod tests {
             .expect_err("unavailable requested protocol should error");
 
         assert!(err.contains("TCP"));
+    }
+
+    #[tokio::test]
+    async fn test_compare_session_lifecycle() {
+        let state = AppState::new(
+            XcpClient::new(),
+            CalibrationManager::new(),
+            DaqManager::new(),
+            String::new(),
+        );
+
+        let session = state.create_compare_session().await;
+        assert_eq!(state.all_compare_sessions().await.len(), 1);
+
+        let renamed = state
+            .rename_compare_session(&session.id, "Baseline")
+            .await
+            .unwrap();
+        assert_eq!(renamed.name, "Baseline");
+
+        let updated = state
+            .set_compare_selected_variables(&session.id, vec!["VAR_A".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(updated.selected_variables, vec!["VAR_A".to_string()]);
+
+        assert!(state.delete_compare_session(&session.id).await);
+        assert!(state.all_compare_sessions().await.is_empty());
     }
 }

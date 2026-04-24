@@ -87,6 +87,7 @@ impl TemplateEngine {
             "active_calibration": title == "Calibration",
             "active_daq": title == "DAQ",
             "active_a2l": title == "A2L",
+            "active_compare": title == "Compare",
         });
 
         self.render("base", &base_data)
@@ -412,6 +413,11 @@ impl TemplateEngine {
         self.render("experiment", &json!({}))
     }
 
+    /// Render compare page
+    pub fn compare_page(&self) -> String {
+        self.render("compare", &json!({}))
+    }
+
     /// Render experiment help page
     pub fn experiment_help_page(&self) -> String {
         self.render("experiment_help", &json!({}))
@@ -443,6 +449,7 @@ pub fn page(title: &str, content: &str, status: Option<&str>, error: Option<&str
         "active_daq": title == "DAQ",
         "active_a2l": title == "A2L",
         "active_checksum": title == "Checksum",
+        "active_compare": title == "Compare",
         "active_experiment": title == "Experiment",
     });
     engine.render("base", &data)
@@ -555,6 +562,12 @@ pub fn a2l_page(
 pub fn experiment_page() -> String {
     let engine = TemplateEngine::new();
     engine.experiment_page()
+}
+
+/// Render compare page
+pub fn compare_page() -> String {
+    let engine = TemplateEngine::new();
+    engine.compare_page()
 }
 
 /// Render experiment help page

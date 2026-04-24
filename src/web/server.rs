@@ -60,6 +60,37 @@ impl WebServer {
             // Protected routes
             .route("/", get(routes::dashboard))
             .route("/logout", get(routes::logout))
+            .route("/compare", get(routes::compare_page))
+            .route("/api/compare/sessions", get(routes::compare_sessions))
+            .route("/api/compare/sessions", post(routes::compare_create_session))
+            .route(
+                "/api/compare/sessions/:session_id/rename",
+                post(routes::compare_rename_session),
+            )
+            .route(
+                "/api/compare/sessions/:session_id/delete",
+                post(routes::compare_delete_session),
+            )
+            .route(
+                "/api/compare/sessions/:session_id/sources/:side/load",
+                post(routes::compare_load_source),
+            )
+            .route(
+                "/api/compare/sessions/:session_id/sources/:side/clear",
+                post(routes::compare_clear_source),
+            )
+            .route(
+                "/api/compare/sessions/:session_id/variables",
+                get(routes::compare_variables),
+            )
+            .route(
+                "/api/compare/sessions/:session_id/variables/select",
+                post(routes::compare_select_variables),
+            )
+            .route(
+                "/api/compare/sessions/:session_id/result",
+                get(routes::compare_result),
+            )
             // Slave management
             .route("/slaves", get(routes::slaves_page))
             // Device management
