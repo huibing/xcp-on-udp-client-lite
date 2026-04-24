@@ -25,18 +25,6 @@
         {{/if}}
     </div>
     <div class="card">
-        <h2>DAQ Status</h2>
-        <p>{{#if daq_running}}<span class="tag running">Running</span>{{else}}<span class="tag stopped">Stopped</span>{{/if}}</p>
-        <br>
-        <div class="btn-group">
-            {{#if daq_running}}
-            <button onclick="location.href='/api/daq/stop'" class="danger">Stop DAQ</button>
-            {{else}}
-            <button onclick="location.href='/api/daq/start'">Start DAQ</button>
-            {{/if}}
-        </div>
-    </div>
-    <div class="card">
         <h2>Summary</h2>
         <p><span class="tag connected">{{connected_count}}</span> connected</p>
         <p>{{total_cal}} calibration parameters</p>
