@@ -109,6 +109,25 @@
     min-height: 1rem;
 }
 .compare-file-info.warn { color: #ffa657; }
+.compare-drop-zone {
+    border: 2px dashed #2a3f5f;
+    border-radius: 8px;
+    padding: 0.6rem 0.75rem;
+    margin-bottom: 0.5rem;
+    transition: border-color 0.2s, background 0.2s;
+}
+.compare-drop-zone.dragover {
+    border-color: #58a6ff;
+    background: rgba(88, 166, 255, 0.07);
+}
+.compare-drop-hint {
+    font-size: 0.75rem;
+    color: #4a6e96;
+    text-align: center;
+    margin-bottom: 0.4rem;
+    pointer-events: none;
+    user-select: none;
+}
 .compare-spinner {
     display: inline-block;
     width: 13px;
@@ -497,7 +516,12 @@ function compareRenderSourceCard(session, side) {
                     <option value="dcm" ${selectedType === 'dcm' ? 'selected' : ''}>DCM</option>
                 </select>
             </div>
-            <div id="compareSourceA2lHex-${side}">
+            <div id="compareSourceA2lHex-${side}"
+                 class="compare-drop-zone"
+                 ondragover="compareDragOver(event,'${side}')"
+                 ondragleave="compareDragLeave(event,'${side}')"
+                 ondrop="compareDropFiles(event,'${side}','a2l_hex')">
+                <div class="compare-drop-hint">⬇ Drop A2L + HEX files here, or browse below</div>
                 <div class="form-group">
                     <label>A2L File</label>
                     <input type="file" id="compareA2lFile-${side}" accept=".a2l"
@@ -511,7 +535,11 @@ function compareRenderSourceCard(session, side) {
                     <div id="compareFileInfo-hex-${side}" class="compare-file-info"></div>
                 </div>
             </div>
-            <div id="compareSourceDcm-${side}" class="compare-hidden">
+            <div id="compareSourceDcm-${side}" class="compare-hidden compare-drop-zone"
+                 ondragover="compareDragOver(event,'${side}')"
+                 ondragleave="compareDragLeave(event,'${side}')"
+                 ondrop="compareDropFiles(event,'${side}','dcm')">
+                <div class="compare-drop-hint">⬇ Drop DCM file here, or browse below</div>
                 <div class="form-group">
                     <label>DCM File</label>
                     <input type="file" id="compareDcmFile-${side}" accept=".dcm,.DCM"
@@ -543,7 +571,56 @@ function compareShowFilePick(input, infoId) {
     el.className = `compare-file-info${warn ? ' warn' : ''}`;
 }
 
-function compareToggleSourceInputs(side) {
+function compareDragOver(event, side) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    // Find the actual drop zone element (may bubble up from child)
+    const zone = event.currentTarget;
+    if (zone) zone.classList.add('dragover');
+}
+
+function compareDragLeave(event, side) {
+    // Only remove highlight when leaving the zone itself, not a child
+    const zone = event.currentTarget;
+    if (zone && !zone.contains(event.relatedTarget)) {
+        zone.classList.remove('dragover');
+    }
+}
+
+function compareSetFileInput(inputId, file, infoId) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    try {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+    } catch (_) { /* DataTransfer not supported; file won't show in native input */ }
+    compareShowFilePick(input, infoId);
+}
+
+function compareDropFiles(event, side, zoneType) {
+    event.preventDefault();
+    const zone = event.currentTarget;
+    if (zone) zone.classList.remove('dragover');
+    const files = Array.from(event.dataTransfer.files);
+    if (zoneType === 'a2l_hex') {
+        files.forEach(file => {
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (ext === 'a2l') {
+                compareSetFileInput(`compareA2lFile-${side}`, file, `compareFileInfo-a2l-${side}`);
+            } else if (['hex', 's19', 'ihex', 'mot', 'srec', 'txt'].includes(ext)) {
+                compareSetFileInput(`compareHexFile-${side}`, file, `compareFileInfo-hex-${side}`);
+            }
+        });
+    } else if (zoneType === 'dcm') {
+        const dcmFile = files.find(f => /\.dcm$/i.test(f.name));
+        if (dcmFile) {
+            compareSetFileInput(`compareDcmFile-${side}`, dcmFile, `compareFileInfo-dcm-${side}`);
+        }
+    }
+}
+
+
     const sourceType = document.getElementById(`compareSourceType-${side}`).value;
     document.getElementById(`compareSourceA2lHex-${side}`).classList.toggle('compare-hidden', sourceType !== 'a2l_hex');
     document.getElementById(`compareSourceDcm-${side}`).classList.toggle('compare-hidden', sourceType !== 'dcm');
