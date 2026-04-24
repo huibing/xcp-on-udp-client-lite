@@ -620,7 +620,7 @@ function compareDropFiles(event, side, zoneType) {
     }
 }
 
-
+function compareToggleSourceInputs(side) {
     const sourceType = document.getElementById(`compareSourceType-${side}`).value;
     document.getElementById(`compareSourceA2lHex-${side}`).classList.toggle('compare-hidden', sourceType !== 'a2l_hex');
     document.getElementById(`compareSourceDcm-${side}`).classList.toggle('compare-hidden', sourceType !== 'dcm');
