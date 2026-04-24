@@ -23,11 +23,6 @@
         {{else}}
             <p style="color: #666;">No slaves connected</p>
         {{/if}}
-        <br>
-        <button onclick="location.href='/connect'">Connect New Slave</button>
-        {{#if has_multiple_slaves}}
-        <br><button class="secondary" onclick="location.href='/slaves'">Manage Slaves</button>
-        {{/if}}
     </div>
     <div class="card">
         <h2>DAQ Status</h2>
@@ -46,5 +41,16 @@
         <p><span class="tag connected">{{connected_count}}</span> connected</p>
         <p>{{total_cal}} calibration parameters</p>
         <p>{{total_meas}} measurements</p>
+    </div>
+    <div class="card">
+        <h2>Quick Access</h2>
+        <div class="btn-group" style="flex-direction: column; gap: 0.75rem;">
+            <a href="/slaves" style="display: block; text-align: center; padding: 0.75rem 1.5rem; background: #0f3460; color: #eee; text-decoration: none; border-radius: 4px; font-weight: bold;">
+                🖧 Slave Manage
+            </a>
+            <a href="/experiment" style="display: block; text-align: center; padding: 0.75rem 1.5rem; background: #00ff88; color: #1a1a2e; text-decoration: none; border-radius: 4px; font-weight: bold;">
+                🔬 Experiment
+            </a>
+        </div>
     </div>
 </div>

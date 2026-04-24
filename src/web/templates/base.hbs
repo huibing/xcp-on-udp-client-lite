@@ -233,8 +233,6 @@
         <nav class="nav">
             <a href="/" {{#if active_dashboard}}class="active"{{/if}}>Dashboard</a>
             <a href="/slaves" {{#if active_slaves}}class="active"{{/if}} data-daq-guard="true">Slaves</a>
-            <a href="/calibration" {{#if active_calibration}}class="active"{{/if}}>Calibration</a>
-            <a href="/daq" {{#if active_daq}}class="active"{{/if}}>DAQ</a>
             <a href="/experiment" {{#if active_experiment}}class="active"{{/if}}>Experiment</a>
             <a href="/logout" onclick="clearLocalStorage()">Logout</a>
         </nav>
