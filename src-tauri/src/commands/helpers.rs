@@ -1,0 +1,602 @@
+/// Shared helper functions ported from src/web/routes.rs.
+/// Used by calibration, a2l, and other command modules.
+
+use serde_json::{json, Value};
+use xcp_client::a2l::{A2lCharacteristic, A2lDataType, A2lMeasurement, A2lReader, AxisPointSource};
+use xcp_client::calibration::{CalibrationParam, CalibrationType, CalibrationValue};
+use xcp_client::daq::Measurement;
+use xcp_client::protocol::Mta;
+use xcp_client::slave::XcpSlave;
+
+// ─── Byte → CalibrationValue ──────────────────────────────────────────────────
+
+pub fn bytes_to_calibration_value(
+    data: &[u8],
+    cal_type: &CalibrationType,
+) -> Result<CalibrationValue, String> {
+    let value = match cal_type {
+        CalibrationType::U8 => CalibrationValue::U8(data[0]),
+        CalibrationType::U16 => CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]])),
+        CalibrationType::U32 => CalibrationValue::U32(u32::from_le_bytes([
+            data[0], data[1], data[2], data[3],
+        ])),
+        CalibrationType::U64 => CalibrationValue::U64(u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ])),
+        CalibrationType::I8 => CalibrationValue::I8(data[0] as i8),
+        CalibrationType::I16 => CalibrationValue::I16(i16::from_le_bytes([data[0], data[1]])),
+        CalibrationType::I32 => CalibrationValue::I32(i32::from_le_bytes([
+            data[0], data[1], data[2], data[3],
+        ])),
+        CalibrationType::I64 => CalibrationValue::I64(i64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ])),
+        CalibrationType::F32 => CalibrationValue::F32(f32::from_le_bytes([
+            data[0], data[1], data[2], data[3],
+        ])),
+        CalibrationType::F64 => CalibrationValue::F64(f64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ])),
+        CalibrationType::Bool => CalibrationValue::Bool(data[0] != 0),
+        // Array types
+        CalibrationType::U8Array(_) => CalibrationValue::U8Array(data.to_vec()),
+        CalibrationType::U16Array(_) => CalibrationValue::U16Array(
+            data.chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect(),
+        ),
+        CalibrationType::U32Array(_) => CalibrationValue::U32Array(
+            data.chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ),
+        CalibrationType::U64Array(_) => CalibrationValue::U64Array(
+            data.chunks_exact(8)
+                .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect(),
+        ),
+        CalibrationType::I8Array(_) => {
+            CalibrationValue::I8Array(data.iter().map(|&v| v as i8).collect())
+        }
+        CalibrationType::I16Array(_) => CalibrationValue::I16Array(
+            data.chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .collect(),
+        ),
+        CalibrationType::I32Array(_) => CalibrationValue::I32Array(
+            data.chunks_exact(4)
+                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ),
+        CalibrationType::I64Array(_) => CalibrationValue::I64Array(
+            data.chunks_exact(8)
+                .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect(),
+        ),
+        CalibrationType::F32Array(_) => CalibrationValue::F32Array(
+            data.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ),
+        CalibrationType::F64Array(_) => CalibrationValue::F64Array(
+            data.chunks_exact(8)
+                .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect(),
+        ),
+        CalibrationType::BoolArray(_) => {
+            CalibrationValue::BoolArray(data.iter().map(|&v| v != 0).collect())
+        }
+        // Matrix types (row-major)
+        CalibrationType::U8Matrix(_, cols) => {
+            CalibrationValue::U8Matrix(data.chunks_exact(*cols).map(|c| c.to_vec()).collect())
+        }
+        CalibrationType::U16Matrix(_, cols) => CalibrationValue::U16Matrix(
+            data.chunks_exact(cols * 2)
+                .map(|row| {
+                    row.chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .collect()
+                })
+                .collect(),
+        ),
+        CalibrationType::U32Matrix(_, cols) => CalibrationValue::U32Matrix(
+            data.chunks_exact(cols * 4)
+                .map(|row| {
+                    row.chunks_exact(4)
+                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect()
+                })
+                .collect(),
+        ),
+        CalibrationType::U64Matrix(_, cols) => CalibrationValue::U64Matrix(
+            data.chunks_exact(cols * 8)
+                .map(|row| {
+                    row.chunks_exact(8)
+                        .map(|c| {
+                            u64::from_le_bytes([
+                                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                            ])
+                        })
+                        .collect()
+                })
+                .collect(),
+        ),
+        CalibrationType::I8Matrix(_, cols) => CalibrationValue::I8Matrix(
+            data.chunks_exact(*cols)
+                .map(|row| row.iter().map(|&v| v as i8).collect())
+                .collect(),
+        ),
+        CalibrationType::I16Matrix(_, cols) => CalibrationValue::I16Matrix(
+            data.chunks_exact(cols * 2)
+                .map(|row| {
+                    row.chunks_exact(2)
+                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .collect()
+                })
+                .collect(),
+        ),
+        CalibrationType::I32Matrix(_, cols) => CalibrationValue::I32Matrix(
+            data.chunks_exact(cols * 4)
+                .map(|row| {
+                    row.chunks_exact(4)
+                        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect()
+                })
+                .collect(),
+        ),
+        CalibrationType::I64Matrix(_, cols) => CalibrationValue::I64Matrix(
+            data.chunks_exact(cols * 8)
+                .map(|row| {
+                    row.chunks_exact(8)
+                        .map(|c| {
+                            i64::from_le_bytes([
+                                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                            ])
+                        })
+                        .collect()
+                })
+                .collect(),
+        ),
+        CalibrationType::F32Matrix(_, cols) => CalibrationValue::F32Matrix(
+            data.chunks_exact(cols * 4)
+                .map(|row| {
+                    row.chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect()
+                })
+                .collect(),
+        ),
+        CalibrationType::F64Matrix(_, cols) => CalibrationValue::F64Matrix(
+            data.chunks_exact(cols * 8)
+                .map(|row| {
+                    row.chunks_exact(8)
+                        .map(|c| {
+                            f64::from_le_bytes([
+                                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                            ])
+                        })
+                        .collect()
+                })
+                .collect(),
+        ),
+        CalibrationType::BoolMatrix(_, cols) => CalibrationValue::BoolMatrix(
+            data.chunks_exact(*cols)
+                .map(|row| row.iter().map(|&v| v != 0).collect())
+                .collect(),
+        ),
+    };
+    Ok(value)
+}
+
+// ─── XCP slave read ───────────────────────────────────────────────────────────
+
+pub async fn read_calibration_from_slave(
+    slave: &XcpSlave,
+    param: &CalibrationParam,
+) -> Result<CalibrationValue, String> {
+    let size = param.data_type.size();
+    if size == 0 {
+        return Err(format!(
+            "Invalid parameter size (0 bytes) for '{}'",
+            param.name
+        ));
+    }
+    let mta = Mta::new(param.address, param.address_ext);
+    let data = slave
+        .read_large_data(mta, size, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    if data.len() != size {
+        return Err(format!(
+            "Data length mismatch: expected {} bytes, got {} for '{}'",
+            size,
+            data.len(),
+            param.name
+        ));
+    }
+    bytes_to_calibration_value(&data, &param.data_type)
+}
+
+// ─── XCP slave write ──────────────────────────────────────────────────────────
+
+pub async fn write_calibration_to_slave(
+    slave: &XcpSlave,
+    param: &CalibrationParam,
+    value: &CalibrationValue,
+) -> Result<(), String> {
+    let mta = Mta::new(param.address, param.address_ext);
+    let data: Vec<u8> = match (value, &param.data_type) {
+        (CalibrationValue::U8(v), CalibrationType::U8) => vec![*v],
+        (CalibrationValue::U16(v), CalibrationType::U16) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::U32(v), CalibrationType::U32) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::U64(v), CalibrationType::U64) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::I8(v), CalibrationType::I8) => vec![*v as u8],
+        (CalibrationValue::I16(v), CalibrationType::I16) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::I32(v), CalibrationType::I32) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::I64(v), CalibrationType::I64) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::F32(v), CalibrationType::F32) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::F64(v), CalibrationType::F64) => v.to_le_bytes().to_vec(),
+        (CalibrationValue::Bool(v), CalibrationType::Bool) => vec![if *v { 1 } else { 0 }],
+        (CalibrationValue::U8Array(arr), CalibrationType::U8Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::U16Array(arr), CalibrationType::U16Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::U32Array(arr), CalibrationType::U32Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::U64Array(arr), CalibrationType::U64Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I8Array(arr), CalibrationType::I8Array(_)) => {
+            arr.iter().map(|v| *v as u8).collect()
+        }
+        (CalibrationValue::I16Array(arr), CalibrationType::I16Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I32Array(arr), CalibrationType::I32Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I64Array(arr), CalibrationType::I64Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::F32Array(arr), CalibrationType::F32Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::F64Array(arr), CalibrationType::F64Array(_)) => {
+            arr.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::BoolArray(arr), CalibrationType::BoolArray(_)) => {
+            arr.iter().map(|v| if *v { 1u8 } else { 0u8 }).collect()
+        }
+        (CalibrationValue::U8Matrix(mat), CalibrationType::U8Matrix(_, _)) => {
+            mat.iter().flat_map(|row| row.iter().copied()).collect()
+        }
+        (CalibrationValue::U16Matrix(mat), CalibrationType::U16Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::U32Matrix(mat), CalibrationType::U32Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::U64Matrix(mat), CalibrationType::U64Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::I8Matrix(mat), CalibrationType::I8Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().map(|v| *v as u8))
+            .collect(),
+        (CalibrationValue::I16Matrix(mat), CalibrationType::I16Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::I32Matrix(mat), CalibrationType::I32Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::I64Matrix(mat), CalibrationType::I64Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::F32Matrix(mat), CalibrationType::F32Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::F64Matrix(mat), CalibrationType::F64Matrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
+            .collect(),
+        (CalibrationValue::BoolMatrix(mat), CalibrationType::BoolMatrix(_, _)) => mat
+            .iter()
+            .flat_map(|row| row.iter().map(|v| if *v { 1u8 } else { 0u8 }))
+            .collect(),
+        _ => return Err(format!("Value/type mismatch for '{}'", param.name)),
+    };
+
+    if data.len() <= 255 {
+        slave
+            .write_memory_sequential(mta, &data)
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        slave
+            .write_u8_array_sequential(mta, &data)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+// ─── Axis reading ─────────────────────────────────────────────────────────────
+
+pub async fn read_axis_values_from_slave(
+    slave: &XcpSlave,
+    param: &CalibrationParam,
+) -> Vec<Vec<f64>> {
+    let mut result = Vec::new();
+    for axis in &param.axis_info {
+        if let Some(values) = axis.get_static_values() {
+            result.push(values);
+            continue;
+        }
+        if let AxisPointSource::Memory {
+            address,
+            address_ext,
+            data_type,
+            num_points,
+        } = &axis.point_source
+        {
+            let element_size = scalar_data_type_size(data_type);
+            let total_size = element_size * num_points;
+            let mta = Mta::new(*address, *address_ext);
+            match slave.read_large_data(mta, total_size, None).await {
+                Ok(data) => result.push(parse_axis_values(&data, data_type, *num_points)),
+                Err(e) => {
+                    tracing::warn!("Failed to read axis for '{}': {}", axis.name, e);
+                    result.push((0..*num_points).map(|i| i as f64).collect());
+                }
+            }
+        } else {
+            result.push((0..axis.num_points).map(|i| i as f64).collect());
+        }
+    }
+    result
+}
+
+fn scalar_data_type_size(dt: &A2lDataType) -> usize {
+    match dt {
+        A2lDataType::U8 | A2lDataType::I8 | A2lDataType::Bool => 1,
+        A2lDataType::U16 | A2lDataType::I16 => 2,
+        A2lDataType::U32 | A2lDataType::I32 | A2lDataType::F32 => 4,
+        A2lDataType::U64 | A2lDataType::I64 | A2lDataType::F64 => 8,
+        _ => 4,
+    }
+}
+
+pub fn parse_axis_values(data: &[u8], data_type: &A2lDataType, num_points: usize) -> Vec<f64> {
+    let element_size = scalar_data_type_size(data_type);
+    let mut values = Vec::with_capacity(num_points);
+    for i in 0..num_points {
+        let offset = i * element_size;
+        if offset + element_size > data.len() {
+            values.push(i as f64);
+            continue;
+        }
+        let slice = &data[offset..offset + element_size];
+        let val = match data_type {
+            A2lDataType::U8 | A2lDataType::U8Array(_) => slice[0] as f64,
+            A2lDataType::I8 | A2lDataType::I8Array(_) => slice[0] as i8 as f64,
+            A2lDataType::U16 | A2lDataType::U16Array(_) => {
+                u16::from_le_bytes([slice[0], slice[1]]) as f64
+            }
+            A2lDataType::I16 | A2lDataType::I16Array(_) => {
+                i16::from_le_bytes([slice[0], slice[1]]) as f64
+            }
+            A2lDataType::U32 | A2lDataType::U32Array(_) => {
+                u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64
+            }
+            A2lDataType::I32 | A2lDataType::I32Array(_) => {
+                i32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64
+            }
+            A2lDataType::F32 | A2lDataType::F32Array(_) => {
+                f32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64
+            }
+            A2lDataType::U64 | A2lDataType::U64Array(_) => u64::from_le_bytes([
+                slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+            ]) as f64,
+            A2lDataType::I64 | A2lDataType::I64Array(_) => i64::from_le_bytes([
+                slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+            ]) as f64,
+            A2lDataType::F64 | A2lDataType::F64Array(_) => f64::from_le_bytes([
+                slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+            ]),
+            _ => i as f64,
+        };
+        values.push(val);
+    }
+    values
+}
+
+// ─── A2L conversion helpers ───────────────────────────────────────────────────
+
+pub fn convert_characteristic(
+    ch: A2lCharacteristic,
+    reader: &A2lReader,
+) -> Option<CalibrationParam> {
+    let data_type = match ch.data_type {
+        A2lDataType::U8 => CalibrationType::U8,
+        A2lDataType::U16 => CalibrationType::U16,
+        A2lDataType::U32 => CalibrationType::U32,
+        A2lDataType::U64 => CalibrationType::U64,
+        A2lDataType::I8 => CalibrationType::I8,
+        A2lDataType::I16 => CalibrationType::I16,
+        A2lDataType::I32 => CalibrationType::I32,
+        A2lDataType::I64 => CalibrationType::I64,
+        A2lDataType::F32 => CalibrationType::F32,
+        A2lDataType::F64 => CalibrationType::F64,
+        A2lDataType::Bool => CalibrationType::Bool,
+        A2lDataType::U8Array(n) => CalibrationType::U8Array(n),
+        A2lDataType::U16Array(n) => CalibrationType::U16Array(n),
+        A2lDataType::U32Array(n) => CalibrationType::U32Array(n),
+        A2lDataType::U64Array(n) => CalibrationType::U64Array(n),
+        A2lDataType::I8Array(n) => CalibrationType::I8Array(n),
+        A2lDataType::I16Array(n) => CalibrationType::I16Array(n),
+        A2lDataType::I32Array(n) => CalibrationType::I32Array(n),
+        A2lDataType::I64Array(n) => CalibrationType::I64Array(n),
+        A2lDataType::F32Array(n) => CalibrationType::F32Array(n),
+        A2lDataType::F64Array(n) => CalibrationType::F64Array(n),
+        A2lDataType::BoolArray(n) => CalibrationType::BoolArray(n),
+        A2lDataType::U8Matrix(r, c) => CalibrationType::U8Matrix(r, c),
+        A2lDataType::U16Matrix(r, c) => CalibrationType::U16Matrix(r, c),
+        A2lDataType::U32Matrix(r, c) => CalibrationType::U32Matrix(r, c),
+        A2lDataType::U64Matrix(r, c) => CalibrationType::U64Matrix(r, c),
+        A2lDataType::I8Matrix(r, c) => CalibrationType::I8Matrix(r, c),
+        A2lDataType::I16Matrix(r, c) => CalibrationType::I16Matrix(r, c),
+        A2lDataType::I32Matrix(r, c) => CalibrationType::I32Matrix(r, c),
+        A2lDataType::I64Matrix(r, c) => CalibrationType::I64Matrix(r, c),
+        A2lDataType::F32Matrix(r, c) => CalibrationType::F32Matrix(r, c),
+        A2lDataType::F64Matrix(r, c) => CalibrationType::F64Matrix(r, c),
+        A2lDataType::BoolMatrix(r, c) => CalibrationType::BoolMatrix(r, c),
+    };
+
+    let mut param = CalibrationParam::new(&ch.name, ch.address, ch.address_ext, data_type)
+        .with_description(&ch.description)
+        .with_range(ch.min, ch.max);
+
+    if let Some(unit) = ch.unit {
+        param = param.with_unit(&unit);
+    }
+    param.characteristic_type = ch.characteristic_type;
+    param.axis_info = ch.axis_info;
+    param.storage_order = ch.storage_order;
+    param.compu_method = reader.get_compu_method(&ch.conversion_name);
+
+    Some(param)
+}
+
+pub fn convert_measurement(m: A2lMeasurement, reader: &A2lReader) -> Option<Measurement> {
+    Some(Measurement::with_type(
+        &m.name,
+        m.address,
+        m.address_ext,
+        m.data_type,
+        m.unit,
+        reader.get_compu_method(&m.conversion_name),
+    ))
+}
+
+// ─── CalibrationValue → JSON ──────────────────────────────────────────────────
+
+pub fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -> Value {
+    match value {
+        CalibrationValue::U8(v) => json!([*v]),
+        CalibrationValue::U16(v) => json!([*v]),
+        CalibrationValue::U32(v) => json!([*v]),
+        CalibrationValue::U64(v) => json!([*v]),
+        CalibrationValue::I8(v) => json!([*v]),
+        CalibrationValue::I16(v) => json!([*v]),
+        CalibrationValue::I32(v) => json!([*v]),
+        CalibrationValue::I64(v) => json!([*v]),
+        CalibrationValue::F32(v) => json!([format!("{:.6}", v)]),
+        CalibrationValue::F64(v) => json!([format!("{:.6}", v)]),
+        CalibrationValue::Bool(v) => json!([*v]),
+        CalibrationValue::U8Array(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::U16Array(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::U32Array(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::U64Array(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::I8Array(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::I16Array(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::I32Array(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::I64Array(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::F32Array(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(format!("{:.6}", v))).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::F64Array(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(format!("{:.6}", v))).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::BoolArray(arr) => {
+            let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
+            if is_1d { json!(items) } else { json!([items]) }
+        }
+        CalibrationValue::U8Matrix(mat) => json!(mat
+            .iter()
+            .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()),
+        CalibrationValue::U16Matrix(mat) => json!(mat
+            .iter()
+            .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()),
+        CalibrationValue::U32Matrix(mat) => json!(mat
+            .iter()
+            .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()),
+        CalibrationValue::U64Matrix(mat) => json!(mat
+            .iter()
+            .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()),
+        CalibrationValue::I8Matrix(mat) => json!(mat
+            .iter()
+            .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()),
+        CalibrationValue::I16Matrix(mat) => json!(mat
+            .iter()
+            .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()),
+        CalibrationValue::I32Matrix(mat) => json!(mat
+            .iter()
+            .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()),
+        CalibrationValue::I64Matrix(mat) => json!(mat
+            .iter()
+            .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()),
+        CalibrationValue::F32Matrix(mat) => json!(mat
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|v| json!(format!("{:.6}", v)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()),
+        CalibrationValue::F64Matrix(mat) => json!(mat
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|v| json!(format!("{:.6}", v)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()),
+        CalibrationValue::BoolMatrix(mat) => json!(mat
+            .iter()
+            .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()),
+    }
+}

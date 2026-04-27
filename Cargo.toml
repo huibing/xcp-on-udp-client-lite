@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "src-tauri"]
+resolver = "2"
+
 [package]
 name = "xcp_client"
 version = "0.1.0"

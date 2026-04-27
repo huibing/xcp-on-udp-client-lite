@@ -639,6 +639,10 @@ impl DaqManager {
         &self.mdf4_path
     }
 
+    pub fn get_csv_path(&self) -> &Path {
+        &self.csv_path
+    }
+
     /// Set the CSV output file path
     pub fn set_csv_path<P: Into<PathBuf>>(&mut self, path: P) {
         self.csv_path = path.into();

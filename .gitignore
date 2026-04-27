@@ -33,3 +33,7 @@ web_test/node_modules/
 web_test/screenshots/
 
 *.pdf
+
+# Vue/Vite frontend
+ui/node_modules/
+ui/dist/
