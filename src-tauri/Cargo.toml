@@ -30,3 +30,4 @@ uuid = { version = "1", features = ["v4"] }
 futures = "0.3"
 toml = "0.8"
 chrono = { version = "0.4", features = ["clock"] }
+dcm_utils = { git = "https://github.com/huibing/dcm_utils.git" }

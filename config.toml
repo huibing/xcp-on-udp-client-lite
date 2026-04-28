@@ -1,0 +1,18 @@
+a2l = "zc-blanc_rear_c-target-xcp.a2l"
+
+[connection]
+addr = "172.20.10.9:5555"
+
+[daq]
+event_channel = 0
+
+[[events]]
+channel = 0
+measurements = ["g_xcp_recv_cmd"]
+
+[[events]]
+channel = 1
+measurements = ["CDCInput_VehSpd", "CDCInput_VehM", "CDCInput_BrkP", "CDCInput_BdyYawRate", "CDCInput_BdyYawRatea"]
+
+[output]
+mf4 = "./records/recording1.mf4"

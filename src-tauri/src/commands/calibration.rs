@@ -6,10 +6,11 @@ use serde_json::{json, Value};
 use tauri::State;
 use xcp_client::calibration::CalibrationValue;
 use xcp_client::slave::PageMode;
+use xcp_client::CharacteristicType;
 
 use crate::commands::helpers::{
-    calibration_value_to_json, read_axis_values_from_slave, read_calibration_from_slave,
-    write_calibration_to_slave,
+    bytes_to_calibration_value, calibration_value_to_json, read_axis_values_from_hex,
+    read_axis_values_from_slave, read_calibration_from_slave, write_calibration_to_slave,
 };
 use crate::state::SharedState;
 
@@ -45,45 +46,104 @@ pub async fn cal_read(
     idx: usize,
 ) -> Result<Value, String> {
     // Get slave arc and param clone without holding state lock during XCP I/O
-    let (slave_arc, param, dev_id) = {
+    let (slave_arc_opt, param, hex_image_opt, dev_id) = {
         let app = state.read().await;
         let dev = app
             .get_device(&device_id)
             .ok_or_else(|| format!("Device '{}' not found", device_id))?;
-        if !dev.connected {
-            return Ok(json!({ "success": false, "error": "Device not connected" }));
-        }
-        let sid = dev.slave_id.ok_or_else(|| "No slave ID".to_string())?;
-        let slave_arc = app
-            .client
-            .get_slave(sid)
-            .ok_or_else(|| "Slave not found".to_string())?;
         let mgr = dev.cal_manager.read().await;
         let param = mgr
             .params()
             .get(idx)
             .ok_or_else(|| format!("Parameter index {} out of range", idx))?
             .clone();
-        (slave_arc, param, dev.id.clone())
+
+        if dev.connected {
+            let sid = dev.slave_id.ok_or_else(|| "No slave ID".to_string())?;
+            let slave_arc = app
+                .client
+                .get_slave(sid)
+                .ok_or_else(|| "Slave not found".to_string())?;
+            (Some(slave_arc), param, None, dev.id.clone())
+        } else {
+            // Offline: try to read from HEX image
+            let hex_image = dev.hex_image.read().await.clone();
+            (None, param, hex_image, dev.id.clone())
+        }
     };
 
-    let xcp_guard = slave_arc.lock().await;
-    let value = read_calibration_from_slave(&*xcp_guard, &param).await?;
+    // Online path: read via XCP
+    if let Some(slave_arc) = slave_arc_opt {
+        let xcp_guard = slave_arc.lock().await;
+        let value = read_calibration_from_slave(&*xcp_guard, &param).await?;
 
-    // Cache the value
-    {
-        let app = state.read().await;
-        if let Some(dev) = app.get_device(&dev_id) {
-            let mut cache = dev.cal_values.write().await;
-            cache.insert(param.name.clone(), value.clone());
+        // Cache the value
+        {
+            let app = state.read().await;
+            if let Some(dev) = app.get_device(&dev_id) {
+                let mut cache = dev.cal_values.write().await;
+                cache.insert(param.name.clone(), value.clone());
+            }
         }
+
+        let is_enum = param.is_enum();
+        let display_value: Option<String> = if is_enum {
+            cal_value_to_raw_i64(&value).map(|raw| param.format_value(raw))
+        } else {
+            None
+        };
+        return Ok(json!({
+            "success": true,
+            "name": param.name,
+            "value": value.format(),
+            "value_data": calibration_value_to_json(&value, param.characteristic_type == CharacteristicType::Curve),
+            "is_enum": is_enum,
+            "display_value": display_value,
+            "source": "xcp",
+        }));
     }
 
-    Ok(json!({
-        "success": true,
-        "name": param.name,
-        "value": value.format(),
-    }))
+    // Offline path: read from HEX image
+    if let Some(hex_image) = hex_image_opt {
+        let size = param.data_type.size() as u32;
+        if size == 0 {
+            return Ok(json!({ "success": false, "error": "Unknown parameter size" }));
+        }
+        let bytes = hex_image.extract_range(param.address, size, 0xFF);
+        // Check if any non-fill bytes exist (i.e., address is populated in HEX)
+        if bytes.iter().all(|&b| b == 0xFF) && !hex_image.has_data_in_range(param.address, size) {
+            return Ok(json!({ "success": false, "error": "Address not found in HEX file" }));
+        }
+        let value = bytes_to_calibration_value(&bytes, &param.data_type)
+            .map_err(|e| format!("Decode error: {}", e))?;
+
+        // Cache the value
+        {
+            let app = state.read().await;
+            if let Some(dev) = app.get_device(&dev_id) {
+                let mut cache = dev.cal_values.write().await;
+                cache.insert(param.name.clone(), value.clone());
+            }
+        }
+
+        let is_enum = param.is_enum();
+        let display_value: Option<String> = if is_enum {
+            cal_value_to_raw_i64(&value).map(|raw| param.format_value(raw))
+        } else {
+            None
+        };
+        return Ok(json!({
+            "success": true,
+            "name": param.name,
+            "value": value.format(),
+            "value_data": calibration_value_to_json(&value, param.characteristic_type == CharacteristicType::Curve),
+            "is_enum": is_enum,
+            "display_value": display_value,
+            "source": "hex",
+        }));
+    }
+
+    Ok(json!({ "success": false, "error": "Device not connected and no HEX file loaded" }))
 }
 
 /// Write a calibration parameter to the XCP slave.
@@ -117,7 +177,24 @@ pub async fn cal_write(
         (slave_arc, param)
     };
 
-    let cal_value = parse_json_value_to_cal(&param.data_type, &value)?;
+    let cal_value = if param.is_enum() {
+        // Convert enum display text → raw integer via compu_method before parsing
+        let text = match &value {
+            Value::String(s) => s.clone(),
+            Value::Array(arr) => arr
+                .get(0)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            _ => value.to_string().trim_matches('"').to_string(),
+        };
+        match param.parse_display(&text) {
+            Ok(raw) => parse_json_value_to_cal(&param.data_type, &Value::from(raw))?,
+            Err(_) => parse_json_value_to_cal(&param.data_type, &value)?,
+        }
+    } else {
+        parse_json_value_to_cal(&param.data_type, &value)?
+    };
     let xcp_guard = slave_arc.lock().await;
     write_calibration_to_slave(&*xcp_guard, &param, &cal_value).await?;
 
@@ -206,7 +283,7 @@ pub async fn cal_detail(
     device_id: String,
     idx: usize,
 ) -> Result<Value, String> {
-    let (slave_arc_opt, param, is_connected) = {
+    let (slave_arc_opt, param, is_connected, hex_opt) = {
         let app = state.read().await;
         let dev = app
             .get_device(&device_id)
@@ -218,10 +295,11 @@ pub async fn cal_detail(
             .get(idx)
             .ok_or_else(|| format!("Parameter index {} out of range", idx))?
             .clone();
-        (slave_arc_opt, param, dev.connected)
+        let hex_opt = dev.hex_image.read().await.clone();
+        (slave_arc_opt, param, dev.connected, hex_opt)
     };
 
-    // Read axis values if connected
+    // Read axis breakpoint values: from slave if connected, hex if available, else indices
     let axis_values: Vec<Vec<f64>> = if is_connected {
         if let Some(arc) = slave_arc_opt {
             let guard = arc.lock().await;
@@ -229,19 +307,30 @@ pub async fn cal_detail(
         } else {
             vec![]
         }
+    } else if let Some(hex) = &hex_opt {
+        read_axis_values_from_hex(hex, &param)
     } else {
+        // Static A2L values only (fixed-axis); fall back to indices
         param
             .axis_info
             .iter()
-            .filter_map(|a| a.get_static_values())
+            .map(|a| {
+                a.get_static_values()
+                    .unwrap_or_else(|| (0..a.num_points).map(|i| i as f64).collect())
+            })
             .collect()
     };
 
+    // Always emit one entry per axis_info (don't lose metadata when values are short)
     let axis_json: Vec<Value> = param
         .axis_info
         .iter()
-        .zip(axis_values.iter())
-        .map(|(info, vals)| {
+        .enumerate()
+        .map(|(i, info)| {
+            let vals = axis_values.get(i).cloned().unwrap_or_else(|| {
+                info.get_static_values()
+                    .unwrap_or_else(|| (0..info.num_points).map(|j| j as f64).collect())
+            });
             json!({
                 "name": info.name,
                 "unit": info.unit,
@@ -489,4 +578,20 @@ fn scalar_from_raw(
         CalibrationType::Bool => CalibrationValue::Bool(raw != 0),
         other => return Err(format!("Expected scalar type, got {:?}", other)),
     })
+}
+
+/// Extract the underlying raw i64 from a scalar CalibrationValue (for enum display).
+fn cal_value_to_raw_i64(value: &CalibrationValue) -> Option<i64> {
+    match value {
+        CalibrationValue::U8(v) => Some(*v as i64),
+        CalibrationValue::U16(v) => Some(*v as i64),
+        CalibrationValue::U32(v) => Some(*v as i64),
+        CalibrationValue::U64(v) => Some(*v as i64),
+        CalibrationValue::I8(v) => Some(*v as i64),
+        CalibrationValue::I16(v) => Some(*v as i64),
+        CalibrationValue::I32(v) => Some(*v as i64),
+        CalibrationValue::I64(v) => Some(*v),
+        CalibrationValue::Bool(v) => Some(*v as i64),
+        _ => None,
+    }
 }

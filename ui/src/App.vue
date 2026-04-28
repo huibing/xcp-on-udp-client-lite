@@ -4,13 +4,10 @@
       <div class="brand">XCP Client</div>
       <router-link to="/">Dashboard</router-link>
       <router-link to="/devices">Devices</router-link>
-      <router-link to="/calibration">Calibration</router-link>
-      <router-link to="/daq">DAQ</router-link>
       <router-link to="/experiment">Experiment</router-link>
-      <router-link to="/checksum">Checksum</router-link>
       <router-link to="/compare">Compare</router-link>
     </nav>
-    <main class="content">
+    <main class="content" :class="{ 'content-flush': $route.path === '/experiment' }">
       <router-view />
     </main>
   </div>
@@ -25,4 +22,5 @@ body { background: #0a0a0a; color: #00cc44; font-family: 'Consolas', 'Courier Ne
 .sidebar a { color: #00aa33; text-decoration: none; padding: 8px 16px; display: block; }
 .sidebar a:hover, .sidebar a.router-link-active { background: #001a09; color: #00ff66; }
 .content { flex: 1; overflow: auto; padding: 24px; }
+.content.content-flush { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
 </style>

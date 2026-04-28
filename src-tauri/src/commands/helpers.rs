@@ -421,6 +421,35 @@ pub fn parse_axis_values(data: &[u8], data_type: &A2lDataType, num_points: usize
 
 // ─── A2L conversion helpers ───────────────────────────────────────────────────
 
+/// Read axis breakpoint values from a HEX image (offline mode).
+/// Falls back to static A2L values first, then reads from memory, then uses indices.
+pub fn read_axis_values_from_hex(
+    hex: &xcp_client::hex::HexImage,
+    param: &CalibrationParam,
+) -> Vec<Vec<f64>> {
+    let mut result = Vec::new();
+    for axis in &param.axis_info {
+        if let Some(values) = axis.get_static_values() {
+            result.push(values);
+            continue;
+        }
+        if let AxisPointSource::Memory {
+            address,
+            data_type,
+            num_points,
+            ..
+        } = &axis.point_source
+        {
+            let element_size = scalar_data_type_size(data_type);
+            let raw = hex.extract_range(*address, (element_size * *num_points) as u32, 0xFF);
+            result.push(parse_axis_values(&raw, data_type, *num_points));
+        } else {
+            result.push((0..axis.num_points).map(|i| i as f64).collect());
+        }
+    }
+    result
+}
+
 pub fn convert_characteristic(
     ch: A2lCharacteristic,
     reader: &A2lReader,

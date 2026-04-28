@@ -157,7 +157,7 @@ function setMsg(text, err = false) {
 
 async function loadSessions() {
   try {
-    const r = await invoke('compare_list_sessions')
+    const r = await invoke('compare_sessions')
     sessions.value = r.sessions ?? []
   } catch (e) { setMsg(String(e), true) }
 }
@@ -173,11 +173,10 @@ async function captureSession() {
   if (!captureName.value || captureDevices.value.length === 0) return
   capturing.value = true
   try {
-    await invoke('compare_capture_session', {
-      name: captureName.value,
-      deviceIds: captureDevices.value
+    await invoke('compare_create_session', {
+      name: captureName.value
     })
-    setMsg(`Session captured: ${captureName.value}`)
+    setMsg(`Session created: ${captureName.value}`)
     showCapture.value = false
     captureName.value = ''
     captureDevices.value = []
@@ -197,29 +196,11 @@ async function deleteSession(id) {
 }
 
 async function runCompare() {
-  if (!sessionA.value || !sessionB.value) return
-  comparing.value = true; diffs.value = []; compared.value = false
-  try {
-    const r = await invoke('compare_sessions', {
-      sessionA: sessionA.value,
-      sessionB: sessionB.value
-    })
-    diffs.value = r.diffs ?? []
-    compared.value = true
-  } catch (e) { setMsg(String(e), true) }
-  finally { comparing.value = false }
+  setMsg('Compare action is not wired to the current desktop backend yet', true)
 }
 
 async function exportSession(id) {
-  try {
-    const r = await invoke('compare_export', { sessionId: id })
-    const blob = new Blob([r.csv], { type: 'text/csv' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    const name = sessionName(id) || id
-    a.href = url; a.download = `compare_${name}.csv`; a.click()
-    URL.revokeObjectURL(url)
-  } catch (e) { setMsg(String(e), true) }
+  setMsg(`Export for session '${sessionName(id) || id}' is not wired to the current desktop backend yet`, true)
 }
 
 onMounted(async () => { await loadSessions(); await loadDevices() })

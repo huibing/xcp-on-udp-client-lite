@@ -24,6 +24,8 @@ pub async fn experiment_variables(state: State<'_, SharedState>) -> Result<Value
         let device_name = dev.display_name();
         let connected = dev.connected;
 
+        let config_device_id = dev.id.clone();
+
         let daq_mgr = dev.daq_manager.read().await;
         for (i, m) in daq_mgr.all_measurements().iter().enumerate() {
             let enum_options: Vec<Value> = m
@@ -37,6 +39,7 @@ pub async fn experiment_variables(state: State<'_, SharedState>) -> Result<Value
                 .unwrap_or_default();
             measurements.push(json!({
                 "device_id": device_id,
+                "config_device_id": config_device_id,
                 "device_name": device_name,
                 "idx": i,
                 "name": m.name,
@@ -51,7 +54,9 @@ pub async fn experiment_variables(state: State<'_, SharedState>) -> Result<Value
 
         let cal_mgr = dev.cal_manager.read().await;
         for (i, p) in cal_mgr.params().iter().enumerate() {
-            calibrations.push(p.to_json(&device_id, &device_name, i, connected));
+            let mut cal_json = p.to_json(&device_id, &device_name, i, connected);
+            cal_json["config_device_id"] = Value::String(config_device_id.clone());
+            calibrations.push(cal_json);
         }
     }
 
@@ -570,13 +575,221 @@ pub async fn experiment_cal_changed(state: State<'_, SharedState>) -> Result<Val
     Ok(json!({ "success": true, "devices": device_results }))
 }
 
-/// DCM export is not supported in the desktop app (use file save dialog separately).
+/// DCM export: collect changed calibration values and write to a user-specified file.
+///
+/// `config` shape: `{ "path": "/abs/path/to/export.dcm", "title": "...", "device_ids": ["config_dev_id", ...] }`
+/// If `device_ids` is omitted, exports all connected devices.
+/// Only parameters with a cached value are exported.
 #[tauri::command]
 pub async fn experiment_dcm_export(
-    _state: State<'_, SharedState>,
-    _config: Value,
+    state: State<'_, SharedState>,
+    config: Value,
 ) -> Result<Value, String> {
-    Err("DCM export is not yet supported in the desktop app".to_string())
+    use xcp_client::a2l::CharacteristicType;
+    use xcp_client::calibration::CalibrationValue;
+    use dcm_utils::{write_dcm_data, DcmData};
+    use dcm_utils::block::Block;
+    use dcm_utils::blocks::{FESTWERT, FESTWERTEBLOCK, GRUPPENKENNFELD, GRUPPENKENNLINIE};
+
+    let path = config
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing 'path' field".to_string())?
+        .to_string();
+
+    let title = config
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("export")
+        .to_string();
+
+    let filter_ids: Option<Vec<String>> = config
+        .get("device_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+
+    // Optional per-variable filter: [{device_id, name}]
+    // If provided, only export those specific variables.
+    let filter_vars: Option<Vec<(String, String)>> = config
+        .get("variables")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let did = entry.get("device_id")?.as_str()?.to_string();
+                    let name = entry.get("name")?.as_str()?.to_string();
+                    Some((did, name))
+                })
+                .collect()
+        });
+
+    let app = state.read().await;
+
+    let mut data = DcmData::from_blocks(Default::default());
+    let mut exported = 0usize;
+
+    for dev in &app.devices {
+        if let Some(ref ids) = filter_ids {
+            if !ids.contains(&dev.id) {
+                continue;
+            }
+        }
+
+        let cal_mgr = dev.cal_manager.read().await;
+        let cal_cache = dev.cal_values.read().await;
+
+        for (idx, param) in cal_mgr.params().iter().enumerate() {
+            let _ = idx;
+            // If per-variable filter is set, skip params not in the selection
+            if let Some(ref fvars) = filter_vars {
+                let did = dev.id.as_str();
+                if !fvars.iter().any(|(d, n)| d == did && n == &param.name) {
+                    continue;
+                }
+            }
+            let value = match cal_cache.get(&param.name) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+
+            let name = param.name.clone();
+            let desc = param.description.clone();
+            let unit = param.unit.clone().unwrap_or_default();
+
+            let get_axis = |axis_idx: usize, fallback_n: usize| -> Vec<f64> {
+                param.axis_info
+                    .get(axis_idx)
+                    .and_then(|a| a.get_static_values())
+                    .unwrap_or_else(|| (0..fallback_n).map(|i| i as f64).collect())
+            };
+
+            let block_opt: Option<Block> = match param.characteristic_type {
+                CharacteristicType::Value => dcm_f64(&value).map(|v| {
+                    Block::Constant(FESTWERT::from_f64(name.clone(), v, desc.clone(), unit.clone()))
+                }),
+
+                CharacteristicType::Curve => dcm_f64_array(&value).map(|values| {
+                    let n = values.len();
+                    let axis_info = param.axis_info.first();
+                    let axis = get_axis(0, n);
+                    let axis_name = axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
+                    let unit_x = axis_info.and_then(|a| a.unit.as_deref()).unwrap_or("").to_string();
+                    Block::Table(GRUPPENKENNLINIE::from_f64(
+                        &name, &values, &desc, &unit, &unit_x, &axis_name, &axis,
+                    ))
+                }),
+
+                CharacteristicType::Map => dcm_f64_matrix(&value).map(|matrix| {
+                    let x_count = matrix.len();
+                    let y_count = matrix.first().map(|r| r.len()).unwrap_or(0);
+                    let x_axis_info = param.axis_info.first();
+                    let y_axis_info = param.axis_info.get(1);
+                    let x_axis = get_axis(0, x_count);
+                    let y_axis = get_axis(1, y_count);
+                    let x_name = x_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
+                    let y_name = y_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
+                    let unit_x = x_axis_info.and_then(|a| a.unit.as_deref()).unwrap_or("").to_string();
+                    let unit_y = y_axis_info.and_then(|a| a.unit.as_deref()).unwrap_or("").to_string();
+                    let dcm_matrix: Vec<Vec<f64>> = (0..y_count)
+                        .map(|y| (0..x_count).map(|x| matrix.get(x).and_then(|r| r.get(y)).copied().unwrap_or(0.0)).collect())
+                        .collect();
+                    Block::Map(GRUPPENKENNFELD::from_f64(
+                        &name, dcm_matrix, x_axis, y_axis, &x_name, &y_name, &desc, &unit, &unit_x, &unit_y,
+                    ))
+                }),
+
+                CharacteristicType::ValBlk => {
+                    let flat = dcm_f64_array(&value).or_else(|| {
+                        dcm_f64_matrix(&value).map(|m| m.into_iter().flatten().collect())
+                    });
+                    flat.map(|values| {
+                        Block::ConstantBlock(FESTWERTEBLOCK::from_f64(name.clone(), values, desc.clone(), unit.clone()))
+                    })
+                }
+            };
+
+            if let Some(block) = block_opt {
+                data.insert_block(block);
+                exported += 1;
+            }
+        }
+    }
+
+    drop(app);
+
+    if exported == 0 {
+        return Ok(json!({ "success": false, "error": "No cached calibration values to export. Read calibration values first." }));
+    }
+
+    #[cfg(debug_assertions)]
+    let _ = std::fs::create_dir_all("./output");
+
+    let path_buf = std::path::PathBuf::from(&path);
+    write_dcm_data(&data, &path_buf);
+
+    Ok(json!({
+        "success": true,
+        "message": format!("Exported {} parameter(s) to '{}'", exported, title),
+        "path": path,
+        "count": exported,
+    }))
+}
+
+fn dcm_f64(value: &xcp_client::calibration::CalibrationValue) -> Option<f64> {
+    use xcp_client::calibration::CalibrationValue;
+    match value {
+        CalibrationValue::U8(v) => Some(*v as f64),
+        CalibrationValue::U16(v) => Some(*v as f64),
+        CalibrationValue::U32(v) => Some(*v as f64),
+        CalibrationValue::U64(v) => Some(*v as f64),
+        CalibrationValue::I8(v) => Some(*v as f64),
+        CalibrationValue::I16(v) => Some(*v as f64),
+        CalibrationValue::I32(v) => Some(*v as f64),
+        CalibrationValue::I64(v) => Some(*v as f64),
+        CalibrationValue::F32(v) => Some(*v as f64),
+        CalibrationValue::F64(v) => Some(*v),
+        CalibrationValue::Bool(v) => Some(if *v { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+fn dcm_f64_array(value: &xcp_client::calibration::CalibrationValue) -> Option<Vec<f64>> {
+    use xcp_client::calibration::CalibrationValue;
+    match value {
+        CalibrationValue::U8Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::U16Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::U32Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::U64Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::I8Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::I16Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::I32Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::I64Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::F32Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
+        CalibrationValue::F64Array(a) => Some(a.clone()),
+        CalibrationValue::BoolArray(a) => Some(a.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect()),
+        _ => None,
+    }
+}
+
+fn dcm_f64_matrix(value: &xcp_client::calibration::CalibrationValue) -> Option<Vec<Vec<f64>>> {
+    use xcp_client::calibration::CalibrationValue;
+    macro_rules! to_f64_matrix {
+        ($m:expr) => { Some($m.iter().map(|r| r.iter().map(|v| *v as f64).collect()).collect()) };
+    }
+    match value {
+        CalibrationValue::U8Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::U16Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::U32Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::U64Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::I8Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::I16Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::I32Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::I64Matrix(m) => to_f64_matrix!(m),
+        CalibrationValue::F32Matrix(m) => Some(m.iter().map(|r| r.iter().map(|v| *v as f64).collect()).collect()),
+        CalibrationValue::F64Matrix(m) => Some(m.clone()),
+        CalibrationValue::BoolMatrix(m) => Some(m.iter().map(|r| r.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect()).collect()),
+        _ => None,
+    }
 }
 
 /// Write a calibration value during an experiment (also snapshots original if not stored).
@@ -794,4 +1007,22 @@ fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect()
+}
+
+// ─── File I/O helpers for experiment save/load ───────────────────────────────
+
+/// Write a text string to a file at the given absolute path.
+#[tauri::command]
+pub async fn write_text_file(path: String, content: String) -> Result<Value, String> {
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| format!("Failed to write '{}': {}", path, e))?;
+    Ok(json!({ "success": true, "path": path }))
+}
+
+/// Read a text file from the given absolute path and return its contents.
+#[tauri::command]
+pub async fn read_text_file(path: String) -> Result<Value, String> {
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read '{}': {}", path, e))?;
+    Ok(json!({ "success": true, "content": content }))
 }

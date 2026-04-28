@@ -85,7 +85,7 @@ async function connectDevice(id) {
   loading.value = id
   try {
     const r = await invoke('connect_device', { deviceId: id })
-    if (r.ok) { await refresh(); setMsg('Connected') }
+    if (r.success) { await refresh(); setMsg(r.message || 'Connected') }
     else setMsg('Connection failed', true)
   } catch (e) { setMsg(String(e), true) }
   finally { loading.value = '' }
@@ -104,8 +104,7 @@ async function connectAll() {
   loading.value = 'all'
   try {
     const r = await invoke('connect_all_devices')
-    const ok = (r.results ?? []).filter(x => !x.error).length
-    setMsg(`Connected ${ok}/${(r.results ?? []).length} devices`)
+    setMsg(r.message || `Connected ${r.connected ?? 0} devices`, !r.success)
     await refresh()
   } catch (e) { setMsg(String(e), true) }
   finally { loading.value = '' }
@@ -114,7 +113,10 @@ async function connectAll() {
 async function disconnectAll() {
   loading.value = 'all'
   try {
-    await invoke('disconnect_all_devices')
+    const connected = devices.value.filter(d => d.connected)
+    for (const device of connected) {
+      await invoke('disconnect_device', { deviceId: device.id })
+    }
     await refresh(); setMsg('All devices disconnected')
   } catch (e) { setMsg(String(e), true) }
   finally { loading.value = '' }

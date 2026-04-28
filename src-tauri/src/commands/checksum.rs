@@ -34,13 +34,24 @@ pub async fn hex_load(
     let byte_count = hex_image.total_bytes();
 
     // Store in device state
-    let app = state.read().await;
-    let dev = app
-        .get_device(&device_id)
-        .ok_or_else(|| format!("Device '{}' not found", device_id))?;
-    *dev.hex_image.write().await = Some(hex_image);
-    *dev.hex_filename.write().await = Some(fname.clone());
-    *dev.checksum_report.write().await = None;
+    {
+        let app = state.read().await;
+        let dev = app
+            .get_device(&device_id)
+            .ok_or_else(|| format!("Device '{}' not found", device_id))?;
+        *dev.hex_image.write().await = Some(hex_image);
+        *dev.hex_filename.write().await = Some(fname.clone());
+        *dev.checksum_report.write().await = None;
+    }
+
+    {
+        let mut app = state.write().await;
+        let dev = app
+            .get_device_mut(&device_id)
+            .ok_or_else(|| format!("Device '{}' not found", device_id))?;
+        dev.hex_path = file_path.clone();
+        app.save_config()?;
+    }
 
     Ok(json!({
         "success": true,

@@ -74,6 +74,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 
 const connectedDevices = ref([])
 const selectedDevice = ref('')
@@ -106,13 +107,15 @@ async function loadDevices() {
 
 async function browseHex() {
   try {
-    const r = await invoke('open_file_dialog', {
+    const path = await open({
+      multiple: false,
+      directory: false,
       title: 'Select HEX File',
       filters: [{ name: 'HEX Files', extensions: ['hex', 'HEX'] }]
     })
-    if (r.path) {
-      hexPath.value = r.path
-      hexFilename.value = r.path.split('\\').pop() || r.path.split('/').pop() || r.path
+    if (path) {
+      hexPath.value = path
+      hexFilename.value = path.split('\\').pop() || path.split('/').pop() || path
       hexLoaded.value = false
       results.value = []
     }
@@ -125,14 +128,15 @@ async function loadHex() {
   hexLoaded.value = false
   results.value = []
   try {
-    const r = await invoke('load_hex_file', { deviceId: selectedDevice.value, filePath: hexPath.value })
-    if (r.ok) {
+    const r = await invoke('hex_load', { deviceId: selectedDevice.value, filePath: hexPath.value })
+    if (r.success) {
       hexLoaded.value = true
-      sectionCount.value = r.section_count ?? 0
-      setMsg(`HEX loaded: ${sectionCount.value} section(s)`)
+      sectionCount.value = r.byte_count ?? 0
+      hexFilename.value = r.filename ?? hexFilename.value
+      setMsg(r.message || `HEX loaded: ${sectionCount.value} bytes`)
       if (autoVerify.value) await verify()
     } else {
-      setMsg('Failed to load HEX', true)
+      setMsg(r.error || 'Failed to load HEX', true)
     }
   } catch (e) { setMsg(String(e), true) }
   finally { loading.value = false }
@@ -143,8 +147,15 @@ async function verify() {
   verifying.value = true
   results.value = []
   try {
-    const r = await invoke('verify_checksum', { deviceId: selectedDevice.value })
-    results.value = r.results ?? []
+    const r = await invoke('checksum_verify', { deviceId: selectedDevice.value })
+    results.value = (r.segments ?? []).map(s => ({
+      name: s.name,
+      address: s.address,
+      size: s.size,
+      expected: s.master_checksum,
+      actual: s.slave_checksum,
+      match: s.match
+    }))
   } catch (e) { setMsg(String(e), true) }
   finally { verifying.value = false }
 }

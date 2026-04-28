@@ -201,11 +201,18 @@ async function onDeviceChange() {
 async function loadMeasurements() {
   if (!selectedDevice.value) return
   try {
-    const r = await invoke('daq_available', { deviceId: selectedDevice.value })
-    allMeasurements.value = r.measurements ?? []
+    const r = await invoke('daq_available')
+    allMeasurements.value = (r.measurements ?? [])
+      .filter(m => m.device_id === selectedDevice.value)
+      .map(m => ({
+        ...m,
+        data_type: m.data_type ?? m.type,
+        event_channel: m.event_channel ?? '—'
+      }))
     try {
-      const st = await invoke('daq_status', { deviceId: selectedDevice.value })
-      running.value = st.running; recording.value = st.recording
+      const st = await invoke('daq_status')
+      const deviceStatus = (st.devices ?? []).find(d => d.device_id === selectedDevice.value)
+      running.value = !!deviceStatus?.running
     } catch { }
   } catch (e) { setMsg(String(e), true) }
 }
@@ -213,7 +220,7 @@ async function loadMeasurements() {
 async function start() {
   loading.value = true
   try {
-    await invoke('daq_start', { deviceId: selectedDevice.value, intervalMs: 100 })
+    await invoke('daq_start', { deviceId: selectedDevice.value })
     running.value = true; startElapsed()
   } catch (e) { setMsg(String(e), true) }
   finally { loading.value = false }
@@ -242,7 +249,7 @@ async function removeMeasurement(idx) {
 
 async function startRecording() {
   try {
-    await invoke('daq_start_recording', { deviceId: selectedDevice.value, filename: csvFilename.value })
+    await invoke('daq_start_recording', { deviceId: selectedDevice.value, config: { filename: csvFilename.value } })
     recording.value = true
   } catch (e) { setMsg(String(e), true) }
 }
@@ -256,8 +263,8 @@ async function stopRecording() {
 
 async function downloadCSV() {
   try {
-    const r = await invoke('daq_download_csv', { deviceId: selectedDevice.value })
-    const blob = new Blob([r.csv], { type: 'text/csv' })
+    const csv = await invoke('daq_download_csv', { deviceId: selectedDevice.value })
+    const blob = new Blob([csv], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url; a.download = csvFilename.value; a.click()
@@ -289,7 +296,7 @@ async function applyAdd() {
   if (!selectedDevice.value) return
   applyingAdd.value = true
   try {
-    await invoke('daq_select', { deviceId: selectedDevice.value, indices: [...pendingIdxs.value] })
+    await invoke('daq_set_selection', { deviceId: selectedDevice.value, indices: [...pendingIdxs.value] })
     await loadMeasurements()
     showAddModal.value = false
   } catch (e) { setMsg(String(e), true) }
@@ -382,11 +389,11 @@ onMounted(async () => {
   unlisten = await listen('daq-data', event => {
     const p = event.payload
     if (!p || p.device_id !== selectedDevice.value) return
-    if (p.sample) {
-      liveData.value = { ...p.sample }
-      const t = p.timestamp ?? (Date.now() / 1000)
+    if (p.values) {
+      liveData.value = { ...p.values }
+      const t = p.timestamp_s ?? (Date.now() / 1000)
       const newData = { ...chartData.value }
-      for (const [name, val] of Object.entries(p.sample)) {
+      for (const [name, val] of Object.entries(p.values)) {
         if (!newData[name]) newData[name] = []
         newData[name] = [...newData[name], { t, v: val }].slice(-MAX_POINTS)
         signalColor(name)

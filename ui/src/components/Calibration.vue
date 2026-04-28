@@ -247,11 +247,16 @@ async function loadDevices() {
   try {
     const r = await invoke('list_devices')
     connectedDevices.value = (r.devices ?? []).filter(d => d.connected)
-    for (const d of connectedDevices.value) {
-      try {
-        const pm = await invoke('get_page_mode', { deviceId: d.id })
-        pageModes[d.id] = pm.mode ?? '—'
-      } catch { pageModes[d.id] = '?' }
+    try {
+      const pm = await invoke('get_page_mode')
+      const byId = Object.fromEntries((pm.devices ?? []).map(d => [d.device_id, d.page_mode ?? '—']))
+      for (const d of connectedDevices.value) {
+        pageModes[d.id] = byId[d.id] ?? '?'
+      }
+    } catch {
+      for (const d of connectedDevices.value) {
+        pageModes[d.id] = '?'
+      }
     }
   } catch { }
 }
@@ -270,7 +275,7 @@ async function readOne(p) {
   loadingParam.value = p.device_id + '_' + p.idx
   try {
     const r = await invoke('cal_read', { deviceId: p.device_id, idx: p.idx })
-    cacheSet(p.device_id, p.idx, r.display ?? JSON.stringify(r.value))
+    cacheSet(p.device_id, p.idx, r.value ?? '—')
   } catch (e) { globalMsg.value = String(e) }
   finally { loadingParam.value = '' }
 }
