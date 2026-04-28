@@ -1,104 +1,177 @@
 <template>
   <div class="page">
-    <h1>Compare Sessions</h1>
+    <h1>Compare</h1>
 
-    <div class="toolbar">
-      <button @click="showCapture = true">+ Capture Session</button>
-      <button @click="loadSessions">↻ Refresh</button>
-      <span class="count-info">{{ sessions.length }} session(s)</span>
+    <!-- Session tabs + new session button -->
+    <div class="tabs-bar">
+      <div class="tabs-scroll">
+        <div v-for="s in sessions" :key="s.id"
+          class="tab" :class="{ active: activeSessionId === s.id }"
+          @click="selectSession(s.id)">
+          <!-- Inline rename input (shown when editing this tab) -->
+          <input v-if="editingTabId === s.id"
+            v-model="editingTabName"
+            class="tab-name-input"
+            @keydown.enter.stop="commitTabRename"
+            @keydown.escape.stop="cancelTabRename"
+            @blur="commitTabRename"
+            @click.stop
+            ref="tabNameInput"
+          />
+          <span v-else
+            class="tab-name"
+            :title="activeSessionId === s.id ? 'Double-click to rename' : ''"
+            @dblclick.stop="startTabRename(s)">{{ s.name }}</span>
+          <span class="tab-count">{{ (s.selected_variables || []).length }}</span>
+        </div>
+      </div>
+      <button @click="createSession" class="sm">+ New Session</button>
     </div>
 
-    <div class="card" v-if="sessions.length > 0">
-      <h2>Sessions</h2>
-      <table class="sess-table">
-        <thead>
-          <tr><th>Name</th><th>Timestamp</th><th>Devices</th><th>Actions</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="s in sessions" :key="s.id"
-            :class="{ 'sel-a': sessionA === s.id, 'sel-b': sessionB === s.id }">
-            <td class="sess-name">{{ s.name }}</td>
-            <td class="mono">{{ formatTs(s.timestamp) }}</td>
-            <td>{{ s.device_count }}</td>
-            <td class="actions-cell">
-              <button @click="sessionA = s.id" :class="{ active: sessionA === s.id }" class="sm">A</button>
-              <button @click="sessionB = s.id" :class="{ active: sessionB === s.id }" class="sm">B</button>
-              <button @click="exportSession(s.id)" class="sm">⬇ Export</button>
-              <button @click="deleteSession(s.id)" class="sm danger">✕</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+    <!-- No sessions -->
+    <div v-if="!activeSession" class="empty-state">
+      No compare sessions. Create one to start.
     </div>
 
-    <div v-else class="empty">No sessions yet. Capture a session to start.</div>
-
-    <div class="card" v-if="sessions.length >= 2">
-      <h2>Compare</h2>
-      <div class="compare-bar">
-        <div class="sel-indicator a">A: {{ sessionName(sessionA) || '(none)' }}</div>
-        <span style="color:#555">vs</span>
-        <div class="sel-indicator b">B: {{ sessionName(sessionB) || '(none)' }}</div>
-        <button @click="runCompare"
-          :disabled="!sessionA || !sessionB || sessionA === sessionB || comparing">
-          {{ comparing ? 'Comparing…' : '⚙ Compare' }}
-        </button>
+    <template v-else>
+      <!-- Toolbar -->
+      <div class="toolbar">
+        <div class="toolbar-actions">
+          <button class="sm" @click="openVarModal">Select Variables</button>
+          <button class="sm danger" @click="deleteSession">Delete Session</button>
+        </div>
+        <span class="meta">{{ activeSession.name }} — {{ (activeSession.selected_variables || []).length }} variable(s) selected</span>
       </div>
 
-      <template v-if="compared">
-        <div class="diff-toolbar">
-          <input v-model="diffSearch" placeholder="Search params…" class="inp" />
-          <button @click="showDiffsOnly = !showDiffsOnly" :class="{ active: showDiffsOnly }">
-            {{ showDiffsOnly ? '≠ Diffs Only' : '≈ All' }}
-          </button>
-          <span class="count-info">
-            <span class="green-txt">✓ {{ matchCount }}</span> /
-            <span class="red-txt">≠ {{ mismatchCount }}</span>
-          </span>
-        </div>
+      <!-- Left / Right source cards -->
+      <div class="source-grid">
+        <div v-for="side in ['left', 'right']" :key="side" class="source-card">
+          <h2>{{ side === 'left' ? 'Left Source' : 'Right Source' }}</h2>
 
-        <div class="diff-table-wrap">
-          <table class="diff-table">
+          <!-- Loaded source summary -->
+          <div class="source-summary">
+            <template v-if="activeSession[side + '_source']">
+              <div class="source-kind">{{ activeSession[side + '_source'].kind_label }}: <span class="bright">{{ activeSession[side + '_source'].label }}</span></div>
+              <div class="source-detail">{{ activeSession[side + '_source'].detail }}</div>
+              <div class="source-detail">{{ activeSession[side + '_source'].variable_count }} variable(s)</div>
+            </template>
+            <div v-else class="source-detail">No source loaded.</div>
+          </div>
+
+          <!-- Source type selector -->
+          <div class="field-row">
+            <label class="field-label">Source Type</label>
+            <select v-model="sourceType[side]" class="sel">
+              <option value="a2l_hex">A2L + HEX</option>
+              <option value="dcm">DCM</option>
+            </select>
+          </div>
+
+          <!-- A2L + HEX inputs -->
+          <template v-if="sourceType[side] === 'a2l_hex'">
+            <div class="file-row">
+              <span class="file-path">{{ sourceFiles[side].a2l || '(no A2L selected)' }}</span>
+              <button class="sm" @click="browseFile(side, 'a2l')">Browse A2L…</button>
+            </div>
+            <div class="file-row">
+              <span class="file-path">{{ sourceFiles[side].hex || '(no HEX selected)' }}</span>
+              <button class="sm" @click="browseFile(side, 'hex')">Browse HEX…</button>
+            </div>
+          </template>
+
+          <!-- DCM input -->
+          <template v-else>
+            <div class="file-row">
+              <span class="file-path">{{ sourceFiles[side].dcm || '(no DCM selected)' }}</span>
+              <button class="sm" @click="browseFile(side, 'dcm')">Browse DCM…</button>
+            </div>
+          </template>
+
+          <!-- Load / Clear actions -->
+          <div class="source-actions">
+            <button @click="loadSource(side)" :disabled="loadingSource[side]">
+              {{ loadingSource[side] ? 'Loading…' : 'Load' }}
+            </button>
+            <button class="sm secondary" @click="clearSource(side)">Clear</button>
+          </div>
+          <div v-if="loadStatus[side]" class="load-status" :class="loadStatusClass[side]">
+            {{ loadStatus[side] }}
+          </div>
+        </div>
+      </div>
+
+      <!-- Comparison results -->
+      <div v-if="rows.length === 0 && activeSession.left_source == null && activeSession.right_source == null" class="empty-state">
+        Load a source on the left and right to compare values.
+      </div>
+      <div v-else-if="rows.length === 0" class="empty-state">
+        No variables selected. Use "Select Variables" to choose compare targets.
+      </div>
+      <div v-else class="results">
+        <div v-for="row in rows" :key="row.name"
+          class="result-card" :class="{ diff: !row.matches, collapsed: collapsedRows.has(row.name) }">
+          <div class="result-header" @click="toggleCollapse(row.name)">
+            <div class="result-title">
+              <strong>{{ row.name }}</strong>
+            </div>
+            <div class="result-badges">
+              <span class="badge" :class="badgeClass(row)">{{ badgeLabel(row) }}</span>
+              <span class="collapse-btn">▼</span>
+            </div>
+          </div>
+          <div class="result-body">
+            <div v-html="rowHtml(row)"></div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- Variable selection modal -->
+    <div v-if="showVarModal" class="modal-overlay" @click.self="closeVarModal">
+      <div class="modal">
+        <div class="modal-header">
+          <h2>Select Variables</h2>
+        </div>
+        <div class="modal-filters">
+          <input v-model="varSearch" class="inp" placeholder="Search variable name…"
+            @input="reloadVariables" />
+          <select v-model="varPresence" class="sel" @change="reloadVariables">
+            <option value="all">All Variables</option>
+            <option value="common">Common</option>
+            <option value="left_only">Left Only</option>
+            <option value="right_only">Right Only</option>
+          </select>
+        </div>
+        <div class="modal-body" @scroll="maybeLoadMore" ref="varModalBody">
+          <table class="var-table">
             <thead>
-              <tr><th>Parameter</th><th>Device</th><th class="va">Value A</th><th class="vb">Value B</th><th>Match</th></tr>
+              <tr>
+                <th style="width:40px">✓</th>
+                <th>Name</th>
+                <th style="width:130px">Presence</th>
+                <th style="width:160px">Left Type</th>
+                <th style="width:160px">Right Type</th>
+              </tr>
             </thead>
             <tbody>
-              <tr v-for="d in filteredDiffs" :key="d.name + d.device"
-                :class="d.match ? 'match-row' : 'diff-row'">
-                <td>{{ d.name }}</td>
-                <td class="dev-col">{{ d.device }}</td>
-                <td class="va mono">{{ d.value_a }}</td>
-                <td class="vb mono">{{ d.value_b }}</td>
-                <td class="match-col">{{ d.match ? '✓' : '≠' }}</td>
+              <tr v-for="item in varItems" :key="item.name"
+                :class="{ selected: tempSelected.has(item.name) }"
+                @click="toggleVarItem(item.name)">
+                <td>{{ tempSelected.has(item.name) ? '✓' : '' }}</td>
+                <td>{{ item.name }}</td>
+                <td>{{ item.presence }}</td>
+                <td>{{ item.left_type || '—' }}</td>
+                <td>{{ item.right_type || '—' }}</td>
               </tr>
             </tbody>
           </table>
         </div>
-      </template>
-    </div>
-
-    <!-- Capture modal -->
-    <div v-if="showCapture" class="modal-overlay" @click.self="showCapture = false">
-      <div class="modal">
-        <h2>Capture Session</h2>
-        <label class="field-label">Session Name</label>
-        <input v-model="captureName" class="inp full" placeholder="e.g. Baseline 2025-01-01" />
-        <label class="field-label" style="margin-top:12px">Select Devices</label>
-        <div class="device-check-list">
-          <label v-for="d in allDevices" :key="d.id" class="dev-check"
-            :class="{ disabled: !d.connected }">
-            <input type="checkbox" :value="d.id" v-model="captureDevices" :disabled="!d.connected" />
-            <span class="dcn">{{ d.name }}</span>
-            <span class="dca">{{ d.address }}</span>
-            <span v-if="!d.connected" class="offline-tag">offline</span>
-          </label>
-        </div>
-        <div class="modal-actions">
-          <button @click="captureSession"
-            :disabled="!captureName || captureDevices.length === 0 || capturing">
-            {{ capturing ? 'Capturing…' : '📸 Capture' }}
-          </button>
-          <button @click="showCapture = false" class="warn">Cancel</button>
+        <div class="modal-footer">
+          <span class="meta">{{ tempSelected.size }} selected</span>
+          <div class="modal-footer-actions">
+            <button class="sm secondary" @click="closeVarModal">Cancel</button>
+            <button @click="applyVarSelection">Apply</button>
+          </div>
         </div>
       </div>
     </div>
@@ -108,158 +181,518 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, reactive, onMounted, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
+
+// ─── Row HTML renderer ────────────────────────────────────────────────────────
+
+function escHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function diffSet(positions) {
+  return new Set((positions || []).map(p => `${p.row}:${p.col}`))
+}
+
+function rowHtml(row) {
+  const left = row.left?.value || null
+  const right = row.right?.value || null
+  const kind = (left || right)?.kind || 'scalar'
+  const diffs = diffSet(row.diff_positions)
+  const ax = row.left?.axis_values || row.right?.axis_values || []
+
+  if (kind === 'scalar') {
+    const ld = left?.cells?.[0]?.[0]?.display ?? '—'
+    const rd = right?.cells?.[0]?.[0]?.display ?? '—'
+    const isDiff = diffs.has('0:0')
+    return `<div class="merged-scalar${isDiff ? ' diff-cell' : ''}">` +
+      `<div class="cell-left"><span class="stag">L</span>${escHtml(ld)}</div>` +
+      `<div class="cell-right"><span class="stag">R</span>${escHtml(rd)}</div>` +
+      `</div>`
+  }
+
+  const leftRows = left?.cells || []
+  const rightRows = right?.cells || []
+  const numRows = Math.max(leftRows.length, rightRows.length)
+  if (numRows === 0) return '<div class="empty-state">No value data.</div>'
+  const numCols = Math.max((leftRows[0] || rightRows[0] || []).length, 0)
+  const xAxis = ax[0]?.length ? ax[0] : null
+  const yAxis = ax[1]?.length ? ax[1] : null
+  const colLabel = ci => xAxis ? (xAxis[ci] !== undefined ? Number(xAxis[ci]).toFixed(3) : ci) : ci
+  const rowLabel = ri => yAxis ? (yAxis[ri] !== undefined ? Number(yAxis[ri]).toFixed(3) : ri) : ri
+
+  const header = `<tr><th></th>${Array.from({ length: numCols }, (_, ci) =>
+    `<th>${escHtml(String(colLabel(ci)))}</th>`).join('')}</tr>`
+
+  const body = Array.from({ length: numRows }, (_, ri) => {
+    const lr = leftRows[ri] || []
+    const rr = rightRows[ri] || []
+    const cells = Array.from({ length: numCols }, (_, ci) => {
+      const isDiff = diffs.has(`${ri}:${ci}`)
+      const ld = lr[ci]?.display ?? '—'
+      const rd = rr[ci]?.display ?? '—'
+      return `<td class="merged-cell${isDiff ? ' diff-cell' : ''}">` +
+        `<div class="cell-left">${escHtml(ld)}</div>` +
+        `<div class="cell-right">${escHtml(rd)}</div>` +
+        `</td>`
+    }).join('')
+    return `<tr><th>${escHtml(String(rowLabel(ri)))}</th>${cells}</tr>`
+  }).join('')
+
+  return `<div class="grid-wrap"><table class="merged-grid"><thead>${header}</thead><tbody>${body}</tbody></table></div>`
+}
+
+// ─── State ────────────────────────────────────────────────────────────────────
 
 const sessions = ref([])
-const allDevices = ref([])
-const sessionA = ref('')
-const sessionB = ref('')
-const diffs = ref([])
-const compared = ref(false)
-const diffSearch = ref('')
-const showDiffsOnly = ref(false)
-const comparing = ref(false)
-const showCapture = ref(false)
-const captureName = ref('')
-const captureDevices = ref([])
-const capturing = ref(false)
+const activeSessionId = ref(null)
+const rows = ref([])
+const collapsedRows = ref(new Set())
+
+// Inline tab rename state
+const editingTabId = ref(null)
+const editingTabName = ref('')
+const tabNameInput = ref(null)
+
+const sourceType = reactive({ left: 'a2l_hex', right: 'a2l_hex' })
+const sourceFiles = reactive({
+  left: { a2l: '', hex: '', dcm: '' },
+  right: { a2l: '', hex: '', dcm: '' }
+})
+const loadingSource = reactive({ left: false, right: false })
+const loadStatus = reactive({ left: '', right: '' })
+const loadStatusClass = reactive({ left: '', right: '' })
+
+const showVarModal = ref(false)
+const varSearch = ref('')
+const varPresence = ref('all')
+const varItems = ref([])
+const tempSelected = ref(new Set())
+const varPage = reactive({ offset: 0, limit: 100, total: 0, loading: false, exhausted: false })
+const varModalBody = ref(null)
+
 const msg = ref('')
 const msgErr = ref(false)
 
-const matchCount = computed(() => diffs.value.filter(d => d.match).length)
-const mismatchCount = computed(() => diffs.value.filter(d => !d.match).length)
+// ─── Computed ─────────────────────────────────────────────────────────────────
 
-const filteredDiffs = computed(() => {
-  let list = diffs.value
-  if (showDiffsOnly.value) list = list.filter(d => !d.match)
-  if (diffSearch.value) {
-    const q = diffSearch.value.toLowerCase()
-    list = list.filter(d =>
-      d.name.toLowerCase().includes(q) || (d.device || '').toLowerCase().includes(q))
-  }
-  return list
-})
+const activeSession = computed(() =>
+  sessions.value.find(s => s.id === activeSessionId.value) || null
+)
 
-function sessionName(id) {
-  return sessions.value.find(s => s.id === id)?.name || ''
-}
-
-function formatTs(ts) {
-  if (!ts) return '—'
-  try { return new Date(ts).toLocaleString() } catch { return String(ts) }
-}
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function setMsg(text, err = false) {
-  msg.value = text; msgErr.value = err
-  setTimeout(() => msg.value = '', 5000)
+  msg.value = text
+  msgErr.value = err
+  setTimeout(() => { msg.value = '' }, 5000)
 }
 
-async function loadSessions() {
+function setLoadStatus(side, cls, text) {
+  loadStatus[side] = text
+  loadStatusClass[side] = cls
+  if (cls === 'success') {
+    setTimeout(() => { if (loadStatus[side] === text) loadStatus[side] = '' }, 3000)
+  }
+}
+
+function badgeClass(row) {
+  if (row.matches) return 'badge-match'
+  if (row.presence === 'common') return 'badge-diff'
+  return 'badge-missing'
+}
+
+function badgeLabel(row) {
+  if (row.matches) return 'MATCH'
+  if (row.presence === 'common') return 'DIFF'
+  return row.presence?.toUpperCase() || 'MISSING'
+}
+
+function toggleCollapse(name) {
+  const s = new Set(collapsedRows.value)
+  if (s.has(name)) s.delete(name)
+  else s.add(name)
+  collapsedRows.value = s
+}
+
+// ─── Sessions ─────────────────────────────────────────────────────────────────
+
+async function refreshSessions(preferredId) {
   try {
     const r = await invoke('compare_sessions')
     sessions.value = r.sessions ?? []
+  } catch (e) {
+    setMsg(String(e), true)
+    return
+  }
+  if (!sessions.value.length) {
+    activeSessionId.value = null
+  } else if (preferredId && sessions.value.some(s => s.id === preferredId)) {
+    activeSessionId.value = preferredId
+  } else if (!sessions.value.some(s => s.id === activeSessionId.value)) {
+    activeSessionId.value = sessions.value[0].id
+  }
+  await refreshResults()
+}
+
+async function selectSession(id) {
+  // Cancel any in-progress rename before switching
+  cancelTabRename()
+  activeSessionId.value = id
+  rows.value = []
+  await refreshResults()
+}
+
+async function createSession() {
+  try {
+    const r = await invoke('compare_create_session', {})
+    await refreshSessions(r.session?.id)
   } catch (e) { setMsg(String(e), true) }
 }
 
-async function loadDevices() {
-  try {
-    const r = await invoke('list_devices')
-    allDevices.value = r.devices ?? []
-  } catch { }
+function startTabRename(session) {
+  editingTabId.value = session.id
+  editingTabName.value = session.name
+  nextTick(() => {
+    if (tabNameInput.value) {
+      const el = Array.isArray(tabNameInput.value) ? tabNameInput.value[0] : tabNameInput.value
+      el?.focus()
+      el?.select()
+    }
+  })
 }
 
-async function captureSession() {
-  if (!captureName.value || captureDevices.value.length === 0) return
-  capturing.value = true
+function cancelTabRename() {
+  editingTabId.value = null
+  editingTabName.value = ''
+}
+
+async function commitTabRename() {
+  const id = editingTabId.value
+  const name = editingTabName.value?.trim()
+  editingTabId.value = null
+  editingTabName.value = ''
+  if (!id || !name) return
   try {
-    await invoke('compare_create_session', {
-      name: captureName.value
+    await invoke('compare_rename_session', { sessionId: id, name })
+    await refreshSessions(id)
+  } catch (e) { setMsg(String(e), true) }
+}
+
+async function deleteSession() {
+  if (!activeSession.value) return
+  if (!window.confirm(`Delete session "${activeSession.value.name}"?`)) return
+  try {
+    await invoke('compare_delete_session', { sessionId: activeSession.value.id })
+    await refreshSessions()
+  } catch (e) { setMsg(String(e), true) }
+}
+
+// ─── Sources ──────────────────────────────────────────────────────────────────
+
+async function browseFile(side, kind) {
+  let title, filters
+  if (kind === 'a2l') {
+    title = 'Select A2L File'
+    filters = [{ name: 'A2L Files', extensions: ['a2l', 'A2L'] }]
+  } else if (kind === 'hex') {
+    title = 'Select HEX File'
+    filters = [{ name: 'HEX Files', extensions: ['hex', 's19', 'ihex', 'mot', 'srec', 'txt'] }]
+  } else {
+    title = 'Select DCM File'
+    filters = [{ name: 'DCM Files', extensions: ['dcm', 'DCM'] }]
+  }
+  try {
+    const path = await open({ multiple: false, directory: false, title, filters })
+    if (path) sourceFiles[side][kind] = path
+  } catch (e) { setMsg(String(e), true) }
+}
+
+async function loadSource(side) {
+  if (!activeSession.value) return
+  const type = sourceType[side]
+  if (type === 'a2l_hex') {
+    if (!sourceFiles[side].a2l || !sourceFiles[side].hex) {
+      setMsg('Please select both A2L and HEX files.', true)
+      return
+    }
+  } else {
+    if (!sourceFiles[side].dcm) {
+      setMsg('Please select a DCM file.', true)
+      return
+    }
+  }
+
+  loadingSource[side] = true
+  setLoadStatus(side, 'loading', 'Loading…')
+  try {
+    const args = {
+      sessionId: activeSession.value.id,
+      side,
+      sourceType: type,
+      filePath: type === 'a2l_hex' ? sourceFiles[side].a2l : sourceFiles[side].dcm,
+    }
+    if (type === 'a2l_hex') args.hexPath = sourceFiles[side].hex
+
+    const r = await invoke('compare_load_source', args)
+    if (r.success) {
+      setLoadStatus(side, 'success', 'Source loaded successfully!')
+      await refreshSessions(activeSession.value.id)
+    } else {
+      setLoadStatus(side, 'error', r.error || 'Failed to load source.')
+    }
+  } catch (e) {
+    setLoadStatus(side, 'error', String(e))
+  } finally {
+    loadingSource[side] = false
+  }
+}
+
+async function clearSource(side) {
+  if (!activeSession.value) return
+  try {
+    await invoke('compare_clear_source', { sessionId: activeSession.value.id, side })
+    await refreshSessions(activeSession.value.id)
+  } catch (e) { setMsg(String(e), true) }
+}
+
+// ─── Results ──────────────────────────────────────────────────────────────────
+
+async function refreshResults() {
+  if (!activeSession.value) {
+    rows.value = []
+    return
+  }
+  try {
+    const r = await invoke('compare_result', { sessionId: activeSession.value.id })
+    rows.value = r.rows ?? []
+    // Update session in list with fresh data (e.g. selected_variables count)
+    if (r.session) {
+      const idx = sessions.value.findIndex(s => s.id === r.session.id)
+      if (idx >= 0) sessions.value[idx] = r.session
+    }
+  } catch (e) { setMsg(String(e), true) }
+}
+
+// ─── Variable modal ───────────────────────────────────────────────────────────
+
+function openVarModal() {
+  if (!activeSession.value) return
+  tempSelected.value = new Set(activeSession.value.selected_variables || [])
+  varSearch.value = ''
+  varPresence.value = 'all'
+  varItems.value = []
+  varPage.offset = 0
+  varPage.total = 0
+  varPage.exhausted = false
+  showVarModal.value = true
+  nextTick(() => loadVarPage(true))
+}
+
+function closeVarModal() {
+  showVarModal.value = false
+}
+
+async function reloadVariables() {
+  varPage.offset = 0
+  varPage.exhausted = false
+  varItems.value = []
+  await loadVarPage(true)
+}
+
+async function loadVarPage(reset) {
+  if (!activeSession.value || varPage.loading || varPage.exhausted) return
+  varPage.loading = true
+  const offset = reset ? 0 : varPage.offset
+  try {
+    const r = await invoke('compare_variables', {
+      sessionId: activeSession.value.id,
+      search: varSearch.value || null,
+      presence: varPresence.value || null,
+      offset,
+      limit: varPage.limit,
     })
-    setMsg(`Session created: ${captureName.value}`)
-    showCapture.value = false
-    captureName.value = ''
-    captureDevices.value = []
-    await loadSessions()
+    if (!r.success) return
+    const page = r.page || {}
+    const items = page.items || []
+    varPage.total = page.total || 0
+    varPage.offset = offset + items.length
+    varPage.exhausted = varPage.offset >= varPage.total
+    if (reset) varItems.value = items
+    else varItems.value = [...varItems.value, ...items]
   } catch (e) { setMsg(String(e), true) }
-  finally { capturing.value = false }
+  finally { varPage.loading = false }
 }
 
-async function deleteSession(id) {
+function maybeLoadMore(event) {
+  const el = event.target
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 120) {
+    loadVarPage(false)
+  }
+}
+
+function toggleVarItem(name) {
+  const s = new Set(tempSelected.value)
+  if (s.has(name)) s.delete(name)
+  else s.add(name)
+  tempSelected.value = s
+}
+
+async function applyVarSelection() {
+  if (!activeSession.value) return
   try {
-    await invoke('compare_delete_session', { sessionId: id })
-    if (sessionA.value === id) sessionA.value = ''
-    if (sessionB.value === id) sessionB.value = ''
-    diffs.value = []; compared.value = false
-    await loadSessions()
+    await invoke('compare_select_variables', {
+      sessionId: activeSession.value.id,
+      names: Array.from(tempSelected.value),
+    })
+    closeVarModal()
+    await refreshSessions(activeSession.value.id)
   } catch (e) { setMsg(String(e), true) }
 }
 
-async function runCompare() {
-  setMsg('Compare action is not wired to the current desktop backend yet', true)
-}
+// ─── Init ─────────────────────────────────────────────────────────────────────
 
-async function exportSession(id) {
-  setMsg(`Export for session '${sessionName(id) || id}' is not wired to the current desktop backend yet`, true)
-}
-
-onMounted(async () => { await loadSessions(); await loadDevices() })
+onMounted(() => refreshSessions())
 </script>
 
 <style scoped>
+/* ── Page ── */
 .page { color: #00cc44; }
 h1 { color: #00ff66; margin-bottom: 14px; font-size: 1.4rem; }
 h2 { color: #00cc44; font-size: 1rem; margin-bottom: 10px; }
-.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
-.count-info { font-size: 0.8rem; color: #555; }
-.green-txt { color: #00ff66; }
-.red-txt { color: #ff4444; }
-.card { background: #0d0d0d; border: 1px solid #003311; padding: 14px; margin-bottom: 16px; }
-button { background: #001a09; border: 1px solid #00cc44; color: #00cc44; padding: 5px 10px; cursor: pointer; font-family: Consolas, monospace; font-size: 0.9rem; }
+
+/* ── Tabs ── */
+.tabs-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+.tabs-scroll { display: flex; gap: 6px; overflow-x: auto; flex: 1; }
+.tab {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border: 1px solid #003311;
+  background: #0a0a0a; cursor: pointer; white-space: nowrap; font-size: 0.88rem;
+}
+.tab:hover { border-color: #00cc44; }
+.tab.active { border-color: #00ff66; color: #00ff66; background: #001a09; }
+.tab-count { color: #555; font-size: 0.75rem; }
+.tab-name { cursor: default; }
+.tab.active .tab-name { cursor: text; }
+.tab-name-input {
+  background: transparent; border: none; border-bottom: 1px solid #00ff66;
+  color: #00ff66; font-family: Consolas, monospace; font-size: 0.88rem;
+  padding: 0 2px; outline: none; min-width: 80px; max-width: 200px;
+  width: max-content;
+}
+
+/* ── Toolbar ── */
+.toolbar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+.toolbar-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.meta { font-size: 0.8rem; color: #555; }
+
+/* ── Source grid ── */
+.source-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+@media (max-width: 760px) { .source-grid { grid-template-columns: 1fr; } }
+
+.source-card { background: #0d0d0d; border: 1px solid #003311; padding: 14px; }
+.source-summary { background: #060606; border: 1px solid #001a09; padding: 10px; margin-bottom: 12px; min-height: 60px; }
+.source-kind { font-size: 0.88rem; }
+.bright { color: #00ff66; font-weight: bold; }
+.source-detail { color: #555; font-size: 0.8rem; margin-top: 3px; font-family: Consolas, monospace; }
+
+.field-row { margin-bottom: 8px; }
+.field-label { display: block; color: #006622; font-size: 0.78rem; margin-bottom: 3px; }
+.file-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+.file-path { font-size: 0.78rem; font-family: Consolas, monospace; color: #00aa33; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.source-actions { display: flex; gap: 6px; margin-top: 10px; }
+.load-status { margin-top: 6px; font-size: 0.82rem; }
+.load-status.loading { color: #ffcc00; }
+.load-status.success { color: #00ff66; }
+.load-status.error { color: #ff4444; }
+
+/* ── Result cards ── */
+.results { display: flex; flex-direction: column; gap: 8px; }
+
+.result-card { background: #0d0d0d; border: 1px solid #003311; }
+.result-card.diff { border-color: #ffcc00; }
+
+.result-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; background: #090909; cursor: pointer; user-select: none;
+  border-bottom: 1px solid #003311;
+}
+.result-card.collapsed .result-header { border-bottom: none; }
+.result-card.collapsed .result-body { display: none; }
+.result-header:hover { background: #111; }
+
+.result-title { font-size: 0.9rem; }
+.result-badges { display: flex; align-items: center; gap: 8px; }
+.badge { padding: 1px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; }
+.badge-match { background: #001a09; color: #00ff66; border: 1px solid #003311; }
+.badge-diff { background: #1a0f00; color: #ffcc00; border: 1px solid #332200; }
+.badge-missing { background: #1a1000; color: #ffcc00; border: 1px solid #332200; }
+
+.collapse-btn { color: #555; font-size: 0.85rem; transition: transform 0.2s; }
+.result-card.collapsed .collapse-btn { transform: rotate(-90deg); }
+
+.result-body { padding: 12px; overflow-x: auto; }
+.side-tag { color: #00cc44; margin-right: 4px; font-weight: bold; }
+
+/* ── Modal ── */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal { background: #0d0d0d; border: 1px solid #003311; width: min(1000px, 92vw); max-height: 84vh; display: flex; flex-direction: column; }
+.modal-header { padding: 14px 16px; border-bottom: 1px solid #003311; }
+.modal-header h2 { margin: 0; }
+.modal-filters { display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid #001a09; }
+.modal-body { overflow: auto; flex: 1; }
+.modal-footer { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-top: 1px solid #003311; }
+.modal-footer-actions { display: flex; gap: 8px; }
+
+/* ── Variable table ── */
+.var-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+.var-table th { color: #006622; text-align: left; padding: 5px 10px; border-bottom: 1px solid #003311; position: sticky; top: 0; background: #0d0d0d; }
+.var-table td { padding: 5px 10px; border-bottom: 1px solid #001a09; }
+.var-table tbody tr { cursor: pointer; }
+.var-table tbody tr:hover { background: #0a1a0a; }
+.var-table tbody tr.selected { background: #001a09; color: #00ff66; }
+
+/* ── Shared form elements ── */
+button {
+  background: #001a09; border: 1px solid #00cc44; color: #00cc44;
+  padding: 5px 12px; cursor: pointer; font-family: Consolas, monospace; font-size: 0.88rem;
+}
 button:hover:not(:disabled) { background: #003311; }
 button:disabled { opacity: 0.35; cursor: default; }
-button.sm { padding: 2px 8px; font-size: 0.8rem; }
-button.active { background: #003311; color: #00ff66; }
-button.warn { border-color: #ffcc00; color: #ffcc00; }
-button.warn:hover:not(:disabled) { background: #1a1100; }
+button.sm { padding: 3px 8px; font-size: 0.8rem; }
+button.secondary { border-color: #555; color: #777; }
+button.secondary:hover:not(:disabled) { background: #111; border-color: #777; color: #aaa; }
 button.danger { border-color: #ff4444; color: #ff4444; }
 button.danger:hover:not(:disabled) { background: #1a0000; }
-.sess-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
-.sess-table th { color: #006622; text-align: left; padding: 5px 8px; border-bottom: 1px solid #003311; }
-.sess-table td { padding: 5px 8px; border-bottom: 1px solid #001a09; }
-.sess-table tr.sel-a td { background: rgba(0,80,255,0.05); }
-.sess-table tr.sel-b td { background: rgba(255,120,0,0.05); }
-.sess-name { color: #00ff66; font-weight: bold; }
-.actions-cell { display: flex; gap: 4px; }
-.mono { font-family: Consolas, monospace; }
-.empty { color: #555; padding: 24px 0; }
-.compare-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-.sel-indicator { padding: 4px 10px; border: 1px solid; font-size: 0.85rem; }
-.sel-indicator.a { color: #5599ff; border-color: #224; }
-.sel-indicator.b { color: #ff9933; border-color: #420; }
-.diff-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-.inp { background: #0a0a0a; border: 1px solid #003311; color: #00cc44; padding: 5px 8px; font-family: Consolas, monospace; }
-.inp.full { width: 100%; box-sizing: border-box; }
-.diff-table-wrap { max-height: 400px; overflow-y: auto; }
-.diff-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-.diff-table th { color: #006622; text-align: left; padding: 5px 8px; border-bottom: 1px solid #003311; position: sticky; top: 0; background: #0d0d0d; }
-.diff-table td { padding: 4px 8px; border-bottom: 1px solid #001a09; }
-.diff-table tr.diff-row { background: #1a0800; }
-.diff-table tr.diff-row td { color: #ffcc00; }
-.va { color: #5599ff; }
-.vb { color: #ff9933; }
-.match-col { text-align: center; font-weight: bold; }
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.modal { background: #0d0d0d; border: 1px solid #003311; padding: 20px; min-width: 460px; max-height: 80vh; overflow-y: auto; }
-.field-label { display: block; color: #006622; font-size: 0.8rem; margin-bottom: 4px; }
-.device-check-list { max-height: 200px; overflow-y: auto; border: 1px solid #003311; padding: 8px; margin-bottom: 12px; }
-.dev-check { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
-.dev-check.disabled { opacity: 0.4; cursor: not-allowed; }
-.dev-check input { accent-color: #00cc44; }
-.dcn { color: #00ff66; font-weight: bold; font-size: 0.9rem; }
-.dca { color: #555; font-size: 0.8rem; font-family: Consolas, monospace; }
-.offline-tag { color: #ff4444; font-size: 0.75rem; }
-.modal-actions { display: flex; gap: 8px; }
+
+.inp { background: #0a0a0a; border: 1px solid #003311; color: #00cc44; padding: 5px 8px; font-family: Consolas, monospace; font-size: 0.88rem; }
+.sel { background: #0a0a0a; border: 1px solid #003311; color: #00cc44; padding: 5px 8px; font-family: Consolas, monospace; font-size: 0.88rem; }
+.inp:focus, .sel:focus { outline: 1px solid #00cc44; }
+
+.empty-state { color: #555; padding: 28px 0; text-align: center; border: 1px dashed #001a09; margin-bottom: 16px; }
 .msg { margin-top: 8px; font-size: 0.85rem; color: #00cc44; }
 .msg.err { color: #ff4444; }
+
+/* ── Merged value grid (injected via v-html) ── */
+:deep(.merged-scalar) {
+  display: inline-flex; flex-direction: column; gap: 3px;
+  font-family: Consolas, monospace; font-size: 0.95rem;
+  padding: 8px 12px; background: #060606; min-width: 5rem;
+}
+:deep(.merged-scalar.diff-cell) { background: #1a1000; }
+
+:deep(.cell-left) { color: #00cc44; font-size: 0.85rem; }
+:deep(.cell-right) { color: #00aa33; font-size: 0.85rem; border-top: 1px solid #003311; margin-top: 2px; padding-top: 2px; }
+:deep(.stag) { font-size: 0.7em; font-weight: 700; color: #555; margin-right: 4px; }
+
+:deep(.grid-wrap) { overflow-x: auto; max-width: 100%; margin-top: 4px; }
+:deep(.merged-grid) { border-collapse: collapse; white-space: nowrap; }
+:deep(.merged-grid th),
+:deep(.merged-grid td) { border: 1px solid #002211; padding: 3px 8px; text-align: center; font-family: Consolas, monospace; font-size: 0.8rem; }
+:deep(.merged-grid th) { color: #555; background: #0a0a0a; }
+:deep(.merged-cell) { vertical-align: top; min-width: 60px; }
+:deep(.diff-cell) { background: #1a1000 !important; }
+:deep(.diff-cell .cell-left),
+:deep(.diff-cell .cell-right) { color: #ffcc00; font-weight: bold; }
 </style>
