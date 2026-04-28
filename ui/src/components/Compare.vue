@@ -45,7 +45,11 @@
 
       <!-- Left / Right source cards -->
       <div class="source-grid">
-        <div v-for="side in ['left', 'right']" :key="side" class="source-card">
+        <div v-for="side in ['left', 'right']" :key="side" class="source-card"
+          :class="{ 'drag-over': draggingOver[side] }"
+          @dragover.prevent="draggingOver[side] = true"
+          @dragleave.self="draggingOver[side] = false"
+          @drop.prevent="onDrop(side, $event)">
           <h2>{{ side === 'left' ? 'Left Source' : 'Right Source' }}</h2>
 
           <!-- Loaded source summary -->
@@ -55,7 +59,7 @@
               <div class="source-detail">{{ activeSession[side + '_source'].detail }}</div>
               <div class="source-detail">{{ activeSession[side + '_source'].variable_count }} variable(s)</div>
             </template>
-            <div v-else class="source-detail">No source loaded.</div>
+            <div v-else class="source-detail">No source loaded. Drop files here or use Browse.</div>
           </div>
 
           <!-- Source type selector -->
@@ -260,6 +264,7 @@ const sourceFiles = reactive({
   left: { a2l: '', hex: '', dcm: '' },
   right: { a2l: '', hex: '', dcm: '' }
 })
+const draggingOver = reactive({ left: false, right: false })
 const loadingSource = reactive({ left: false, right: false })
 const loadStatus = reactive({ left: '', right: '' })
 const loadStatusClass = reactive({ left: '', right: '' })
@@ -407,6 +412,45 @@ async function browseFile(side, kind) {
     const path = await open({ multiple: false, directory: false, title, filters })
     if (path) sourceFiles[side][kind] = path
   } catch (e) { setMsg(String(e), true) }
+}
+
+const HEX_EXTS = new Set(['hex', 's19', 'ihex', 'mot', 'srec'])
+
+async function onDrop(side, event) {
+  draggingOver[side] = false
+  const files = Array.from(event.dataTransfer.files)
+  let changed = false
+
+  for (const file of files) {
+    // Tauri v2: File objects from OS drop events expose .path (absolute FS path)
+    const path = file.path
+    if (!path) continue
+    const ext = path.split('.').pop().toLowerCase()
+
+    if (ext === 'a2l') {
+      sourceFiles[side].a2l = path
+      if (sourceType[side] === 'dcm') sourceType[side] = 'a2l_hex'
+      changed = true
+    } else if (HEX_EXTS.has(ext)) {
+      sourceFiles[side].hex = path
+      if (sourceType[side] === 'dcm') sourceType[side] = 'a2l_hex'
+      changed = true
+    } else if (ext === 'dcm') {
+      sourceFiles[side].dcm = path
+      if (sourceType[side] === 'a2l_hex') sourceType[side] = 'dcm'
+      changed = true
+    }
+  }
+
+  if (!changed) return
+
+  // Auto-load when we have enough files
+  const type = sourceType[side]
+  if (type === 'dcm' && sourceFiles[side].dcm) {
+    await loadSource(side)
+  } else if (type === 'a2l_hex' && sourceFiles[side].a2l && sourceFiles[side].hex) {
+    await loadSource(side)
+  }
 }
 
 async function loadSource(side) {
@@ -591,7 +635,8 @@ h2 { color: #00cc44; font-size: 1rem; margin-bottom: 10px; }
 .source-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
 @media (max-width: 760px) { .source-grid { grid-template-columns: 1fr; } }
 
-.source-card { background: #0d0d0d; border: 1px solid #003311; padding: 14px; }
+.source-card { background: #0d0d0d; border: 1px solid #003311; padding: 14px; transition: border-color 0.15s, box-shadow 0.15s; }
+.source-card.drag-over { border-color: #00ff66; background: #001a0a; box-shadow: 0 0 14px rgba(0,255,102,0.25); }
 .source-summary { background: #060606; border: 1px solid #001a09; padding: 10px; margin-bottom: 12px; min-height: 60px; }
 .source-kind { font-size: 0.88rem; }
 .bright { color: #00ff66; font-weight: bold; }
