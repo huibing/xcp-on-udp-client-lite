@@ -47,9 +47,7 @@
       <div class="source-grid">
         <div v-for="side in ['left', 'right']" :key="side" class="source-card"
           :class="{ 'drag-over': draggingOver[side] }"
-          @dragover.prevent="draggingOver[side] = true"
-          @dragleave.self="draggingOver[side] = false"
-          @drop.prevent="onDrop(side, $event)">
+          :ref="el => { if (el) cardRefs[side] = el }">
           <h2>{{ side === 'left' ? 'Left Source' : 'Right Source' }}</h2>
 
           <!-- Loaded source summary -->
@@ -185,9 +183,10 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted, nextTick } from 'vue'
+import { ref, computed, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 
 // ─── Row HTML renderer ────────────────────────────────────────────────────────
 
@@ -265,6 +264,7 @@ const sourceFiles = reactive({
   right: { a2l: '', hex: '', dcm: '' }
 })
 const draggingOver = reactive({ left: false, right: false })
+const cardRefs = reactive({ left: null, right: null })
 const loadingSource = reactive({ left: false, right: false })
 const loadStatus = reactive({ left: '', right: '' })
 const loadStatusClass = reactive({ left: '', right: '' })
@@ -416,17 +416,23 @@ async function browseFile(side, kind) {
 
 const HEX_EXTS = new Set(['hex', 's19', 'ihex', 'mot', 'srec'])
 
-async function onDrop(side, event) {
-  draggingOver[side] = false
-  const files = Array.from(event.dataTransfer.files)
+// Tauri v2: use onDragDropEvent for real file paths. Position is in physical pixels;
+// divide by devicePixelRatio to compare against CSS-pixel bounding rects.
+function getSideFromPhysicalPos(px, py) {
+  const dpr = window.devicePixelRatio || 1
+  const x = px / dpr, y = py / dpr
+  for (const [side, el] of Object.entries(cardRefs)) {
+    if (!el) continue
+    const r = el.getBoundingClientRect()
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return side
+  }
+  return null
+}
+
+async function processDroppedPaths(side, paths) {
   let changed = false
-
-  for (const file of files) {
-    // Tauri v2: File objects from OS drop events expose .path (absolute FS path)
-    const path = file.path
-    if (!path) continue
-    const ext = path.split('.').pop().toLowerCase()
-
+  for (const path of paths) {
+    const ext = (path.split('.').pop() || '').toLowerCase()
     if (ext === 'a2l') {
       sourceFiles[side].a2l = path
       if (sourceType[side] === 'dcm') sourceType[side] = 'a2l_hex'
@@ -441,10 +447,7 @@ async function onDrop(side, event) {
       changed = true
     }
   }
-
   if (!changed) return
-
-  // Auto-load when we have enough files
   const type = sourceType[side]
   if (type === 'dcm' && sourceFiles[side].dcm) {
     await loadSource(side)
@@ -597,7 +600,31 @@ async function applyVarSelection() {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
-onMounted(() => refreshSessions())
+let dndUnlisten = null
+
+onMounted(async () => {
+  refreshSessions()
+  dndUnlisten = await getCurrentWebview().onDragDropEvent(event => {
+    const p = event.payload
+    if (p.type === 'enter' || p.type === 'over') {
+      const side = getSideFromPhysicalPos(p.position.x, p.position.y)
+      draggingOver.left = side === 'left'
+      draggingOver.right = side === 'right'
+    } else if (p.type === 'drop') {
+      const side = getSideFromPhysicalPos(p.position.x, p.position.y)
+      draggingOver.left = false
+      draggingOver.right = false
+      if (side && p.paths?.length) processDroppedPaths(side, p.paths)
+    } else if (p.type === 'leave') {
+      draggingOver.left = false
+      draggingOver.right = false
+    }
+  })
+})
+
+onUnmounted(() => {
+  if (dndUnlisten) dndUnlisten()
+})
 </script>
 
 <style scoped>
