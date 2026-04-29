@@ -283,12 +283,20 @@ async function readOne(p) {
 async function readAll() {
   readingAll.value = true; readAllProgress.value = 0
   const list = displayedParams.value.filter(p => p.connected)
-  for (const p of list) {
-    await readOne(p)
-    readAllProgress.value++
-    await new Promise(r => setTimeout(r, 30))
-  }
-  readingAll.value = false
+  if (list.length === 0) { readingAll.value = false; return }
+
+  try {
+    const items = list.map(p => ({ device_id: p.device_id, idx: p.idx }))
+    const r = await invoke('cal_read_all', { items })
+    const res = r.results ?? []
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i]
+      const entry = res[i]
+      if (entry?.success) cacheSet(p.device_id, p.idx, entry.value ?? '—')
+      readAllProgress.value = i + 1
+    }
+  } catch (e) { globalMsg.value = String(e) }
+  finally { readingAll.value = false }
 }
 
 function removeSelected(p) {
@@ -446,26 +454,26 @@ button.danger:hover:not(:disabled) { background: #1a0000; }
 .mono { font-family: Consolas, monospace; }
 .empty { color: #555; padding: 24px 0; }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.modal { background: #0d0d0d; border: 1px solid #003311; padding: 20px; min-width: 420px; max-height: 85vh; overflow-y: auto; }
-.modal.modal-wide { min-width: 640px; max-width: 90vw; }
+.modal { background: #0d0d0d; border: 1px solid #003311; padding: 16px; min-width: 420px; max-height: 96vh; overflow-y: auto; }
+.modal.modal-wide { min-width: 640px; max-width: 98vw; width: fit-content; max-height: 96vh; overflow: hidden; display: flex; flex-direction: column; }
 .field-label { color: #006622; font-size: 0.85rem; margin-bottom: 4px; }
 .bright { color: #00ff66; }
 .inp.full { width: 100%; box-sizing: border-box; }
-.modal-actions { display: flex; gap: 8px; margin-top: 12px; }
+.modal-actions { display: flex; gap: 8px; margin-top: 12px; flex-shrink: 0; }
 .loading-txt { color: #555; padding: 12px 0; }
-.matrix-info { color: #006622; font-size: 0.8rem; margin-bottom: 8px; }
-.matrix-scroll { overflow: auto; max-height: 400px; }
+.matrix-info { color: #006622; font-size: 0.8rem; margin-bottom: 6px; flex-shrink: 0; }
+.matrix-scroll { overflow: auto; flex: 1 1 0; min-height: 0; max-height: calc(96vh - 120px); }
 .matrix-table { border-collapse: collapse; }
-.matrix-table td { padding: 2px; }
-.row-idx { color: #444; font-size: 0.75rem; padding-right: 6px; font-family: Consolas, monospace; min-width: 24px; }
-.matrix-cell { width: 70px; background: #0a0a0a; border: 1px solid #002208; color: #00cc44; padding: 3px 5px; font-family: Consolas, monospace; font-size: 0.82rem; text-align: right; }
+.matrix-table td { padding: 1px; }
+.row-idx { color: #444; font-size: 0.75rem; padding-right: 4px; font-family: Consolas, monospace; min-width: 20px; }
+.matrix-cell { width: 62px; background: #0a0a0a; border: 1px solid #002208; color: #00cc44; padding: 2px 4px; font-family: Consolas, monospace; font-size: 0.82rem; text-align: right; }
 .matrix-cell:focus { border-color: #00ff66; outline: none; background: #001a09; }
 .detail-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 .detail-table tr { border-bottom: 1px solid #001a09; }
 .detail-table td { padding: 6px 8px; }
 .dl { color: #006622; font-size: 0.8rem; white-space: nowrap; width: 110px; }
-.add-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
-.add-table-wrap { max-height: 380px; overflow-y: auto; border: 1px solid #003311; }
+.add-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-shrink: 0; }
+.add-table-wrap { flex: 1 1 0; min-height: 0; max-height: calc(96vh - 140px); overflow-y: auto; border: 1px solid #003311; }
 .add-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 .add-table th { color: #006622; text-align: left; padding: 5px 8px; border-bottom: 1px solid #003311; position: sticky; top: 0; background: #0d0d0d; }
 .add-table td { padding: 4px 8px; border-bottom: 1px solid #001a09; }

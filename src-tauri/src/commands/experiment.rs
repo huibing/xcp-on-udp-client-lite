@@ -672,7 +672,7 @@ pub async fn experiment_dcm_export(
                     let n = values.len();
                     let axis_info = param.axis_info.first();
                     let axis = get_axis(0, n);
-                    let axis_name = axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
+                    let axis_name = axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
                     let unit_x = axis_info.and_then(|a| a.unit.as_deref()).unwrap_or("").to_string();
                     Block::Table(GRUPPENKENNLINIE::from_f64(
                         &name, &values, &desc, &unit, &unit_x, &axis_name, &axis,
@@ -686,8 +686,8 @@ pub async fn experiment_dcm_export(
                     let y_axis_info = param.axis_info.get(1);
                     let x_axis = get_axis(0, x_count);
                     let y_axis = get_axis(1, y_count);
-                    let x_name = x_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
-                    let y_name = y_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
+                    let x_name = x_axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
+                    let y_name = y_axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
                     let unit_x = x_axis_info.and_then(|a| a.unit.as_deref()).unwrap_or("").to_string();
                     let unit_y = y_axis_info.and_then(|a| a.unit.as_deref()).unwrap_or("").to_string();
                     let dcm_matrix: Vec<Vec<f64>> = (0..y_count)

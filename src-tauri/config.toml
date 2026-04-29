@@ -5,3 +5,9 @@ address = "172.20.10.9:5555"
 a2l_path = 'E:\workspace\rust\xcp-ai\xcp_client\zc-blanc_rear_c-target-xcp.a2l'
 hex_path = 'E:\workspace\rust\xcp-ai\xcp_client\zc-blanc_rear_c_tc389-inca.hex'
 max_cto = 255
+
+[[devices]]
+id = "device_6c1f866b20f54d69ad845b3a38b9646a"
+name = "fr"
+address = ""
+max_cto = 255

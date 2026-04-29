@@ -26,6 +26,7 @@ pub fn run() {
             // Calibration
             commands::calibration::cal_available,
             commands::calibration::cal_read,
+            commands::calibration::cal_read_all,
             commands::calibration::cal_write,
             commands::calibration::cal_write_element,
             commands::calibration::cal_value,

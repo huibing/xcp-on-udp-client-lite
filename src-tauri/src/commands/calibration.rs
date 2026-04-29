@@ -45,8 +45,9 @@ pub async fn cal_read(
     device_id: String,
     idx: usize,
 ) -> Result<Value, String> {
-    // Get slave arc and param clone without holding state lock during XCP I/O
-    let (slave_arc_opt, param, hex_image_opt, dev_id) = {
+    // Extract handles from state without cloning heavy data.
+    // Arc clones are just refcount bumps; HexImage is NOT cloned here.
+    let (slave_arc_opt, param, hex_image_arc_opt, cal_values_arc, _dev_id) = {
         let app = state.read().await;
         let dev = app
             .get_device(&device_id)
@@ -57,6 +58,7 @@ pub async fn cal_read(
             .get(idx)
             .ok_or_else(|| format!("Parameter index {} out of range", idx))?
             .clone();
+        let cal_values_arc = dev.cal_values.clone();
 
         if dev.connected {
             let sid = dev.slave_id.ok_or_else(|| "No slave ID".to_string())?;
@@ -64,11 +66,10 @@ pub async fn cal_read(
                 .client
                 .get_slave(sid)
                 .ok_or_else(|| "Slave not found".to_string())?;
-            (Some(slave_arc), param, None, dev.id.clone())
+            (Some(slave_arc), param, None, cal_values_arc, dev.id.clone())
         } else {
-            // Offline: try to read from HEX image
-            let hex_image = dev.hex_image.read().await.clone();
-            (None, param, hex_image, dev.id.clone())
+            // Offline: clone the Arc (cheap) — the HexImage data is not copied
+            (None, param, Some(dev.hex_image.clone()), cal_values_arc, dev.id.clone())
         }
     };
 
@@ -76,15 +77,9 @@ pub async fn cal_read(
     if let Some(slave_arc) = slave_arc_opt {
         let xcp_guard = slave_arc.lock().await;
         let value = read_calibration_from_slave(&*xcp_guard, &param).await?;
+        drop(xcp_guard);
 
-        // Cache the value
-        {
-            let app = state.read().await;
-            if let Some(dev) = app.get_device(&dev_id) {
-                let mut cache = dev.cal_values.write().await;
-                cache.insert(param.name.clone(), value.clone());
-            }
-        }
+        cal_values_arc.write().await.insert(param.name.clone(), value.clone());
 
         let is_enum = param.is_enum();
         let display_value: Option<String> = if is_enum {
@@ -103,47 +98,182 @@ pub async fn cal_read(
         }));
     }
 
-    // Offline path: read from HEX image
-    if let Some(hex_image) = hex_image_opt {
-        let size = param.data_type.size() as u32;
-        if size == 0 {
-            return Ok(json!({ "success": false, "error": "Unknown parameter size" }));
-        }
-        let bytes = hex_image.extract_range(param.address, size, 0xFF);
-        // Check if any non-fill bytes exist (i.e., address is populated in HEX)
-        if bytes.iter().all(|&b| b == 0xFF) && !hex_image.has_data_in_range(param.address, size) {
-            return Ok(json!({ "success": false, "error": "Address not found in HEX file" }));
-        }
-        let value = bytes_to_calibration_value(&bytes, &param.data_type)
-            .map_err(|e| format!("Decode error: {}", e))?;
-
-        // Cache the value
-        {
-            let app = state.read().await;
-            if let Some(dev) = app.get_device(&dev_id) {
-                let mut cache = dev.cal_values.write().await;
-                cache.insert(param.name.clone(), value.clone());
+    // Offline path: read from HEX image via read lock (no clone of the map)
+    if let Some(hex_image_arc) = hex_image_arc_opt {
+        let hex_guard = hex_image_arc.read().await;
+        if let Some(hex_image) = hex_guard.as_ref() {
+            let size = param.data_type.size() as u32;
+            if size == 0 {
+                return Ok(json!({ "success": false, "error": "Unknown parameter size" }));
             }
-        }
+            let bytes = hex_image.extract_range(param.address, size, 0xFF);
+            if bytes.iter().all(|&b| b == 0xFF) && !hex_image.has_data_in_range(param.address, size) {
+                return Ok(json!({ "success": false, "error": "Address not found in HEX file" }));
+            }
+            let value = bytes_to_calibration_value(&bytes, &param.data_type)
+                .map_err(|e| format!("Decode error: {}", e))?;
+            drop(hex_guard);
 
-        let is_enum = param.is_enum();
-        let display_value: Option<String> = if is_enum {
-            cal_value_to_raw_i64(&value).map(|raw| param.format_value(raw))
-        } else {
-            None
-        };
-        return Ok(json!({
-            "success": true,
-            "name": param.name,
-            "value": value.format(),
-            "value_data": calibration_value_to_json(&value, param.characteristic_type == CharacteristicType::Curve),
-            "is_enum": is_enum,
-            "display_value": display_value,
-            "source": "hex",
-        }));
+            cal_values_arc.write().await.insert(param.name.clone(), value.clone());
+
+            let is_enum = param.is_enum();
+            let display_value: Option<String> = if is_enum {
+                cal_value_to_raw_i64(&value).map(|raw| param.format_value(raw))
+            } else {
+                None
+            };
+            return Ok(json!({
+                "success": true,
+                "name": param.name,
+                "value": value.format(),
+                "value_data": calibration_value_to_json(&value, param.characteristic_type == CharacteristicType::Curve),
+                "is_enum": is_enum,
+                "display_value": display_value,
+                "source": "hex",
+            }));
+        }
     }
 
     Ok(json!({ "success": false, "error": "Device not connected and no HEX file loaded" }))
+}
+
+/// Batch-read all requested calibration parameters in a single IPC call.
+///
+/// Groups items by device so each slave mutex is acquired only once, then reads
+/// all parameters for that device sequentially (XCP is request-response, so
+/// pipelining is not possible). Returns one result entry per input item.
+#[tauri::command]
+pub async fn cal_read_all(
+    state: State<'_, SharedState>,
+    items: Vec<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Value, String> {
+    use std::collections::HashMap;
+
+    // Parse into (device_id, param_idx) keeping the original position
+    let parsed: Vec<(String, usize)> = items
+        .iter()
+        .filter_map(|m| {
+            let device_id = m.get("device_id")?.as_str()?.to_string();
+            let idx = m.get("idx")?.as_u64()? as usize;
+            Some((device_id, idx))
+        })
+        .collect();
+
+    // Group item positions by device_id: device_id → [(item_pos, param_idx)]
+    let mut by_device: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    for (pos, (device_id, param_idx)) in parsed.iter().enumerate() {
+        by_device.entry(device_id.clone()).or_default().push((pos, *param_idx));
+    }
+
+    let mut results: Vec<Value> = vec![json!({ "success": false, "error": "not processed" }); parsed.len()];
+
+    for (device_id, positions) in &by_device {
+        // Snapshot params and Arc handles. No HexImage data is cloned.
+        let (slave_arc_opt, params, hex_image_arc_opt, cache_arc) = {
+            let app = state.read().await;
+            let dev = match app.get_device(device_id) {
+                Some(d) => d,
+                None => continue,
+            };
+            let mgr = dev.cal_manager.read().await;
+            let params: Vec<Option<_>> = positions
+                .iter()
+                .map(|(_, pi)| mgr.params().get(*pi).cloned())
+                .collect();
+            let cache_arc = dev.cal_values.clone();
+
+            if dev.connected {
+                let sid = match dev.slave_id {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let slave_arc = match app.client.get_slave(sid) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                (Some(slave_arc), params, None, cache_arc)
+            } else {
+                // Clone Arc only (cheap refcount bump; HexImage data stays in place)
+                (None, params, Some(dev.hex_image.clone()), cache_arc)
+            }
+        }; // state read lock released here
+
+        if let Some(slave_arc) = slave_arc_opt {
+            // Acquire slave mutex ONCE for all reads on this device
+            let xcp_guard = slave_arc.lock().await;
+            let read_results: Vec<Result<_, String>> = {
+                let mut v = Vec::with_capacity(params.len());
+                for p in &params {
+                    match p {
+                        Some(param) => v.push(read_calibration_from_slave(&*xcp_guard, param).await),
+                        None => v.push(Err("Parameter index out of range".to_string())),
+                    }
+                }
+                v
+            };
+            drop(xcp_guard); // release slave lock before touching cache
+
+            for ((pos, _), (param_opt, read_res)) in
+                positions.iter().zip(params.iter().zip(read_results.into_iter()))
+            {
+                match (param_opt, read_res) {
+                    (Some(param), Ok(value)) => {
+                        cache_arc.write().await.insert(param.name.clone(), value.clone());
+                        results[*pos] = json!({
+                            "success": true,
+                            "name": param.name,
+                            "value": value.format(),
+                        });
+                    }
+                    (Some(param), Err(e)) => {
+                        results[*pos] = json!({ "success": false, "name": param.name, "error": e });
+                    }
+                    (None, _) => {
+                        results[*pos] = json!({ "success": false, "error": "Parameter index out of range" });
+                    }
+                }
+            }
+        } else if let Some(hex_image_arc) = hex_image_arc_opt {
+            // Acquire a single read lock on the HexImage for all reads — no clone of the map data
+            let hex_guard = hex_image_arc.read().await;
+            if let Some(hex_image) = hex_guard.as_ref() {
+                for ((pos, _), param_opt) in positions.iter().zip(params.iter()) {
+                    let param = match param_opt {
+                        Some(p) => p,
+                        None => {
+                            results[*pos] = json!({ "success": false, "error": "Parameter index out of range" });
+                            continue;
+                        }
+                    };
+                    let size = param.data_type.size() as u32;
+                    if size == 0 {
+                        results[*pos] = json!({ "success": false, "name": param.name, "error": "Unknown parameter size" });
+                        continue;
+                    }
+                    let bytes = hex_image.extract_range(param.address, size, 0xFF);
+                    if bytes.iter().all(|&b| b == 0xFF) && !hex_image.has_data_in_range(param.address, size) {
+                        results[*pos] = json!({ "success": false, "name": param.name, "error": "Address not found in HEX file" });
+                        continue;
+                    }
+                    match bytes_to_calibration_value(&bytes, &param.data_type) {
+                        Ok(value) => {
+                            cache_arc.write().await.insert(param.name.clone(), value.clone());
+                            results[*pos] = json!({
+                                "success": true,
+                                "name": param.name,
+                                "value": value.format(),
+                            });
+                        }
+                        Err(e) => {
+                            results[*pos] = json!({ "success": false, "name": param.name, "error": e });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(json!({ "results": results }))
 }
 
 /// Write a calibration parameter to the XCP slave.
@@ -336,6 +466,7 @@ pub async fn cal_detail(
                 "unit": info.unit,
                 "num_points": info.num_points,
                 "values": vals,
+                "pts_ref_name": info.pts_ref_name,
             })
         })
         .collect();

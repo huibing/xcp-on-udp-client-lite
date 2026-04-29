@@ -5530,7 +5530,7 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Ve
                 let n = values.len();
                 let axis_info = param.axis_info.first();
                 let axis = get_axis(0, n);
-                let axis_name = axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
+                let axis_name = axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
                 let unit_x = axis_info
                     .and_then(|a| a.unit.as_deref())
                     .unwrap_or("")
@@ -5549,8 +5549,8 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Ve
                 // X axis has x_count breakpoints; Y axis has y_count breakpoints
                 let x_axis = get_axis(0, x_count);
                 let y_axis = get_axis(1, y_count);
-                let x_name = x_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
-                let y_name = y_axis_info.map(|a| a.name.as_str()).unwrap_or("").to_string();
+                let x_name = x_axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
+                let y_name = y_axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
                 let unit_x = x_axis_info
                     .and_then(|a| a.unit.as_deref())
                     .unwrap_or("")

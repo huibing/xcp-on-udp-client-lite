@@ -317,7 +317,7 @@
               <thead>
                 <tr>
                   <!-- corner cell: Y-axis name for 2D, or empty for 1D -->
-                  <th class="matrix-corner">{{ matrixTransposed ? matrixYAxisName : '' }}</th>
+                  <th class="matrix-corner">{{ matrixTransposed ? "" : '' }}</th>
                   <th v-for="ci in matrixCols" :key="ci" class="matrix-col-hdr">
                     {{ matrixXAxisValues[ci - 1] ?? (ci - 1) }}
                   </th>
@@ -1105,8 +1105,8 @@ async function showMatrix(v) {
     // axes[1] = Y-axis (slow index, stored as matrix cols in ECU)
     matrixXAxisValues.value = axes[0]?.values ?? []
     matrixYAxisValues.value = axes[1]?.values ?? []
-    matrixXAxisName.value = axes[0]?.name ?? 'X'
-    matrixYAxisName.value = axes[1]?.name ?? 'Y'
+    matrixXAxisName.value = axes[0]?.pts_ref_name ?? 'X'
+    matrixYAxisName.value = axes[1]?.pts_ref_name ?? 'Y'
 
     const val = readRes.value_data ?? readRes.value
     if (Array.isArray(val) && Array.isArray(val[0])) {
