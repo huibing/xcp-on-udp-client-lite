@@ -195,6 +195,10 @@
             <option value="measurement">Measurements</option>
             <option value="calibration">Calibration</option>
           </select>
+          <select v-model="varCalTypeFilter" class="exp-sel" title="Filter by calibration characteristic type">
+            <option value="">All Cal Shapes</option>
+            <option v-for="t in availableCalTypes" :key="t" :value="t">{{ t }}</option>
+          </select>
         </div>
         <div class="modal-body var-modal-body">
           <!-- Fixed header row -->
@@ -690,6 +694,7 @@ const showVarModal = ref(false)
 const varSearch = ref('')
 const varDeviceFilter = ref('')
 const varTypeFilter = ref('')
+const varCalTypeFilter = ref('')
 const pendingVarsSet = reactive(new Set())
 
 // ── Variable modal virtual scroller ──────────────────────────────────────────
@@ -711,8 +716,8 @@ const vtTotalH = computed(() => filteredVarList.value.length * VT_ROW_H)
 
 function onVtScroll(e) { vtScrollTop.value = e.target.scrollTop }
 
-// Reset to top when filter changes or modal opens
-watch([varSearch, varDeviceFilter, varTypeFilter], () => {
+// scroll-reset watch needs to include varCalTypeFilter
+watch([varSearch, varDeviceFilter, varTypeFilter, varCalTypeFilter], () => {
   vtScrollTop.value = 0
   if (vtContainer.value) vtContainer.value.scrollTop = 0
 })
@@ -895,11 +900,23 @@ const varModalCombined = computed(() => {
   return [...meas, ...cal]
 })
 
+const availableCalTypes = computed(() => {
+  const types = new Set(allCalibrations.value.map(
+    c => (c.characteristic_type || c.type || 'VALUE').toUpperCase()
+  ))
+  return [...types].sort()
+})
+
 const filteredVarList = computed(() => {
   return varModalCombined.value.filter(v => {
     if (varSearch.value && !v.name.toLowerCase().includes(varSearch.value.toLowerCase())) return false
     if (varDeviceFilter.value && v.device_id !== varDeviceFilter.value) return false
     if (varTypeFilter.value && v.kind !== varTypeFilter.value) return false
+    if (varCalTypeFilter.value) {
+      // cal type filter only applies to calibration items; hide measurements
+      if (v.kind !== 'calibration') return false
+      if ((v.calType || '').toUpperCase() !== varCalTypeFilter.value) return false
+    }
     return true
   })
 })
@@ -996,6 +1013,7 @@ function openVarModal() {
   varSearch.value = ''
   varDeviceFilter.value = ''
   varTypeFilter.value = ''
+  varCalTypeFilter.value = ''
   showVarModal.value = true
 }
 
