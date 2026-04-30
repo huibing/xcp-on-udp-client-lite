@@ -214,12 +214,13 @@
               <div :style="{ position: 'absolute', top: vtOffset + 'px', left: 0, right: 0 }">
                 <div v-for="v in vtSlice" :key="varModalKey(v)"
                   class="vt-row" :class="{ 'vt-selected': pendingVarsSet.has(varModalKey(v)) }"
+                  :title="`${v.name}  [${v.device_name}]`"
                   @click="togglePending(v)">
                   <div class="vt-col-chk">
                     <input type="checkbox" :checked="pendingVarsSet.has(varModalKey(v))" @click.stop @change="togglePending(v)" />
                   </div>
-                  <div class="vt-col-name vt-name">{{ v.name }}</div>
-                  <div class="vt-col-dev vt-dev">{{ v.device_name }}</div>
+                  <div class="vt-col-name vt-name" :title="v.name">{{ v.name }}</div>
+                  <div class="vt-col-dev vt-dev" :title="v.device_name">{{ v.device_name }}</div>
                   <div class="vt-col-kind vt-kind">
                     <span :style="{ color: v.kind === 'measurement' ? '#00cc44' : '#ffcc00' }">
                       {{ v.kind === 'measurement' ? '📊 Meas' : '🔧 Cal' }}
