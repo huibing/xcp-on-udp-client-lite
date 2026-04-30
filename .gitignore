@@ -20,6 +20,15 @@ Thumbs.db
 # DAQ output
 daq_data.csv
 
+# Binary/data files (not for version control)
+*.jpg
+*.jpeg
+*.png
+*.dcm
+*.DCM
+*.hex
+*.mf4
+
 # dcm_utils debug output (generated in debug builds by write_dcm_data)
 /output/
 
