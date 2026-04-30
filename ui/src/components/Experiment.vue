@@ -185,7 +185,7 @@
           <button class="modal-close" @click="showVarModal = false">×</button>
         </div>
         <div class="modal-filters">
-          <input v-model="varSearch" class="exp-inp" placeholder="Search by name…" />
+          <input v-model="varSearch" class="exp-inp" placeholder="Search by name… (* wildcard)" />
           <select v-model="varDeviceFilter" class="exp-sel">
             <option value="">All Devices</option>
             <option v-for="d in varDeviceList" :key="d.id" :value="d.id">{{ d.name }}</option>
@@ -948,7 +948,14 @@ const availableCalTypes = computed(() => {
 
 const filteredVarList = computed(() => {
   return varModalCombined.value.filter(v => {
-    if (varSearch.value && !v.name.toLowerCase().includes(varSearch.value.toLowerCase())) return false
+    if (varSearch.value) {
+      const pattern = varSearch.value
+      const regex = new RegExp(
+        pattern.toLowerCase().replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*'),
+        'i'
+      )
+      if (!regex.test(v.name)) return false
+    }
     if (varDeviceFilter.value && v.device_id !== varDeviceFilter.value) return false
     if (varTypeFilter.value && v.kind !== varTypeFilter.value) return false
     if (varCalTypeFilter.value) {
@@ -1149,27 +1156,28 @@ async function refreshCalValues() {
       }
     }
   }
+  const results = await Promise.all(calVars.map(v =>
+    invoke('cal_read', { deviceId: configId(v), idx: v.idx }).catch(() => null)
+  ))
   let count = 0
-  for (const v of calVars) {
-    try {
-      const r = await invoke('cal_read', { deviceId: configId(v), idx: v.idx })
-      if (r.success) {
-        calValues[calKey(v)] = (r.is_enum && r.display_value) ? r.display_value : r.value
-        count++
-      }
-    } catch {}
+  for (let i = 0; i < calVars.length; i++) {
+    const r = results[i]
+    if (r?.success) {
+      calValues[calKey(calVars[i])] = (r.is_enum && r.display_value) ? r.display_value : r.value
+      count++
+    }
   }
   toast(`Refreshed ${count} calibration value(s)`)
 }
 
 async function snapshotOriginals(vars) {
-  for (const v of vars) {
-    const key = calKey(v)
-    if (calOriginals[key] !== undefined) continue
-    try {
-      const r = await invoke('experiment_cal_original', { deviceId: configId(v), idx: v.idx })
-      if (r.success) calOriginals[key] = r.value
-    } catch {}
+  const todo = vars.filter(v => calOriginals[calKey(v)] === undefined)
+  const results = await Promise.all(todo.map(v =>
+    invoke('experiment_cal_original', { deviceId: configId(v), idx: v.idx }).catch(() => null)
+  ))
+  for (let i = 0; i < todo.length; i++) {
+    const r = results[i]
+    if (r?.success) calOriginals[calKey(todo[i])] = r.value
   }
 }
 
