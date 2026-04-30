@@ -200,16 +200,28 @@
             <option v-for="t in availableCalTypes" :key="t" :value="t">{{ t }}</option>
           </select>
         </div>
-        <div class="modal-body var-modal-body">
+        <div class="modal-body var-modal-body" :style="vtGridVars">
           <!-- Fixed header row -->
           <div class="vt-header">
             <div class="vt-col-chk">
               <input type="checkbox" @change="toggleSelectAll($event.target.checked)" />
             </div>
-            <div class="vt-col-name vt-th">Name</div>
-            <div class="vt-col-dev vt-th">Device</div>
-            <div class="vt-col-kind vt-th">Kind</div>
-            <div class="vt-col-type vt-th">Type</div>
+            <div class="vt-col-name vt-th">
+              Name
+              <div class="vt-resize-handle" @mousedown.stop="onResizeHandleDown('name', $event)"></div>
+            </div>
+            <div class="vt-col-dev vt-th">
+              Device
+              <div class="vt-resize-handle" @mousedown.stop="onResizeHandleDown('dev', $event)"></div>
+            </div>
+            <div class="vt-col-kind vt-th">
+              Kind
+              <div class="vt-resize-handle" @mousedown.stop="onResizeHandleDown('kind', $event)"></div>
+            </div>
+            <div class="vt-col-type vt-th">
+              Type
+              <div class="vt-resize-handle" @mousedown.stop="onResizeHandleDown('type', $event)"></div>
+            </div>
             <div class="vt-col-addr vt-th">Address</div>
           </div>
           <!-- Virtual-scrolling body: only renders visible rows -->
@@ -715,6 +727,33 @@ const vtOffset = computed(() => vtStartIdx.value * VT_ROW_H)
 const vtTotalH = computed(() => filteredVarList.value.length * VT_ROW_H)
 
 function onVtScroll(e) { vtScrollTop.value = e.target.scrollTop }
+
+// ── Column resize ─────────────────────────────────────────────────────────────
+const vtColWidths = reactive({ name: 240, dev: 150, kind: 100, type: 120, addr: 100 })
+let vtResizing = null
+
+function onResizeHandleDown(col, e) {
+  e.preventDefault()
+  vtResizing = { col, startX: e.clientX, startW: vtColWidths[col] }
+  document.addEventListener('mousemove', onResizeMove)
+  document.addEventListener('mouseup', onResizeUp)
+}
+function onResizeMove(e) {
+  if (!vtResizing) return
+  vtColWidths[vtResizing.col] = Math.max(50, vtResizing.startW + (e.clientX - vtResizing.startX))
+}
+function onResizeUp() {
+  vtResizing = null
+  document.removeEventListener('mousemove', onResizeMove)
+  document.removeEventListener('mouseup', onResizeUp)
+}
+const vtGridVars = computed(() => ({
+  '--vt-w-name': vtColWidths.name + 'px',
+  '--vt-w-dev':  vtColWidths.dev  + 'px',
+  '--vt-w-kind': vtColWidths.kind + 'px',
+  '--vt-w-type': vtColWidths.type + 'px',
+  '--vt-w-addr': vtColWidths.addr + 'px',
+}))
 
 // scroll-reset watch needs to include varCalTypeFilter
 watch([varSearch, varDeviceFilter, varTypeFilter, varCalTypeFilter], () => {
@@ -1849,6 +1888,8 @@ onUnmounted(() => {
   if (statusPollInterval) clearInterval(statusPollInterval)
   if (daqUnlisten) daqUnlisten()
   window.removeEventListener('keydown', handleEsc)
+  document.removeEventListener('mousemove', onResizeMove)
+  document.removeEventListener('mouseup', onResizeUp)
 })
 </script>
 
@@ -2399,15 +2440,23 @@ onUnmounted(() => {
   overflow: hidden !important;
   display: flex;
   flex-direction: column;
+  /* default column widths (overridden by vtGridVars) */
+  --vt-w-name: 240px;
+  --vt-w-dev:  150px;
+  --vt-w-kind: 100px;
+  --vt-w-type: 120px;
+  --vt-w-addr: 100px;
 }
 .vt-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px var(--vt-w-name) var(--vt-w-dev) var(--vt-w-kind) var(--vt-w-type) minmax(var(--vt-w-addr), 1fr);
   align-items: center;
   height: 32px;
   background: var(--exp-bg4);
   border-bottom: 1px solid var(--exp-border2);
   flex-shrink: 0;
   padding: 0 4px;
+  user-select: none;
 }
 .vt-th {
   color: var(--exp-fg-dim);
@@ -2417,14 +2466,27 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  position: relative;
+  padding-right: 10px;
 }
+.vt-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+}
+.vt-resize-handle:hover { background: var(--exp-border2); }
 .vt-scroll-body {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
 }
 .vt-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px var(--vt-w-name) var(--vt-w-dev) var(--vt-w-kind) var(--vt-w-type) minmax(var(--vt-w-addr), 1fr);
   align-items: center;
   height: 36px;
   cursor: pointer;
@@ -2435,12 +2497,13 @@ onUnmounted(() => {
 }
 .vt-row:hover { background: var(--exp-bg5); }
 .vt-row.vt-selected { background: var(--exp-border3); }
-.vt-col-chk { width: 32px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
-.vt-col-name { flex: 3; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vt-col-dev  { flex: 2; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vt-col-kind { flex: 1.5; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vt-col-type { flex: 1.5; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vt-col-addr { flex: 1.5; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vt-col-chk { width: 32px; display: flex; align-items: center; justify-content: center; }
+.vt-col-name, .vt-col-dev, .vt-col-kind, .vt-col-type, .vt-col-addr {
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .vt-name { font-weight: 600; }
 .vt-dev  { color: var(--exp-fg-dim); }
 .vt-kind { font-size: 12px; }
