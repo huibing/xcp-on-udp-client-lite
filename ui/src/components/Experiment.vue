@@ -199,6 +199,10 @@
             <option value="">All Cal Shapes</option>
             <option v-for="t in availableCalTypes" :key="t" :value="t">{{ t }}</option>
           </select>
+          <select v-model="varCalTypeFilter" class="exp-sel" title="Filter by calibration characteristic type">
+            <option value="">All Cal Shapes</option>
+            <option v-for="t in availableCalTypes" :key="t" :value="t">{{ t }}</option>
+          </select>
         </div>
         <div class="modal-body var-modal-body" :style="vtGridVars">
           <!-- Fixed header row -->
@@ -674,6 +678,7 @@
 
 <script setup>
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { save, open } from '@tauri-apps/plugin-dialog'
@@ -706,6 +711,7 @@ const showVarModal = ref(false)
 const varSearch = ref('')
 const varDeviceFilter = ref('')
 const varTypeFilter = ref('')
+const varCalTypeFilter = ref('')
 const varCalTypeFilter = ref('')
 const pendingVarsSet = reactive(new Set())
 
@@ -946,6 +952,13 @@ const availableCalTypes = computed(() => {
   return [...types].sort()
 })
 
+const availableCalTypes = computed(() => {
+  const types = new Set(allCalibrations.value.map(
+    c => (c.characteristic_type || c.type || 'VALUE').toUpperCase()
+  ))
+  return [...types].sort()
+})
+
 const filteredVarList = computed(() => {
   return varModalCombined.value.filter(v => {
     if (varSearch.value) {
@@ -958,6 +971,11 @@ const filteredVarList = computed(() => {
     }
     if (varDeviceFilter.value && v.device_id !== varDeviceFilter.value) return false
     if (varTypeFilter.value && v.kind !== varTypeFilter.value) return false
+    if (varCalTypeFilter.value) {
+      // cal type filter only applies to calibration items; hide measurements
+      if (v.kind !== 'calibration') return false
+      if ((v.calType || '').toUpperCase() !== varCalTypeFilter.value) return false
+    }
     if (varCalTypeFilter.value) {
       // cal type filter only applies to calibration items; hide measurements
       if (v.kind !== 'calibration') return false
@@ -1059,6 +1077,7 @@ function openVarModal() {
   varSearch.value = ''
   varDeviceFilter.value = ''
   varTypeFilter.value = ''
+  varCalTypeFilter.value = ''
   varCalTypeFilter.value = ''
   showVarModal.value = true
 }
@@ -2513,6 +2532,7 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .vt-name { font-weight: 600; }
+.vt-dev  { color: var(--exp-fg-dim); }
 .vt-dev  { color: var(--exp-fg-dim); }
 .vt-kind { font-size: 12px; }
 .vt-type { color: var(--exp-fg-dim); font-size: 12px; }
