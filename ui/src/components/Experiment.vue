@@ -196,37 +196,41 @@
             <option value="calibration">Calibration</option>
           </select>
         </div>
-        <div class="modal-body">
-          <table class="var-table">
-            <thead>
-              <tr>
-                <th style="width:32px">
-                  <input type="checkbox" @change="toggleSelectAll($event.target.checked)" />
-                </th>
-                <th>Name</th>
-                <th>Device</th>
-                <th>Kind</th>
-                <th>Type</th>
-                <th>Address</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="v in filteredVarList" :key="varModalKey(v)"
-                :class="{ selected: pendingVarsSet.has(varModalKey(v)) }"
-                @click="togglePending(v)">
-                <td><input type="checkbox" :checked="pendingVarsSet.has(varModalKey(v))" @click.stop @change="togglePending(v)" /></td>
-                <td class="vt-name">{{ v.name }}</td>
-                <td class="vt-dev">{{ v.device_name }}</td>
-                <td>
-                  <span class="vt-kind" :style="{ color: v.kind === 'measurement' ? '#00cc44' : '#ffcc00' }">
-                    {{ v.kind === 'measurement' ? '📊 Meas' : '🔧 Cal' }}
-                  </span>
-                </td>
-                <td class="vt-type">{{ v.kind === 'measurement' ? v.type : (v.calType + ' / ' + v.type) }}</td>
-                <td class="vt-addr mono">{{ v.address_hex }}</td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="modal-body var-modal-body">
+          <!-- Fixed header row -->
+          <div class="vt-header">
+            <div class="vt-col-chk">
+              <input type="checkbox" @change="toggleSelectAll($event.target.checked)" />
+            </div>
+            <div class="vt-col-name vt-th">Name</div>
+            <div class="vt-col-dev vt-th">Device</div>
+            <div class="vt-col-kind vt-th">Kind</div>
+            <div class="vt-col-type vt-th">Type</div>
+            <div class="vt-col-addr vt-th">Address</div>
+          </div>
+          <!-- Virtual-scrolling body: only renders visible rows -->
+          <div class="vt-scroll-body" ref="vtContainer" @scroll.passive="onVtScroll">
+            <div :style="{ height: vtTotalH + 'px', position: 'relative' }">
+              <div :style="{ position: 'absolute', top: vtOffset + 'px', left: 0, right: 0 }">
+                <div v-for="v in vtSlice" :key="varModalKey(v)"
+                  class="vt-row" :class="{ 'vt-selected': pendingVarsSet.has(varModalKey(v)) }"
+                  @click="togglePending(v)">
+                  <div class="vt-col-chk">
+                    <input type="checkbox" :checked="pendingVarsSet.has(varModalKey(v))" @click.stop @change="togglePending(v)" />
+                  </div>
+                  <div class="vt-col-name vt-name">{{ v.name }}</div>
+                  <div class="vt-col-dev vt-dev">{{ v.device_name }}</div>
+                  <div class="vt-col-kind vt-kind">
+                    <span :style="{ color: v.kind === 'measurement' ? '#00cc44' : '#ffcc00' }">
+                      {{ v.kind === 'measurement' ? '📊 Meas' : '🔧 Cal' }}
+                    </span>
+                  </div>
+                  <div class="vt-col-type vt-type">{{ v.kind === 'measurement' ? v.type : (v.calType + ' / ' + v.type) }}</div>
+                  <div class="vt-col-addr vt-addr mono">{{ v.address_hex }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="modal-footer">
           <span class="modal-count">{{ pendingVarsSet.size }} selected</span>
@@ -652,7 +656,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { save, open } from '@tauri-apps/plugin-dialog'
@@ -686,6 +690,42 @@ const varSearch = ref('')
 const varDeviceFilter = ref('')
 const varTypeFilter = ref('')
 const pendingVarsSet = reactive(new Set())
+
+// ── Variable modal virtual scroller ──────────────────────────────────────────
+const VT_ROW_H = 36      // px per row — must match CSS .vt-row height
+const VT_BUFFER = 5      // extra rows to render above/below visible window
+const vtScrollTop = ref(0)
+const vtContainerH = ref(500)
+const vtContainer = ref(null)
+
+const vtStartIdx = computed(() =>
+  Math.max(0, Math.floor(vtScrollTop.value / VT_ROW_H) - VT_BUFFER))
+const vtEndIdx = computed(() =>
+  Math.min(filteredVarList.value.length,
+    Math.ceil((vtScrollTop.value + vtContainerH.value) / VT_ROW_H) + VT_BUFFER))
+const vtSlice = computed(() =>
+  filteredVarList.value.slice(vtStartIdx.value, vtEndIdx.value))
+const vtOffset = computed(() => vtStartIdx.value * VT_ROW_H)
+const vtTotalH = computed(() => filteredVarList.value.length * VT_ROW_H)
+
+function onVtScroll(e) { vtScrollTop.value = e.target.scrollTop }
+
+// Reset to top when filter changes or modal opens
+watch([varSearch, varDeviceFilter, varTypeFilter], () => {
+  vtScrollTop.value = 0
+  if (vtContainer.value) vtContainer.value.scrollTop = 0
+})
+watch(showVarModal, v => {
+  if (v) {
+    vtScrollTop.value = 0
+    nextTick(() => {
+      if (vtContainer.value) {
+        vtContainer.value.scrollTop = 0
+        vtContainerH.value = vtContainer.value.clientHeight || 500
+      }
+    })
+  }
+})
 
 // ── Cal edit modal state ──────────────────────────────────────────────────────
 const calEditTarget = ref(null)
@@ -2334,26 +2374,56 @@ onUnmounted(() => {
 .loading { text-align: center; padding: 24px; color: var(--exp-fg-dim4); }
 .loading.muted { color: #444; }
 
-/* ── Variable selection table ─────────────────────────────────────────────── */
-.var-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.var-table th {
-  padding: 8px 10px;
+/* ── Variable selection virtual scroller ─────────────────────────────────── */
+.var-modal-body {
+  padding: 0 !important;
+  overflow: hidden !important;
+  display: flex;
+  flex-direction: column;
+}
+.vt-header {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  background: var(--exp-bg4);
   border-bottom: 1px solid var(--exp-border2);
-  text-align: left;
+  flex-shrink: 0;
+  padding: 0 4px;
+}
+.vt-th {
   color: var(--exp-fg-dim);
   font-weight: 600;
   font-size: 11px;
   letter-spacing: 0.5px;
-  background: var(--exp-bg4);
-  position: sticky;
-  top: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.var-table td { padding: 7px 10px; border-bottom: 1px solid var(--exp-border3); }
-.var-table tr:hover td { background: var(--exp-bg5); }
-.var-table tr.selected td { background: var(--exp-border3); }
-.var-table tr { cursor: pointer; }
+.vt-scroll-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+.vt-row {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--exp-border3);
+  font-size: 13px;
+  padding: 0 4px;
+  box-sizing: border-box;
+}
+.vt-row:hover { background: var(--exp-bg5); }
+.vt-row.vt-selected { background: var(--exp-border3); }
+.vt-col-chk { width: 32px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+.vt-col-name { flex: 3; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vt-col-dev  { flex: 2; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vt-col-kind { flex: 1.5; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vt-col-type { flex: 1.5; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vt-col-addr { flex: 1.5; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vt-name { font-weight: 600; }
-.vt-dev { color: var(--exp-fg-dim); }
+.vt-dev  { color: var(--exp-fg-dim); }
 .vt-kind { font-size: 12px; }
 .vt-type { color: var(--exp-fg-dim); font-size: 12px; }
 .vt-addr { font-family: monospace; font-size: 12px; color: var(--exp-fg-dim2); }
