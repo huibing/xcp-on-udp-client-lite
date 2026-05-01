@@ -5,8 +5,9 @@
 /// of HTTP polling.
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
+use crate::commands::daq_live::spawn_live_daq_event_pump;
 use crate::state::SharedState;
 
 #[tauri::command]
@@ -71,29 +72,19 @@ pub async fn daq_start(
     *daq_running_arc.write().await = true;
 
     // Spawn background task to emit live data
-    let daq_mgr_arc_bg = daq_mgr_arc.clone();
-    let daq_running_arc_bg = daq_running_arc.clone();
-    let device_id_bg = device_id.clone();
-    tokio::spawn(async move {
-        loop {
-            if !*daq_running_arc_bg.read().await {
-                break;
-            }
-            let sample = {
-                let mgr = daq_mgr_arc_bg.read().await;
+    spawn_live_daq_event_pump(
+        app,
+        device_id,
+        daq_running_arc.clone(),
+        tokio::time::Duration::from_millis(100),
+        move || {
+            let daq_mgr_arc = daq_mgr_arc.clone();
+            async move {
+                let mgr = daq_mgr_arc.read().await;
                 mgr.get_latest_sample().await
-            };
-            if let Some(record) = sample {
-                let payload = json!({
-                    "device_id": device_id_bg,
-                    "timestamp_s": record.timestamp_s,
-                    "values": record.values,
-                });
-                app.emit("daq-data", &payload).ok();
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-    });
+        },
+    );
 
     Ok(json!({ "success": true }))
 }

@@ -3,9 +3,10 @@
 /// Ports web/routes.rs experiment_* handlers.
 
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, State};
 use xcp_client::slave::PageMode;
 
+use crate::commands::daq_live::spawn_live_daq_event_pump;
 use crate::commands::helpers::read_calibration_from_slave;
 use crate::state::SharedState;
 
@@ -72,6 +73,7 @@ pub async fn experiment_variables(state: State<'_, SharedState>) -> Result<Value
 /// `config` shape: `{ "selections": { "<device_id>": [idx, ...], ... } }`
 #[tauri::command]
 pub async fn experiment_start(
+    app: AppHandle,
     state: State<'_, SharedState>,
     config: Value,
 ) -> Result<Value, String> {
@@ -139,18 +141,34 @@ pub async fn experiment_start(
         }
 
         // Start DAQ (XCP I/O — no state lock held)
-        {
+        let start_result = {
             let slave_guard = slave_arc.lock().await;
             let mut daq_mgr = daq_mgr_arc.write().await;
-            match daq_mgr.start(&*slave_guard, 1000).await {
-                Ok(_) => {
-                    *daq_running_arc.write().await = true;
-                    started_count += 1;
-                    tracing::info!("Experiment DAQ started on {}", dev_name);
-                }
-                Err(e) => {
-                    errors.push(format!("{}: {}", dev_name, e));
-                }
+            daq_mgr.start(&*slave_guard, 1000).await
+        };
+
+        match start_result {
+            Ok(_) => {
+                *daq_running_arc.write().await = true;
+                started_count += 1;
+                let event_device_id = device_id_str.clone();
+                spawn_live_daq_event_pump(
+                    app.clone(),
+                    event_device_id,
+                    daq_running_arc.clone(),
+                    tokio::time::Duration::from_millis(100),
+                    move || {
+                        let daq_mgr_arc = daq_mgr_arc.clone();
+                        async move {
+                            let mgr = daq_mgr_arc.read().await;
+                            mgr.get_latest_sample().await
+                        }
+                    },
+                );
+                tracing::info!("Experiment DAQ started on {}", dev_name);
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", dev_name, e));
             }
         }
     }
@@ -586,7 +604,6 @@ pub async fn experiment_dcm_export(
     config: Value,
 ) -> Result<Value, String> {
     use xcp_client::a2l::CharacteristicType;
-    use xcp_client::calibration::CalibrationValue;
     use dcm_utils::{write_dcm_data, DcmData};
     use dcm_utils::block::Block;
     use dcm_utils::blocks::{FESTWERT, FESTWERTEBLOCK, GRUPPENKENNFELD, GRUPPENKENNLINIE};

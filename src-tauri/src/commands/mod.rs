@@ -3,6 +3,7 @@ pub mod calibration;
 pub mod checksum;
 pub mod compare;
 pub mod daq;
+pub mod daq_live;
 pub mod device;
 pub mod experiment;
 pub mod helpers;
