@@ -1477,8 +1477,10 @@ impl DaqManager {
                                 if offset + entry.size <= data.data.len() {
                                     let raw_bytes = &data.data[offset..offset + entry.size];
                                     let is_float = entry.data_type.is_float();
-                                    let physical_value =
-                                        entry.compu_method.bytes_to_display(raw_bytes, is_float);
+                                    let is_signed = entry.data_type.is_signed_integer();
+                                    let physical_value = entry.compu_method.bytes_to_display(
+                                        raw_bytes, is_float, is_signed,
+                                    );
                                     record.add_value(&entry.name, physical_value);
                                     record.add_raw_value(&entry.name, raw_bytes.to_vec());
                                 } else {

@@ -126,6 +126,14 @@ impl A2lDataType {
     pub fn is_integer(&self) -> bool {
         !self.is_float() && !matches!(self, A2lDataType::Bool)
     }
+
+    /// Check if this integer type should be decoded as signed
+    pub fn is_signed_integer(&self) -> bool {
+        matches!(
+            self,
+            A2lDataType::I8 | A2lDataType::I16 | A2lDataType::I32 | A2lDataType::I64
+        )
+    }
 }
 
 /// Characteristic type from A2L file

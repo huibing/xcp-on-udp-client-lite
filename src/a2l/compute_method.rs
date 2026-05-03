@@ -129,13 +129,13 @@ impl CompuMethod {
     ///
     /// # Returns
     /// Physical value as f64
-    pub fn bytes_to_display(&self, bytes: &[u8], is_float: bool) -> f64 {
+    pub fn bytes_to_display(&self, bytes: &[u8], is_float: bool, is_signed: bool) -> f64 {
         if is_float {
             // Float types are parsed directly, no COMPU_METHOD applied
             return parse_float_bytes(bytes);
         }
 
-        let raw = parse_int_bytes(bytes) as i64;
+        let raw = parse_int_bytes(bytes, is_signed) as i64;
         match self {
             Self::Identical => raw as f64,
             Self::Linear { factor, offset } => *factor * raw as f64 + *offset,
@@ -243,15 +243,21 @@ impl Default for CompuMethod {
 
 // ==================== Helper Functions ====================
 
-/// Parse bytes as signed integer
-fn parse_int_bytes(bytes: &[u8]) -> i64 {
-    match bytes.len() {
-        1 => bytes[0] as i8 as i64,
-        2 => i16::from_le_bytes([bytes[0], bytes[1]]) as i64,
-        4 => i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64,
-        8 => i64::from_le_bytes([
+/// Parse bytes as integer using the expected signedness
+fn parse_int_bytes(bytes: &[u8], is_signed: bool) -> i64 {
+    match (bytes.len(), is_signed) {
+        (1, true) => bytes[0] as i8 as i64,
+        (1, false) => bytes[0] as i64,
+        (2, true) => i16::from_le_bytes([bytes[0], bytes[1]]) as i64,
+        (2, false) => u16::from_le_bytes([bytes[0], bytes[1]]) as i64,
+        (4, true) => i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64,
+        (4, false) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64,
+        (8, true) => i64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]),
+        (8, false) => u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]) as i64,
         _ => 0,
     }
 }
@@ -398,7 +404,21 @@ mod tests {
     fn test_bytes_to_display_integer() {
         let method = CompuMethod::linear(2.0, 0.0); // phys = 2 * raw
         let bytes = [10u8, 0]; // raw = 10
-        assert_eq!(method.bytes_to_display(&bytes, false), 20.0);
+        assert_eq!(method.bytes_to_display(&bytes, false, false), 20.0);
+    }
+
+    #[test]
+    fn test_bytes_to_display_unsigned_u16() {
+        let method = CompuMethod::identical();
+        let bytes = [0x00u8, 0x80]; // raw = 32768 for U16/UWORD
+        assert_eq!(method.bytes_to_display(&bytes, false, false), 32768.0);
+    }
+
+    #[test]
+    fn test_bytes_to_display_signed_i16() {
+        let method = CompuMethod::identical();
+        let bytes = [0x00u8, 0x80]; // raw = -32768 for I16/SWORD
+        assert_eq!(method.bytes_to_display(&bytes, false, true), -32768.0);
     }
 
     #[test]
@@ -406,7 +426,7 @@ mod tests {
         let method = CompuMethod::linear(2.0, 0.0);
         let bytes = 3.14f32.to_le_bytes();
         // Float types skip conversion
-        assert!((method.bytes_to_display(&bytes, true) - 3.14).abs() < 0.001);
+        assert!((method.bytes_to_display(&bytes, true, false) - 3.14).abs() < 0.001);
     }
 
     #[test]

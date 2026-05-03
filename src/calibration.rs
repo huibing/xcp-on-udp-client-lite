@@ -426,7 +426,15 @@ impl CalibrationParam {
                 | CalibrationType::F32Matrix(_, _)
                 | CalibrationType::F64Matrix(_, _)
         );
-        self.compu_method.bytes_to_display(bytes, is_float)
+        let is_signed = matches!(
+            self.data_type,
+            CalibrationType::I8
+                | CalibrationType::I16
+                | CalibrationType::I32
+                | CalibrationType::I64
+        );
+        self.compu_method
+            .bytes_to_display(bytes, is_float, is_signed)
     }
 
     /// Serialize parameter metadata to JSON (without value).
