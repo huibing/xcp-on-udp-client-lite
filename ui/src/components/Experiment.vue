@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="exp-container" :class="`theme-${theme}`" :style="customThemeStyle">
     <!-- Title Bar -->
     <div class="exp-title-bar">
