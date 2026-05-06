@@ -14,6 +14,7 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 - **HEX File Support**: Intel HEX parser for firmware reference images
 - **CLI Subcommands**: Non-interactive `calibrate`, `verify`, and `daq-record` for CI/automation
 - **Web UI**: Browser-based interface with multi-slave management
+- **Desktop App (Tauri)**: Native cross-platform GUI with Experiment and Compare workflows
 - **TUI**: Interactive terminal UI for single-device debugging
 - **Transport Abstraction**: UDP and TCP support with CAN reserved for future extension
 
@@ -74,6 +75,38 @@ lib.rs → client.rs (XcpClient - Multi-Slave Manager)
             ├── routes.rs      # HTTP route handlers
             ├── state.rs       # Multi-slave state management
             └── templates.rs   # HTML templates
+
+src-tauri/ (Tauri desktop backend)
+    ├── Cargo.toml         # Tauri crate, depends on xcp_client
+    ├── tauri.conf.json    # Window config, frontend dist path
+    └── src/
+        ├── lib.rs         # Tauri builder, invoke_handler registration
+        ├── state.rs       # TauriAppState (mirrors web state, no Axum)
+        └── commands/
+            ├── device.rs       # Device CRUD & connection commands
+            ├── a2l.rs          # A2L file loading
+            ├── calibration.rs  # Read/write calibration parameters
+            ├── daq.rs          # DAQ selection, start/stop, data polling
+            ├── daq_live.rs     # Live DAQ streaming helpers
+            ├── checksum.rs     # HEX load & BUILD_CHECKSUM verify
+            ├── compare.rs      # Compare-session management
+            ├── experiment.rs   # Combined calibration+DAQ experiment mode
+            └── helpers.rs      # A2l ↔ CalibrationParam/Measurement conversion
+
+ui/ (Vue 3 frontend)
+    ├── package.json       # Vue 3, vue-router, @tauri-apps/api, vite
+    ├── vite.config.js     # Fixed port 5173, relative base path
+    └── src/
+        ├── App.vue        # Root layout: sidebar nav + <router-view>
+        ├── main.js        # Vue app bootstrap, router config
+        └── components/
+            ├── Dashboard.vue      # Device overview & connection panel
+            ├── DeviceManager.vue  # Add/remove/configure devices
+            ├── Experiment.vue     # Combined calibration + DAQ panel
+            ├── Compare.vue        # Multi-session calibration comparison
+            ├── Calibration.vue    # Calibration sub-component
+            ├── DAQ.vue            # DAQ sub-component
+            └── Checksum.vue       # Flash checksum verification
 ```
 
 ## Requirements
@@ -333,6 +366,296 @@ XCP Client Menu:
 8. Exit
 ```
 
+---
+
+## Tauri Desktop App
+
+The Tauri desktop app provides a native cross-platform GUI for XCP device management, calibration, and DAQ recording. It embeds the same `xcp_client` Rust library and exposes its full feature set through a Vue 3 frontend.
+
+### Environment Setup
+
+**Prerequisites**
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Rust | stable (1.70+) | Tauri backend |
+| Node.js | 18+ | Frontend build |
+| npm | 9+ | Package manager |
+| Tauri CLI | 2.x | Dev server & bundler |
+
+Install the Tauri CLI:
+
+```bash
+cargo install tauri-cli --version "^2"
+```
+
+Install frontend dependencies:
+
+```bash
+cd ui
+npm install
+cd ..
+```
+
+> **Windows users**: Also install [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (usually pre-installed on Windows 10/11 or included in the Tauri installer).
+
+### Development
+
+Start the app in development mode with hot-reload:
+
+```bash
+cargo tauri dev
+```
+
+This automatically:
+1. Starts the Vite dev server on `http://localhost:5173` (`ui/`)
+2. Compiles the Rust Tauri backend (`src-tauri/`)
+3. Opens the native window pointing to the dev server
+
+You can also start the frontend and backend separately:
+
+```bash
+# Terminal 1: start the Vite dev server
+cd ui && npm run dev
+
+# Terminal 2: start Tauri (will connect to the running Vite server)
+cargo tauri dev
+```
+
+### Release Build
+
+Build a distributable installer:
+
+```bash
+cargo tauri build
+```
+
+Output installers are placed in `src-tauri/target/release/bundle/`:
+
+| Platform | Format |
+|----------|--------|
+| Windows  | `.msi`, `.exe` (NSIS) |
+| macOS    | `.dmg`, `.app` |
+| Linux    | `.deb`, `.AppImage` |
+
+### Configuration
+
+Devices and their A2L/HEX paths are persisted in `config.toml` at the project root. The file is read on startup and written automatically when you add/remove devices from the UI.
+
+```toml
+[[devices]]
+id = "device_0"
+name = "ECU1"
+address = "192.168.1.100:5555"
+a2l_path = "ecu1.a2l"
+hex_path = "firmware.hex"
+max_cto = 255
+```
+
+`max_cto` is optional (default: 255). If omitted or `0`, the value from the A2L file is used.
+
+### App Pages
+
+The sidebar provides navigation to four main pages:
+
+| Page | Route | Description |
+|------|-------|-------------|
+| **Dashboard** | `/` | Connected device overview; quick connect/disconnect |
+| **Devices** | `/devices` | Add, remove, configure, and A2L/HEX-load devices |
+| **Experiment** | `/experiment` | Combined calibration + DAQ panel for live tuning |
+| **Compare** | `/compare` | Multi-session calibration comparison |
+
+#### Dashboard
+
+Shows all configured devices with connection status, A2L filename, and quick-action buttons. Clicking **Connect All** connects every device listed in `config.toml`.
+
+#### Devices
+
+Full device management:
+- Add a new device (name + address + optional A2L/HEX paths)
+- Load or reload an A2L file for any device (file dialog)
+- Load an Intel HEX file for checksum verification
+- Rename devices, remove devices
+- Connect / disconnect individual devices
+
+#### Experiment
+
+The main working page. Combines calibration browsing and DAQ recording in a single split-panel view:
+
+- **Left panel (Calibration)**: Browse parameters, read/write values, switch Working/Reference page mode, export changes to DCM
+- **Right panel (DAQ)**: Select measurements, set event channels, start/stop recording; live values update in real time
+- **Checksum tab**: Load HEX file and run `BUILD_CHECKSUM` verification per memory segment
+
+#### Compare
+
+Creates named comparison sessions. For each session:
+1. Choose a source device and capture its current calibration values
+2. Load a DCM file as the reference
+3. View a side-by-side diff of physical values (ECU live vs. reference)
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Tauri Desktop App                           │
+│                                                                     │
+│  ┌──────────────────────┐          ┌───────────────────────────┐   │
+│  │  Frontend (ui/)      │          │  Backend (src-tauri/)     │   │
+│  │                      │  invoke  │                           │   │
+│  │  Vue 3 + Vite        │ ──────►  │  Tauri 2 + Rust           │   │
+│  │  @tauri-apps/api     │ ◄──────  │  TauriAppState            │   │
+│  │  vue-router          │  result  │  Commands (device, cal,   │   │
+│  │                      │          │  daq, compare, checksum,  │   │
+│  │  Components:         │          │  experiment, a2l)         │   │
+│  │  Dashboard           │          │         │                 │   │
+│  │  DeviceManager       │          │         ▼                 │   │
+│  │  Experiment          │          │  xcp_client (Rust lib)    │   │
+│  │  Compare             │          │  XcpClient, CalManager,   │   │
+│  │                      │          │  DaqManager, A2lReader,   │   │
+│  └──────────────────────┘          │  HexImage, ChecksumVerify │   │
+│                                    └───────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+- **Frontend → Backend**: calls go through `@tauri-apps/api` `invoke()` which dispatches to registered Tauri commands.
+- **Backend**: `TauriAppState` (in `src-tauri/src/state.rs`) holds the `XcpClient` and per-device `CalibrationManager` / `DaqManager` behind `Arc<RwLock<_>>`. It mirrors the Web UI state but has no Axum dependency.
+- **Library**: `src-tauri` depends on the `xcp_client` crate via a local path dependency (`path = ".."`). No network server is started; all communication is in-process.
+
+### Tauri Commands Reference
+
+All backend functions are registered with `tauri::generate_handler![]` in `src-tauri/src/lib.rs`. Each command is an `async fn` decorated with `#[tauri::command]`.
+
+#### Pattern (Rust side)
+
+```rust
+// src-tauri/src/commands/device.rs
+#[tauri::command]
+pub async fn connect_device(
+    state: State<'_, SharedState>,   // injected shared state
+    device_id: String,               // deserialized from JS invoke args
+    transport_protocol: Option<String>,
+) -> Result<Value, String> {         // Ok(json!({...})) or Err(msg)
+    let app = state.read().await;
+    // ... do work with app.client, app.devices ...
+    Ok(json!({ "success": true, "message": "Connected" }))
+}
+```
+
+Commands that push live data to the frontend take an additional `AppHandle`:
+
+```rust
+#[tauri::command]
+pub async fn daq_start(
+    app: AppHandle,                  // used to emit Tauri events
+    state: State<'_, SharedState>,
+    device_id: String,
+) -> Result<Value, String> {
+    // spawns background task that calls app.emit("daq-data", payload)
+    spawn_live_daq_event_pump(app, ...);
+    Ok(json!({ "success": true }))
+}
+```
+
+#### Pattern (Vue 3 side)
+
+```js
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+
+// Request/response (calibration read, device connect, etc.)
+const result = await invoke('connect_device', {
+  deviceId: device.id,
+  transportProtocol: 'udp',   // camelCase → snake_case auto-converted
+})
+if (result.success) { ... }
+
+// Subscribe to live DAQ data pushed from Rust
+const unlisten = await listen('daq-data', (event) => {
+  const { device_id, values } = event.payload
+  updateChart(device_id, values)
+})
+// Call unlisten() to stop listening
+```
+
+> **Naming convention**: JS `camelCase` argument names are automatically converted to Rust `snake_case` parameter names by the Tauri IPC layer (e.g. `deviceId` → `device_id`).
+
+#### Full Command Table
+
+| Module | Command | Rust signature summary |
+|--------|---------|------------------------|
+| **device** | `list_devices` | `() → { devices: [...] }` |
+| | `add_device` | `(name, address?) → { device_id }` |
+| | `connect_device` | `(device_id, transport_protocol?) → { success }` |
+| | `disconnect_device` | `(device_id) → { success }` |
+| | `remove_device` | `(device_id) → { success }` |
+| | `rename_device` | `(device_id, name) → { success }` |
+| | `connect_all_devices` | `(transport_protocols?) → { connected }` |
+| **a2l** | `load_a2l` | `(device_id, file_path) → { success, cal_count, meas_count }` |
+| **calibration** | `cal_available` | `() → { params: [...] }` |
+| | `cal_read` | `(device_id, idx) → { value, display }` |
+| | `cal_read_all` | `(items: [{device_id, idx}]) → { results: [...] }` |
+| | `cal_write` | `(device_id, idx, value) → { success }` |
+| | `cal_write_element` | `(device_id, idx, row, col, value) → { success }` |
+| | `cal_value` | `(device_id, idx) → cached value` |
+| | `cal_detail` | `(device_id, idx) → full param info` |
+| | `get_page_mode` | `() → "working" \| "reference"` |
+| | `switch_page_mode` | `(device_id, mode) → { success }` |
+| **daq** | `daq_available` | `() → { measurements: [...] }` |
+| | `daq_start` | `(device_id) → { success }` |
+| | `daq_stop` | `(device_id) → { success }` |
+| | `daq_status` | `() → { running: bool }` |
+| | `daq_toggle` | `(device_id, idx) → { success }` |
+| | `daq_set_selection` | `(device_id, indices: [int]) → { success }` |
+| | `daq_clear` | `(device_id) → { success }` |
+| | `daq_data` | `(device_id) → latest sample` |
+| | `daq_events` | `(device_id) → available events` |
+| | `daq_set_event` | `(device_id, event_channel) → { success }` |
+| | `daq_set_measurement_events` | `(device_id, mappings) → { success }` |
+| | `daq_start_recording` | `(device_id, config) → { success }` |
+| | `daq_stop_recording` | `(device_id) → { success }` |
+| | `daq_download_csv` | `(device_id) → csv string` |
+| **checksum** | `hex_load` | `(device_id, file_path) → { success }` |
+| | `checksum_verify` | `(device_id) → { report: [...] }` |
+| **compare** | `compare_sessions` | `() → { sessions: [...] }` |
+| | `compare_create_session` | `() → { session_id }` |
+| | `compare_rename_session` | `(session_id, name) → { success }` |
+| | `compare_delete_session` | `(session_id) → { success }` |
+| | `compare_load_source` | `(session_id, side, source) → { success }` |
+| | `compare_clear_source` | `(session_id, side) → { success }` |
+| | `compare_variables` | `(session_id, ...) → { variables }` |
+| | `compare_select_variables` | `(session_id, names) → { success }` |
+| | `compare_result` | `(session_id) → { diff: [...] }` |
+| **experiment** | `experiment_variables` | `() → { measurements, calibrations }` |
+| | `experiment_start` | `(config) → { success }` |
+| | `experiment_stop` | `() → { success }` |
+| | `experiment_status` | `() → { running }` |
+| | `experiment_pagemode` | `(mode) → { success }` |
+| | `experiment_rename_slave` | `(device_id, name) → { success }` |
+| | `experiment_checksum` | `(config) → { report }` |
+| | `experiment_cal_changed` | `(device_id, idx) → bool` |
+| | `experiment_dcm_export` | `(device_id, path) → { success }` |
+| | `experiment_cal_write` | `(device_id, idx, value) → { success }` |
+| | `experiment_cal_original` | `(device_id, idx) → original value` |
+| | `experiment_record_start` | `(config) → { success }` |
+| | `experiment_record_stop` | `() → { success }` |
+| | `write_text_file` | `(path, content) → { success }` |
+| | `read_text_file` | `(path) → content string` |
+
+#### Live Events (Rust → Frontend)
+
+| Event name | Payload | Emitted by |
+|------------|---------|------------|
+| `daq-data` | `{ device_id, values: { name: f64 } }` | `daq_live::spawn_live_daq_event_pump` |
+| `experiment-data` | `{ device_id, values: { name: f64 } }` | `experiment_start` background task |
+
+#### Adding a New Command
+
+1. Add the `async fn` with `#[tauri::command]` in the appropriate `src-tauri/src/commands/*.rs` file.
+2. Register it in `src-tauri/src/lib.rs` inside `tauri::generate_handler![...]`.
+3. Call it from Vue with `invoke('command_name', { argName: value })`.
+
+---
+
 ### Library Usage
 
 ```rust
@@ -442,6 +765,8 @@ Each slave maintains independent:
 
 ## Dependencies
 
+### Core Library (`xcp_client`)
+
 | Crate | Version | Purpose |
 |-------|---------|---------|
 | tokio | 1 | Async runtime |
@@ -458,6 +783,19 @@ Each slave maintains independent:
 | toml | 0.8 | TOML config file parsing |
 | uuid | 1.6 | Slave ID generation |
 | async-trait | 0.1 | Transport abstraction |
+
+### Tauri Desktop App (`src-tauri`)
+
+| Crate / Package | Version | Purpose |
+|-----------------|---------|---------|
+| tauri | 2 | Native window & IPC runtime |
+| tauri-plugin-dialog | 2 | Native file-open/save dialogs |
+| tauri-plugin-shell | 2 | Shell command helpers |
+| vue | ^3.5 | Frontend UI framework |
+| vue-router | ^4.5 | SPA routing |
+| vite | ^6 | Frontend build tool |
+| @tauri-apps/api | ^2 | `invoke()` IPC bridge |
+| @vitejs/plugin-vue | ^5 | Vite plugin for Vue SFCs |
 
 ## Testing
 
@@ -485,14 +823,15 @@ cargo test test_name -- --nocapture
 
 ```
 .
-├── Cargo.toml           # Project configuration
+├── Cargo.toml           # Core library & CLI workspace member
 ├── README.md            # This file
 ├── CLAUDE.md            # Development guide
+├── config.toml          # Device config (auto-generated by Tauri app)
 ├── docs/                # Documentation
 │   ├── multi-slave-refactor-plan.md
 │   ├── build_checksum_design.md
 │   └── specs/
-├── src/
+├── src/                 # Core library + CLI entry
 │   ├── main.rs          # Application entry & CLI args
 │   ├── lib.rs           # Library exports
 │   ├── client.rs        # Multi-slave XcpClient
@@ -510,6 +849,20 @@ cargo test test_name -- --nocapture
 │   ├── transport/       # Transport abstraction
 │   ├── tui/             # Terminal UI (single-device)
 │   └── web/             # Web UI (multi-device)
+├── src-tauri/           # Tauri desktop app backend
+│   ├── Cargo.toml       # Tauri crate (depends on xcp_client)
+│   ├── tauri.conf.json  # Window config, bundle targets
+│   └── src/
+│       ├── lib.rs        # Tauri builder, command registration
+│       ├── state.rs      # TauriAppState, DeviceState, DeviceConfig
+│       └── commands/     # Tauri command implementations
+├── ui/                  # Vue 3 frontend (Tauri)
+│   ├── package.json     # npm dependencies
+│   ├── vite.config.js   # Vite config (port 5173, relative base)
+│   └── src/
+│       ├── App.vue       # Root layout + sidebar
+│       ├── main.js       # Router & app bootstrap
+│       └── components/   # Page components
 └── hello_xcp.a2l        # Example A2L file
 ```
 
