@@ -80,6 +80,11 @@
                   <div class="card-header">
                     <span class="card-device">{{ v.device_name }}</span>
                     <div class="card-actions">
+                      <span
+                        class="card-graph-btn"
+                        :class="{ graphed: isGraphed(v) }"
+                        @click.stop="toggleGraph(v)"
+                        title="Toggle signal graph">📈</span>
                       <span class="card-info-btn" @click.stop="showInfo(v)">ℹ</span>
                       <span class="card-remove" @click.stop="removeVar(v)">✕</span>
                     </div>
@@ -150,6 +155,17 @@
               </div>
             </div>
           </template>
+
+            <!-- SIGNAL GRAPH section -->
+            <SignalChart
+              v-if="tabGraphedSignals.length > 0"
+              :signals="tabGraphedSignals"
+              :historyStore="signalHistoryStore"
+              :running="mode !== 'idle'"
+              :startEpoch="chartStartEpoch"
+              :gridColor="chartGridColor"
+              :tickColor="chartTickColor"
+            />
         </div>
       </div>
     </div>
@@ -678,8 +694,17 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { save, open } from '@tauri-apps/plugin-dialog'
 import { useRouter } from 'vue-router'
+import SignalChart from './SignalChart.vue'
 
 const STORAGE_KEY = 'exp_tauri_state_v3'
+
+// ── Signal graph constants ────────────────────────────────────────────────────
+const SIGNAL_COLORS = [
+  '#00ff66', '#ff6644', '#44aaff', '#ffcc00',
+  '#ff44cc', '#44ffcc', '#aa44ff', '#ff8844',
+  '#88ff44', '#ff4488', '#00ccff', '#ffaa44',
+]
+const MAX_HISTORY_POINTS = 50000
 
 // ── Core state ────────────────────────────────────────────────────────────────
 const expTitle = ref('Experiment')
@@ -898,6 +923,10 @@ let toastTimer = null
 let statusPollInterval = null
 let daqUnlisten = null
 
+// ── Signal history (plain Map, not reactive — polled by SignalChart timer) ────
+const signalHistoryStore = new Map()   // key "device_id:name" → { times: number[], values: number[] }
+const chartStartEpoch = ref(null)      // epoch ms when current DAQ session started
+
 // ── Computed ──────────────────────────────────────────────────────────────────
 const activeTab = computed(() => tabs.value.find(t => t.id === activeTabId.value) ?? null)
 
@@ -991,6 +1020,61 @@ function getLiveValue(v) {
     return Number.isInteger(val) ? String(val) : val.toFixed(4).replace(/\.?0+$/, '')
   }
   return String(val)
+}
+
+// ── Graph helpers ─────────────────────────────────────────────────────────────
+/** History key matches liveValues key format */
+function historyKey(v) { return `${v.device_id}:${v.name}` }
+
+function isGraphed(v) {
+  return activeTab.value?.graphedKeys?.includes(historyKey(v)) ?? false
+}
+
+function toggleGraph(v) {
+  if (!activeTab.value) return
+  if (!activeTab.value.graphedKeys) activeTab.value.graphedKeys = []
+  const key = historyKey(v)
+  const idx = activeTab.value.graphedKeys.indexOf(key)
+  if (idx >= 0) activeTab.value.graphedKeys.splice(idx, 1)
+  else activeTab.value.graphedKeys.push(key)
+  saveState()
+}
+
+/** Signals for the active tab's graph, with stable colors by position */
+const tabGraphedSignals = computed(() => {
+  const keys = activeTab.value?.graphedKeys ?? []
+  return keys.map((hkey, i) => {
+    const [devId, ...rest] = hkey.split(':')
+    const name = rest.join(':')
+    const v = activeMeasurements.value.find(
+      m => m.device_id === devId && m.name === name
+    )
+    return {
+      key: hkey,
+      name: v?.name ?? name,
+      device_name: v?.device_name ?? devId,
+      color: SIGNAL_COLORS[i % SIGNAL_COLORS.length],
+    }
+  })
+})
+
+/** Chart grid color matching current theme */
+const chartGridColor = computed(() => {
+  if (theme.value === 'light') return 'rgba(0,0,0,0.1)'
+  if (theme.value === 'blue')  return 'rgba(100,140,200,0.15)'
+  return 'rgba(0,200,100,0.1)'
+})
+
+/** Chart tick label color matching current theme */
+const chartTickColor = computed(() => {
+  if (theme.value === 'light') return '#555555'
+  if (theme.value === 'blue')  return '#8fadc8'
+  return '#00aa33'
+})
+
+/** Clear history on new DAQ session */
+function resetHistory() {
+  signalHistoryStore.clear()
 }
 
 function getChangeMark(v) {
@@ -1116,6 +1200,8 @@ async function startDaq() {
     toast('No measurements selected across any tab', true)
     return
   }
+  resetHistory()
+  chartStartEpoch.value = Date.now()
   try {
     const res = await invoke('experiment_start', { config: { selections } })
     if (res.success || res.started > 0) {
@@ -1886,8 +1972,24 @@ onMounted(async () => {
   daqUnlisten = await listen('daq-data', event => {
     const { device_id, values } = event.payload
     if (values && typeof values === 'object') {
+      const relT = chartStartEpoch.value != null
+        ? (Date.now() - chartStartEpoch.value) / 1000
+        : 0
+
       for (const [name, val] of Object.entries(values)) {
         liveValues[`${device_id}:${name}`] = val
+
+        // Accumulate chart history (plain Map, non-reactive)
+        const hkey = `${device_id}:${name}`
+        let h = signalHistoryStore.get(hkey)
+        if (!h) { h = { times: [], values: [] }; signalHistoryStore.set(hkey, h) }
+        h.times.push(relT)
+        h.values.push(typeof val === 'number' ? val : parseFloat(val) || 0)
+        // Cap to prevent unbounded growth
+        if (h.times.length > MAX_HISTORY_POINTS) {
+          h.times.splice(0, 1000)
+          h.values.splice(0, 1000)
+        }
       }
     }
   })
@@ -2270,6 +2372,22 @@ onUnmounted(() => {
 }
 .card-info-btn:hover { color: var(--exp-fg); background: var(--exp-border3); }
 .card-remove:hover { color: #ff4466; background: #1a0000; }
+
+/* Graph toggle button on measurement cards */
+.card-graph-btn {
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 3px;
+  opacity: 0.4;
+  transition: opacity 0.15s, filter 0.15s;
+}
+.card-graph-btn:hover { opacity: 0.85; background: var(--exp-border3); }
+.card-graph-btn.graphed {
+  opacity: 1;
+  filter: drop-shadow(0 0 3px #00ff66);
+}
 
 .card-name {
   font-size: 13px;
