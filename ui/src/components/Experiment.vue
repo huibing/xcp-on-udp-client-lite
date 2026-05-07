@@ -378,7 +378,8 @@
                   <!-- row header: Y-axis value for 2D, index for 1D -->
                   <td class="matrix-ri">{{ matrixTransposed ? (matrixYAxisValues[ri] ?? ri) : ri }}</td>
                   <td v-for="(cell, ci) in row" :key="ci">
-                    <input class="matrix-cell" :value="cell"
+                    <input class="matrix-cell"
+                      v-model="matrixData[ri][ci]"
                       :disabled="pageMode !== 'working'"
                       @change="e => writeCell(ri, ci, e.target.value)" />
                   </td>
