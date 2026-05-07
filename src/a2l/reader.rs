@@ -459,6 +459,80 @@ impl A2lReader {
         characteristics
     }
 
+    /// Get all AXIS_PTS objects as calibration characteristics (1D arrays).
+    /// Each AXIS_PTS is exposed as a `CharacteristicType::ValBlk` with the
+    /// appropriate array element type and `max_axis_points` as the array length.
+    pub fn get_axis_pts_as_characteristics(&self) -> Vec<A2lCharacteristic> {
+        let mut result = Vec::new();
+        for module in &self.file.project.module {
+            for ap in &module.axis_pts {
+                if let Some(ch) = self.parse_axis_pts_as_characteristic(ap, module) {
+                    result.push(ch);
+                }
+            }
+        }
+        result
+    }
+
+    fn parse_axis_pts_as_characteristic(
+        &self,
+        ap: &a2lfile::AxisPts,
+        module: &a2lfile::Module,
+    ) -> Option<A2lCharacteristic> {
+        let name = ap.get_name().to_string();
+        let description = ap.long_identifier.clone();
+        let address = ap.address;
+        let address_ext = ap
+            .ecu_address_extension
+            .as_ref()
+            .map(|ext| ext.extension as u8)
+            .unwrap_or(0);
+        let num_points = ap.max_axis_points as usize;
+        if num_points == 0 {
+            return None;
+        }
+
+        // Resolve element data type from record layout
+        let elem_type = self.get_axis_pts_datatype(ap, module)?;
+
+        // Wrap scalar element type in its corresponding Array variant
+        let array_type = match elem_type {
+            A2lDataType::U8 => A2lDataType::U8Array(num_points),
+            A2lDataType::U16 => A2lDataType::U16Array(num_points),
+            A2lDataType::U32 => A2lDataType::U32Array(num_points),
+            A2lDataType::U64 => A2lDataType::U64Array(num_points),
+            A2lDataType::I8 => A2lDataType::I8Array(num_points),
+            A2lDataType::I16 => A2lDataType::I16Array(num_points),
+            A2lDataType::I32 => A2lDataType::I32Array(num_points),
+            A2lDataType::I64 => A2lDataType::I64Array(num_points),
+            A2lDataType::F32 => A2lDataType::F32Array(num_points),
+            A2lDataType::F64 => A2lDataType::F64Array(num_points),
+            A2lDataType::Bool => A2lDataType::BoolArray(num_points),
+            // Already an array/matrix – skip (shouldn't happen for AXIS_PTS)
+            _ => return None,
+        };
+
+        let unit = self.get_unit_for_conversion(&ap.conversion);
+        let min = ap.lower_limit;
+        let max = ap.upper_limit;
+        let conversion_name = ap.conversion.clone();
+
+        Some(A2lCharacteristic {
+            name,
+            description,
+            address,
+            address_ext,
+            data_type: array_type,
+            unit,
+            min,
+            max,
+            characteristic_type: CharacteristicType::ValBlk,
+            axis_info: vec![],
+            storage_order: StorageOrder::RowDir,
+            conversion_name,
+        })
+    }
+
     /// Get all DAQ event channels parsed from the A2L file
     pub fn get_events(&self) -> Vec<super::types::DaqEvent> {
         self.events.clone()

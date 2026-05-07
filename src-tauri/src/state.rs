@@ -291,6 +291,12 @@ impl TauriAppState {
                 cal_manager.add_param(param);
             }
         }
+        // Also expose AXIS_PTS objects as calibration parameters (1-D arrays)
+        for axis_ch in reader.get_axis_pts_as_characteristics() {
+            if let Some(param) = convert_characteristic(axis_ch, &reader) {
+                cal_manager.add_param(param);
+            }
+        }
         cal_manager.set_memory_segments(memory_segments);
 
         let mut daq_manager = DaqManager::new();

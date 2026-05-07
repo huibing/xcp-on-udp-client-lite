@@ -1334,19 +1334,25 @@ impl App {
             let reader = A2lReader::load(&path_clone)?;
             let measurements = reader.get_measurements();
             let characteristics = reader.get_characteristics();
+            let axis_pts_chars = reader.get_axis_pts_as_characteristics();
             let slave_addrs = reader.get_slave_addresses();
-            Ok::<_, String>((measurements, characteristics, slave_addrs))
+            Ok::<_, String>((measurements, characteristics, axis_pts_chars, slave_addrs))
         })
         .await?;
 
         self.loading = false;
 
         match result {
-            Ok((measurements, characteristics, slave_addrs)) => {
+            Ok((measurements, characteristics, axis_pts_chars, slave_addrs)) => {
                 // Clear existing params and load from A2L
                 self.cal_manager.clear_params();
                 for ch in characteristics {
                     if let Some(param) = Self::convert_characteristic(ch) {
+                        self.cal_manager.add_param(param);
+                    }
+                }
+                for axis_ch in axis_pts_chars {
+                    if let Some(param) = Self::convert_characteristic(axis_ch) {
                         self.cal_manager.add_param(param);
                     }
                 }

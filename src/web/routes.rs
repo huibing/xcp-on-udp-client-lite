@@ -2877,6 +2877,12 @@ pub async fn a2l_load(
             cal_manager.add_param(param);
         }
     }
+    // Also expose AXIS_PTS objects as calibration parameters (1-D arrays)
+    for axis_ch in reader.get_axis_pts_as_characteristics() {
+        if let Some(param) = convert_characteristic(axis_ch, &reader) {
+            cal_manager.add_param(param);
+        }
+    }
     let memory_segments = reader.get_memory_segments();
     cal_manager.set_memory_segments(memory_segments);
 
