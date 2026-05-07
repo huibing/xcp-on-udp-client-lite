@@ -1187,7 +1187,7 @@ async function refreshCalValues() {
   for (let i = 0; i < calVars.length; i++) {
     const r = results[i]
     if (r?.success) {
-      calValues[calKey(calVars[i])] = (r.is_enum && r.display_value) ? r.display_value : r.value
+      calValues[calKey(calVars[i])] = r.display_value ?? r.value
       count++
     }
   }
@@ -1228,7 +1228,7 @@ async function saveCal() {
     })
     if (res.success) {
       const rr = await invoke('cal_read', { deviceId: configId(v), idx: v.idx })
-      if (rr.success) calValues[calKey(v)] = (rr.is_enum && rr.display_value) ? rr.display_value : rr.value
+      if (rr.success) calValues[calKey(v)] = rr.display_value ?? rr.value
       // Track modification for DCM export
       const cpKey = `${configId(v)}:${v.name}`
       changedParams[cpKey] = {

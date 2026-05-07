@@ -82,11 +82,11 @@ pub async fn cal_read(
         cal_values_arc.write().await.insert(param.name.clone(), value.clone());
 
         let is_enum = param.is_enum();
-        let display_value: Option<String> = if is_enum {
-            cal_value_to_raw_i64(&value).map(|raw| param.format_value(raw))
-        } else {
-            None
-        };
+        // Apply COMPU_METHOD for all scalar integer types (enum, LINEAR, IDENTICAL, …).
+        // For F32/F64 and array/matrix types, cal_value_to_raw_i64 returns None and
+        // the raw value.format() is already the physical value.
+        let display_value: Option<String> =
+            cal_value_to_raw_i64(&value).map(|raw| param.format_value(raw));
         return Ok(json!({
             "success": true,
             "name": param.name,
@@ -117,11 +117,8 @@ pub async fn cal_read(
             cal_values_arc.write().await.insert(param.name.clone(), value.clone());
 
             let is_enum = param.is_enum();
-            let display_value: Option<String> = if is_enum {
-                cal_value_to_raw_i64(&value).map(|raw| param.format_value(raw))
-            } else {
-                None
-            };
+            let display_value: Option<String> =
+                cal_value_to_raw_i64(&value).map(|raw| param.format_value(raw));
             return Ok(json!({
                 "success": true,
                 "name": param.name,
