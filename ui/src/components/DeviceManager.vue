@@ -465,7 +465,7 @@ onMounted(refresh)
 
 <style scoped>
 .page {
-  color: #00cc44;
+  color: var(--exp-fg, #00cc44);
 }
 
 .page-header {
@@ -477,19 +477,19 @@ onMounted(refresh)
 }
 
 h1 {
-  color: #00ff66;
+  color: var(--exp-fg-bright, #00ff66);
   margin: 0;
   font-size: 1.4rem;
 }
 
 h2 {
   margin: 0 0 0.9rem;
-  color: #00ff66;
+  color: var(--exp-fg-bright, #00ff66);
 }
 
 .card {
-  background: #0d0d0d;
-  border: 1px solid #0f3460;
+  background: var(--exp-bg3, #0d0d0d);
+  border: 1px solid var(--exp-border, #0f3460);
   padding: 1rem;
   border-radius: 8px;
 }
@@ -501,7 +501,7 @@ h2 {
 }
 
 .device-card.connected {
-  border-color: #00ff66;
+  border-color: var(--exp-fg-bright, #00ff66);
 }
 
 .device-header {
@@ -514,7 +514,7 @@ h2 {
 
 .device-address {
   margin-left: auto;
-  color: #888;
+  color: var(--exp-fg-dim, #888);
   font-size: 0.85rem;
 }
 
@@ -526,14 +526,14 @@ h2 {
 }
 
 .panel {
-  background: #111827;
-  border: 1px solid #003311;
+  background: var(--exp-bg3, #111827);
+  border: 1px solid var(--exp-border, #003311);
   border-radius: 6px;
   padding: 0.85rem;
 }
 
 .panel-title {
-  color: #888;
+  color: var(--exp-fg-dim, #888);
   font-size: 0.8rem;
   margin-bottom: 0.35rem;
 }
@@ -541,16 +541,16 @@ h2 {
 .panel-value {
   min-height: 1.5rem;
   margin-bottom: 0.6rem;
-  color: #888;
+  color: var(--exp-fg-dim, #888);
 }
 
 .panel-value.ok {
-  color: #00ff66;
+  color: var(--exp-fg-bright, #00ff66);
 }
 
 .panel-meta {
   margin-top: 0.4rem;
-  color: #888;
+  color: var(--exp-fg-dim, #888);
   font-size: 0.8rem;
 }
 
@@ -568,9 +568,9 @@ h2 {
 .sel,
 .inp,
 .name-input {
-  background: #0a0a0a;
-  border: 1px solid #003311;
-  color: #00cc44;
+  background: var(--exp-bg4, #0a0a0a);
+  border: 1px solid var(--exp-border, #003311);
+  color: var(--exp-fg, #00cc44);
   padding: 0.45rem 0.65rem;
   font-family: Consolas, monospace;
   font-size: 0.9rem;
@@ -588,21 +588,21 @@ h2 {
 }
 
 .name-input:focus {
-  border-color: #00cc44;
+  border-color: var(--exp-fg, #00cc44);
   outline: none;
 }
 
 button {
-  background: #001a09;
-  border: 1px solid #00cc44;
-  color: #00cc44;
+  background: var(--exp-border3, #001a09);
+  border: 1px solid var(--exp-fg, #00cc44);
+  color: var(--exp-fg, #00cc44);
   padding: 0.45rem 0.9rem;
   cursor: pointer;
   font-family: Consolas, monospace;
 }
 
 button:hover:not(:disabled) {
-  background: #003311;
+  background: var(--exp-hover, #003311);
 }
 
 button:disabled {
@@ -611,7 +611,7 @@ button:disabled {
 }
 
 button.secondary {
-  border-color: #0f3460;
+  border-color: var(--exp-border, #0f3460);
   color: #9cc8ff;
 }
 
@@ -639,8 +639,8 @@ button.danger:hover:not(:disabled) {
 }
 
 .tag.connected {
-  color: #00ff66;
-  border-color: #006622;
+  color: var(--exp-fg-bright, #00ff66);
+  border-color: var(--exp-fg-dim3, #006622);
 }
 
 .tag.disconnected {
@@ -654,7 +654,7 @@ button.danger:hover:not(:disabled) {
 }
 
 .empty-state {
-  color: #888;
+  color: var(--exp-fg-dim, #888);
   text-align: center;
   padding: 2rem;
 }
@@ -670,8 +670,8 @@ button.danger:hover:not(:disabled) {
 }
 
 .modal {
-  background: #0d0d0d;
-  border: 1px solid #003311;
+  background: var(--exp-bg3, #0d0d0d);
+  border: 1px solid var(--exp-border, #003311);
   border-radius: 8px;
   padding: 1.25rem;
   min-width: 360px;
@@ -690,15 +690,15 @@ button.danger:hover:not(:disabled) {
   z-index: 200;
   padding: 0.8rem 1rem;
   border-radius: 6px;
-  background: #111;
+  background: var(--exp-bg5, #111);
   border: 1px solid #333;
   color: #e5e7eb;
   max-width: 420px;
 }
 
 .toast.success {
-  border-color: #006622;
-  color: #00ff66;
+  border-color: var(--exp-fg-dim3, #006622);
+  color: var(--exp-fg-bright, #00ff66);
 }
 
 .toast.error {
