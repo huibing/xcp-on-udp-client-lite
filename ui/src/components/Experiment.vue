@@ -19,7 +19,8 @@
           {{ dcmExporting ? '⏳' : '💾' }}
         </button>
         <div class="sb-sep"></div>
-        <button class="sb-btn" title="Add / Remove Variables" @click="openVarModal">📋</button>
+        <button class="sb-btn" title="Add / Remove Variables" @click="openVarModal"
+          :class="{ 'sb-locked': mode !== 'idle' }">📋</button>
         <div class="sb-sep"></div>
         <button v-if="mode === 'idle'" class="sb-btn" title="Start DAQ" @click="startDaq">▶</button>
         <button v-if="mode === 'running'" class="sb-btn rec-btn" title="Start Recording" @click="startRecording">⏺</button>
@@ -86,7 +87,11 @@
                         @click.stop="toggleGraph(v)"
                         title="Toggle signal graph">📈</span>
                       <span class="card-info-btn" @click.stop="showInfo(v)">ℹ</span>
-                      <span class="card-remove" @click.stop="removeVar(v)">✕</span>
+                      <span
+                        class="card-remove"
+                        :class="{ 'card-locked': mode !== 'idle' }"
+                        @click.stop="removeVar(v)"
+                        :title="mode !== 'idle' ? 'Stop DAQ to remove variables' : 'Remove'">✕</span>
                     </div>
                   </div>
                   <div class="card-name">{{ v.name }}</div>
@@ -118,7 +123,11 @@
                     <span class="card-device">{{ v.device_name }}</span>
                     <div class="card-actions">
                       <span class="card-info-btn" @click.stop="showInfo(v)">ℹ</span>
-                      <span class="card-remove" @click.stop="removeVar(v)">✕</span>
+                      <span
+                        class="card-remove"
+                        :class="{ 'card-locked': mode !== 'idle' }"
+                        @click.stop="removeVar(v)"
+                        :title="mode !== 'idle' ? 'Stop DAQ to remove variables' : 'Remove'">✕</span>
                     </div>
                   </div>
                   <div class="card-name">{{ v.name }}</div>
@@ -143,7 +152,11 @@
                   class="var-card cal-card map-card" :title="`${v.device_name} / ${v.name}`">
                   <div class="card-header">
                     <span class="card-device">{{ v.device_name }}</span>
-                    <span class="card-remove" @click.stop="removeVar(v)">✕</span>
+                    <span
+                      class="card-remove"
+                      :class="{ 'card-locked': mode !== 'idle' }"
+                      @click.stop="removeVar(v)"
+                      :title="mode !== 'idle' ? 'Stop DAQ to remove variables' : 'Remove'">✕</span>
                   </div>
                   <div class="card-name">{{ v.name }}</div>
                   <div class="card-type">{{ v.calType }}</div>
@@ -1141,6 +1154,10 @@ function startRename(tab) {
 
 // ── Variable modal ────────────────────────────────────────────────────────────
 function openVarModal() {
+  if (mode.value !== 'idle') {
+    toast('Stop DAQ before adding or removing variables', true)
+    return
+  }
   pendingVarsSet.clear()
   if (activeTab.value) {
     for (const v of activeTab.value.variables) pendingVarsSet.add(varKey(v))
@@ -1180,6 +1197,10 @@ function applyVarSelection() {
 }
 
 function removeVar(v) {
+  if (mode.value !== 'idle') {
+    toast('Stop DAQ before removing variables', true)
+    return
+  }
   if (!activeTab.value) return
   const key = varKey(v)
   activeTab.value.variables = activeTab.value.variables.filter(x => varKey(x) !== key)
@@ -2387,6 +2408,16 @@ onUnmounted(() => {
 .card-graph-btn.graphed {
   opacity: 1;
   filter: drop-shadow(0 0 3px #00ff66);
+}
+
+/* Locked state: remove button and add-var sidebar button when DAQ is active */
+.card-locked {
+  opacity: 0.25 !important;
+  cursor: not-allowed !important;
+}
+.sb-locked {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
 }
 
 .card-name {
