@@ -6,14 +6,16 @@ import Dashboard from './components/Dashboard.vue'
 import DeviceManager from './components/DeviceManager.vue'
 import Experiment from './components/Experiment.vue'
 import Compare from './components/Compare.vue'
+import Settings from './components/Settings.vue'
 
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/', component: Dashboard },
-    { path: '/devices', component: DeviceManager },
-    { path: '/experiment', component: Experiment },
-    { path: '/compare', component: Compare },
+    { path: '/',          component: Dashboard },
+    { path: '/devices',   component: DeviceManager },
+    { path: '/experiment',component: Experiment },
+    { path: '/compare',   component: Compare },
+    { path: '/settings',  component: Settings },
   ],
 })
 

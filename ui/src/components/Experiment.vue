@@ -1,5 +1,5 @@
 <template>
-  <div class="exp-container" :class="`theme-${theme}`" :style="customThemeStyle">
+  <div class="exp-container">
     <!-- Title Bar -->
     <div class="exp-title-bar">
       <span class="exp-icon">🧪</span>
@@ -519,25 +519,11 @@
             </div>
             <div class="form-hint">Click device name to rename</div>
           </div>
-          <div class="form-group">
-            <label class="form-label">UI Theme</label>
-            <div class="theme-picker">
-              <button v-for="t in themeOptions" :key="t.id"
-                class="theme-btn" :class="{ active: theme === t.id }"
-                :title="t.label" @click="theme = t.id">
-                <span class="theme-swatch" :style="{ background: t.bg, color: t.fg }">Aa</span>
-                <span class="theme-name">{{ t.label }}</span>
-              </button>
-            </div>
-            <div v-if="theme === 'custom'" class="theme-custom-row">
-              <label class="form-hint">Background</label>
-              <input type="color" v-model="customBg" class="color-pick" />
-              <label class="form-hint" style="margin-left:10px">Foreground</label>
-              <input type="color" v-model="customFg" class="color-pick" />
-            </div>
-          </div>
           <div class="cfg-dev-link">
             <a href="#" @click.prevent="goToDevMgr">→ Device Manager (A2L, HEX files)</a>
+          </div>
+          <div class="cfg-dev-link" style="margin-top:6px">
+            <a href="#" @click.prevent="showConfigModal = false; $router.push('/settings')">→ UI Theme / Appearance (Settings page)</a>
           </div>
         </div>
         <div class="modal-footer">
@@ -708,6 +694,7 @@ import { listen } from '@tauri-apps/api/event'
 import { save, open } from '@tauri-apps/plugin-dialog'
 import { useRouter } from 'vue-router'
 import SignalChart from './SignalChart.vue'
+import { useTheme } from '../composables/useTheme.js'
 
 const STORAGE_KEY = 'exp_tauri_state_v3'
 
@@ -854,61 +841,10 @@ const showConfigModal = ref(false)
 const mf4Pattern = ref('{title}_{YYYYMMDD}_{HHMMSS}.mf4')
 const mf4Dir = ref('records/')
 
-// ── Theme ──────────────────────────────────────────────────────────────────
-const theme = ref('green')
-const customFg = ref('#00cc44')
-const customBg = ref('#090909')
+// ── Theme (global, via composable) ───────────────────────────────────────────
+const { theme } = useTheme()
 
-const themeOptions = [
-  { id: 'green', label: 'Green / Black', fg: '#00cc44', bg: '#090909' },
-  { id: 'blue',  label: 'Gray / Dark Blue', fg: '#adb5bd', bg: '#1a2332' },
-  { id: 'light', label: 'VS Code Light', fg: '#333333', bg: '#ffffff' },
-  { id: 'custom', label: 'Custom', fg: '#00cc44', bg: '#090909' },
-]
-
-function hexToRgb(hex) {
-  const h = hex.replace('#', '')
-  return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)]
-}
-function rgbToHex(r,g,b) {
-  return '#' + [r,g,b].map(v => Math.max(0,Math.min(255,v)).toString(16).padStart(2,'0')).join('')
-}
-function mixHex(hex1, hex2, t) {  // t=0→hex1, t=1→hex2
-  const [r1,g1,b1] = hexToRgb(hex1), [r2,g2,b2] = hexToRgb(hex2)
-  return rgbToHex(Math.round(r1+(r2-r1)*t), Math.round(g1+(g2-g1)*t), Math.round(b1+(b2-b1)*t))
-}
-
-const customThemeStyle = computed(() => {
-  if (theme.value !== 'custom') return {}
-  const fg = customFg.value, bg = customBg.value
-  const dark = (hexToRgb(bg).reduce((s,v,i) => s + v*[0.299,0.587,0.114][i], 0)) < 128
-  const shade = dark ? '#000000' : '#aaaaaa'
-  const anti = dark ? '#ffffff' : '#000000'
-  return {
-    '--exp-bg': bg,
-    '--exp-bg2': mixHex(bg, shade, 0.15),
-    '--exp-bg3': mixHex(bg, shade, 0.20),
-    '--exp-bg4': mixHex(bg, shade, 0.10),
-    '--exp-bg5': mixHex(bg, anti, 0.06),
-    '--exp-fg': fg,
-    '--exp-fg-bright': mixHex(fg, anti, 0.25),
-    '--exp-fg-mid': mixHex(fg, bg, 0.15),
-    '--exp-fg-dim': mixHex(fg, bg, 0.48),
-    '--exp-fg-dim2': mixHex(fg, bg, 0.55),
-    '--exp-fg-dim3': mixHex(fg, bg, 0.65),
-    '--exp-fg-dim4': mixHex(fg, bg, 0.75),
-    '--exp-border': mixHex(fg, bg, 0.80),
-    '--exp-border2': mixHex(fg, bg, 0.86),
-    '--exp-border3': mixHex(fg, bg, 0.91),
-    '--exp-hover': mixHex(fg, bg, 0.80),
-    '--exp-ok-bg': dark ? mixHex(fg, '#000000', 0.85) : mixHex(fg, '#ffffff', 0.80),
-    '--exp-err-bg': dark ? '#330011' : '#fde8e8',
-    '--exp-working-bg': mixHex(fg, bg, 0.75),
-    '--exp-primary-bg': mixHex(fg, bg, 0.80),
-    '--exp-cal-hover': mixHex(fg, bg, 0.86),
-  }
-})
-const showDcmModal = ref(false)
+const showDcmModal= ref(false)
 const dcmVarGroups = ref([])     // [{device_id, device_name, variables:[{key,name,calType,is_changed,changeDetail}]}]
 const dcmSelected = reactive({}) // key → bool
 const dcmSelectAll = ref(true)
@@ -1591,9 +1527,6 @@ function saveConfig() {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
     stored.mf4Pattern = mf4Pattern.value
     stored.mf4Dir = mf4Dir.value
-    stored.theme = theme.value
-    stored.customFg = customFg.value
-    stored.customBg = customBg.value
     localStorage.setItem(STORAGE_KEY, JSON.stringify(stored))
   } catch {}
   showConfigModal.value = false
@@ -1763,9 +1696,6 @@ function saveState() {
       tabCounter: tabCounter.value,
       mf4Pattern: mf4Pattern.value,
       mf4Dir: mf4Dir.value,
-      theme: theme.value,
-      customFg: customFg.value,
-      customBg: customBg.value,
     }))
   } catch {}
 }
@@ -1779,9 +1709,6 @@ function loadState() {
     if (s.tabCounter) tabCounter.value = s.tabCounter
     if (s.mf4Pattern) mf4Pattern.value = s.mf4Pattern
     if (s.mf4Dir) mf4Dir.value = s.mf4Dir
-    if (s.theme) theme.value = s.theme
-    if (s.customFg) customFg.value = s.customFg
-    if (s.customBg) customBg.value = s.customBg
     if (Array.isArray(s.tabs) && s.tabs.length > 0) {
       tabs.value = s.tabs
       activeTabId.value = (s.activeTabId && tabs.value.find(t => t.id === s.activeTabId))
@@ -2040,79 +1967,6 @@ onUnmounted(() => {
   color: var(--exp-fg);
   font-family: Consolas, 'Courier New', monospace;
   overflow: hidden;
-
-  /* ── Green theme defaults ───────────────────────────────────────────────── */
-  --exp-bg: #090909;
-  --exp-bg2: #060606;
-  --exp-bg3: #0d0d0d;
-  --exp-bg4: #0a0a0a;
-  --exp-bg5: #111111;
-  --exp-fg: #00cc44;
-  --exp-fg-bright: #00ff66;
-  --exp-fg-mid: #00aa33;
-  --exp-fg-dim: #556644;
-  --exp-fg-dim2: #558844;
-  --exp-fg-dim3: #446633;
-  --exp-fg-dim4: #335522;
-  --exp-border: #003311;
-  --exp-border2: #002211;
-  --exp-border3: #001a09;
-  --exp-hover: #003311;
-  --exp-ok-bg: #003322;
-  --exp-err-bg: #330011;
-  --exp-working-bg: #005522;
-  --exp-primary-bg: #004433;
-  --exp-cal-hover: #2a2a3f;
-}
-
-/* ── Blue theme ─────────────────────────────────────────────────────────── */
-.exp-container.theme-blue {
-  --exp-bg: #1a2332;
-  --exp-bg2: #152030;
-  --exp-bg3: #1e293b;
-  --exp-bg4: #141e2d;
-  --exp-bg5: #1e2d3e;
-  --exp-fg: #adb5bd;
-  --exp-fg-bright: #e9ecef;
-  --exp-fg-mid: #8fadc8;
-  --exp-fg-dim: #6c7a8a;
-  --exp-fg-dim2: #6c8090;
-  --exp-fg-dim3: #5d7090;
-  --exp-fg-dim4: #4d6080;
-  --exp-border: #2d3f5a;
-  --exp-border2: #253550;
-  --exp-border3: #1e2d45;
-  --exp-hover: #253550;
-  --exp-ok-bg: #1a3a2a;
-  --exp-err-bg: #3a1a22;
-  --exp-working-bg: #1a3a5c;
-  --exp-primary-bg: #1a3a5c;
-  --exp-cal-hover: #253050;
-}
-
-/* ── Light theme ────────────────────────────────────────────────────────── */
-.exp-container.theme-light {
-  --exp-bg: #ffffff;
-  --exp-bg2: #f3f3f3;
-  --exp-bg3: #ececec;
-  --exp-bg4: #f8f8f8;
-  --exp-bg5: #e8e8e8;
-  --exp-fg: #333333;
-  --exp-fg-bright: #000000;
-  --exp-fg-mid: #0066b3;
-  --exp-fg-dim: #666666;
-  --exp-fg-dim2: #777777;
-  --exp-fg-dim3: #888888;
-  --exp-fg-dim4: #999999;
-  --exp-border: #dddddd;
-  --exp-border2: #e0e0e0;
-  --exp-border3: #eeeeee;
-  --exp-hover: #e8f0ff;
-  --exp-ok-bg: #d4f5e2;
-  --exp-err-bg: #fde8e8;
-  --exp-working-bg: #c8e6fa;
-  --exp-primary-bg: #d9eaf7;
-  --exp-cal-hover: #e8eef8;
 }
 
 /* ── Title bar ────────────────────────────────────────────────────────────── */
@@ -2858,32 +2712,5 @@ onUnmounted(() => {
 .help-state.running { background: var(--exp-ok-bg); color: var(--exp-fg); border: 1px solid #00aa44; }
 .help-state.recording { background: var(--exp-err-bg); color: #ff4466; border: 1px solid #880022; }
 .help-arrow { color: #444; font-size: 20px; }
-
-/* ── Theme Picker ──────────────────────────────────────────────────────────── */
-.theme-picker { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
-.theme-btn {
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 6px 10px; border-radius: 6px; cursor: pointer;
-  border: 2px solid var(--exp-border2); background: var(--exp-bg2);
-  transition: border-color 0.15s;
-}
-.theme-btn:hover { border-color: var(--exp-border); }
-.theme-btn.active { border-color: var(--exp-fg-bright); }
-.theme-swatch {
-  width: 48px; height: 28px; border-radius: 4px; display: flex;
-  align-items: center; justify-content: center; font-size: 13px;
-  font-weight: 700; font-family: monospace; border: 1px solid rgba(128,128,128,0.2);
-}
-.theme-name { font-size: 11px; color: var(--exp-fg-dim); white-space: nowrap; }
-.theme-btn.active .theme-name { color: var(--exp-fg); }
-.theme-custom-row {
-  display: flex; align-items: center; gap: 6px; margin-top: 8px;
-  flex-wrap: wrap;
-}
-.color-pick {
-  width: 36px; height: 28px; border: 1px solid var(--exp-border);
-  border-radius: 4px; padding: 2px; background: var(--exp-bg2);
-  cursor: pointer;
-}
 </style>
 
