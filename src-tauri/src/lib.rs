@@ -8,13 +8,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Initialise file-based tracing for the desktop app.
-/// Logs go to `logs/xcp_desktop_<timestamp>.log` next to the binary.
+/// Logs go to the system temp dir as `xcp_desktop_<timestamp>.log`
+/// (avoids triggering the Tauri dev-mode file watcher in the project dir).
 fn init_logging() {
-    use std::fs::{self, OpenOptions};
-    use std::path::Path;
+    use std::fs::OpenOptions;
 
-    let logs_dir = Path::new("logs");
-    let _ = fs::create_dir_all(logs_dir);
+    let logs_dir = std::env::temp_dir().join("xcp_client_logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
 
     let now = chrono::Local::now();
     let filename = format!("xcp_desktop_{}.log", now.format("%Y%m%d_%H%M%S"));
