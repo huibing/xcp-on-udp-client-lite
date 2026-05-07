@@ -978,16 +978,20 @@ pub async fn experiment_record_stop(state: State<'_, SharedState>) -> Result<Val
     let app = state.read().await;
     let mut errors: Vec<String> = Vec::new();
     let mut stopped_count = 0;
+    let mut saved_paths: Vec<String> = Vec::new();
 
     for dev in &app.devices {
         let daq_mgr = dev.daq_manager.read().await;
         if !daq_mgr.is_recording() {
             continue;
         }
+        // Capture the path before stopping (path is set at record_start time)
+        let mf4_path = daq_mgr.get_mdf4_path().to_path_buf();
         match daq_mgr.stop_recording().await {
             Ok(_) => {
                 stopped_count += 1;
                 tracing::info!("Recording stopped on {}", dev.display_name());
+                saved_paths.push(mf4_path.to_string_lossy().to_string());
             }
             Err(e) => {
                 errors.push(format!("{}: {}", dev.display_name(), e));
@@ -999,6 +1003,7 @@ pub async fn experiment_record_stop(state: State<'_, SharedState>) -> Result<Val
         "success": errors.is_empty(),
         "stopped": stopped_count,
         "errors": errors,
+        "saved_paths": saved_paths,
     }))
 }
 
@@ -1042,4 +1047,41 @@ pub async fn read_text_file(path: String) -> Result<Value, String> {
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read '{}': {}", path, e))?;
     Ok(json!({ "success": true, "content": content }))
+}
+
+/// Open a folder path in the system file explorer (Explorer / Finder / Nautilus).
+#[tauri::command]
+pub async fn open_folder(path: String) -> Result<Value, String> {
+    let folder = std::path::Path::new(&path);
+
+    // If the path points to a file, open its parent directory
+    let dir = if folder.is_file() {
+        folder.parent().unwrap_or(folder)
+    } else {
+        folder
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open explorer: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open Finder: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open file manager: {}", e))?;
+    }
+
+    Ok(json!({ "success": true, "path": dir.display().to_string() }))
 }

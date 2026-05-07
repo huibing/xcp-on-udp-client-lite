@@ -77,6 +77,7 @@ pub fn run() {
             commands::experiment::experiment_record_stop,
             commands::experiment::write_text_file,
             commands::experiment::read_text_file,
+            commands::experiment::open_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running xcp-client-desktop");

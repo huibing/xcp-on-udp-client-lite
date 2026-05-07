@@ -1192,10 +1192,18 @@ async function startRecording() {
 
 async function stopDaq() {
   try {
-    if (mode.value === 'recording') await invoke('experiment_record_stop')
+    let savedPaths = []
+    if (mode.value === 'recording') {
+      const recRes = await invoke('experiment_record_stop')
+      if (recRes.saved_paths?.length) savedPaths = recRes.saved_paths
+    }
     const res = await invoke('experiment_stop')
     mode.value = 'idle'
     toast(`Stopped ${res.stopped ?? 0} device(s)`)
+    // Open the MF4 output folder automatically after recording finishes
+    if (savedPaths.length > 0) {
+      try { await invoke('open_folder', { path: savedPaths[0] }) } catch {}
+    }
   } catch (e) { toast(String(e), true) }
 }
 
