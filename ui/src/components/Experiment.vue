@@ -1140,6 +1140,12 @@ function removeVar(v) {
   if (!activeTab.value) return
   const key = varKey(v)
   activeTab.value.variables = activeTab.value.variables.filter(x => varKey(x) !== key)
+  // Also remove from graph if the variable was graphed
+  const hk = historyKey(v)
+  if (activeTab.value.graphedKeys) {
+    const gi = activeTab.value.graphedKeys.indexOf(hk)
+    if (gi >= 0) activeTab.value.graphedKeys.splice(gi, 1)
+  }
   saveState()
 }
 
