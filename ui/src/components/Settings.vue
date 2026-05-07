@@ -35,13 +35,33 @@
         <span class="preview-chip preview-chip--err">✖ Error state</span>
       </div>
     </div>
+
+    <!-- Recording settings -->
+    <div class="settings-card">
+      <div class="settings-section-title">📁 Recording</div>
+      <p class="settings-hint">MF4 / CSV output location and file naming. Changes apply to the next recording session.</p>
+
+      <div class="form-group">
+        <label class="form-label">Output Directory</label>
+        <input class="form-input" v-model="mf4Dir" placeholder="records/" />
+        <div class="form-hint">Relative or absolute path. Created automatically if it does not exist.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">File Name Pattern</label>
+        <input class="form-input mono" v-model="mf4Pattern" placeholder="{title}_{YYYYMMDD}_{HHMMSS}.mf4" />
+        <div class="form-hint">Placeholders: {title}, {YYYYMMDD}, {HHMMSS}. The device name is appended automatically when recording multiple devices.</div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { useTheme } from '../composables/useTheme.js'
+import { useMf4Settings } from '../composables/useMf4Settings.js'
 
 const { theme, customFg, customBg, themeOptions } = useTheme()
+const { mf4Dir, mf4Pattern } = useMf4Settings()
 </script>
 
 <style scoped>
@@ -127,4 +147,34 @@ const { theme, customFg, customBg, themeOptions } = useTheme()
 .preview-chip--dim    { background: var(--exp-bg3); color: var(--exp-fg-dim); }
 .preview-chip--ok     { background: var(--exp-ok-bg); color: var(--exp-fg); }
 .preview-chip--err    { background: var(--exp-err-bg); color: #ff4466; }
+
+/* ── Form inputs (Recording section) ────────────────────────────────────── */
+.form-group { margin-bottom: 16px; }
+.form-label {
+  display: block;
+  font-size: 12px;
+  color: var(--exp-fg-dim, #556644);
+  margin-bottom: 5px;
+  letter-spacing: 0.03em;
+}
+.form-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--exp-bg3, #0d0d0d);
+  color: var(--exp-fg, #00cc44);
+  border: 1px solid var(--exp-border, #003311);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: 'Consolas', 'Courier New', monospace;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.form-input:focus { border-color: var(--exp-fg-bright, #00ff66); }
+.form-input.mono  { font-family: 'Consolas', 'Courier New', monospace; }
+.form-hint {
+  font-size: 11px;
+  color: var(--exp-fg-dim4, #335522);
+  margin-top: 4px;
+}
 </style>

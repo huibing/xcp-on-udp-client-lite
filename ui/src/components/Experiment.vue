@@ -14,7 +14,6 @@
       <div class="exp-sidebar">
         <!-- Device connect / config group -->
         <button class="sb-btn" title="Connect / Disconnect devices" @click="openConnectModal">🔌</button>
-        <button class="sb-btn" title="Experiment settings (MF4, devices)" @click="openConfigModal">⚙</button>
         <button class="sb-btn" title="Export calibration variables to DCM file" @click="openDcmExportModal" :disabled="dcmExporting">
           {{ dcmExporting ? '⏳' : '💾' }}
         </button>
@@ -491,48 +490,6 @@
     </div>
 
     <!-- Experiment Config modal -->
-    <div v-if="showConfigModal" class="modal-overlay" @click.self="showConfigModal = false">
-      <div class="modal" style="width:560px;max-width:95vw">
-        <div class="modal-hdr">
-          <h3>⚙ Experiment Settings</h3>
-          <button class="modal-close" @click="showConfigModal = false">×</button>
-        </div>
-        <div class="modal-body">
-          <div class="form-group">
-            <label class="form-label">MF4 File Name Pattern</label>
-            <input class="form-input mono" v-model="mf4Pattern" placeholder="{title}_{YYYYMMDD}_{HHMMSS}.mf4">
-            <div class="form-hint">Placeholders: {title}, {YYYYMMDD}, {HHMMSS}</div>
-          </div>
-          <div class="form-group">
-            <label class="form-label">MF4 Output Directory</label>
-            <input class="form-input" v-model="mf4Dir" placeholder="records/">
-          </div>
-          <div class="form-group" v-if="statusDevices.length > 0">
-            <label class="form-label">Devices</label>
-            <div class="cfg-dev-list">
-              <div v-for="d in statusDevices" :key="d.device_id" class="cfg-dev-row">
-                <span class="conn-dot" :class="{ connected: d.connected, disconnected: !d.connected }"></span>
-                <input class="form-input cfg-dev-name" :value="d.device_name"
-                  @change="renameDevice(d.device_id, $event.target.value)"
-                  :title="`Rename device (current: ${d.device_name})`">
-              </div>
-            </div>
-            <div class="form-hint">Click device name to rename</div>
-          </div>
-          <div class="cfg-dev-link">
-            <a href="#" @click.prevent="goToDevMgr">→ Device Manager (A2L, HEX files)</a>
-          </div>
-          <div class="cfg-dev-link" style="margin-top:6px">
-            <a href="#" @click.prevent="showConfigModal = false; $router.push('/settings')">→ UI Theme / Appearance (Settings page)</a>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button class="exp-btn primary" @click="saveConfig">✓ Save</button>
-          <button class="exp-btn" @click="showConfigModal = false">Cancel</button>
-        </div>
-      </div>
-    </div>
-
     <!-- DCM Export Variable Picker modal -->
     <div v-if="showDcmModal" class="modal-overlay" @click.self="showDcmModal = false">
       <div class="modal" style="width:700px;max-width:95vw">
@@ -695,6 +652,7 @@ import { save, open } from '@tauri-apps/plugin-dialog'
 import { useRouter } from 'vue-router'
 import SignalChart from './SignalChart.vue'
 import { useTheme } from '../composables/useTheme.js'
+import { useMf4Settings } from '../composables/useMf4Settings.js'
 
 const STORAGE_KEY = 'exp_tauri_state_v3'
 
@@ -836,10 +794,8 @@ const connectBusy = reactive({})
 const connectAllBusy = ref(false)
 const dcmExporting = ref(false)
 
-// ── Config modal state ────────────────────────────────────────────────────────
-const showConfigModal = ref(false)
-const mf4Pattern = ref('{title}_{YYYYMMDD}_{HHMMSS}.mf4')
-const mf4Dir = ref('records/')
+// ── MF4 settings (global, via composable — edit in Settings page) ─────────────
+const { mf4Dir, mf4Pattern } = useMf4Settings()
 
 // ── Theme (global, via composable) ───────────────────────────────────────────
 const { theme } = useTheme()
@@ -1179,7 +1135,7 @@ async function startDaq() {
 async function startRecording() {
   try {
     const res = await invoke('experiment_record_start', {
-      config: { title: expTitle.value, dir: 'records' }
+      config: { title: expTitle.value, dir: mf4Dir.value || 'records' }
     })
     if (res.success || res.started > 0) {
       mode.value = 'recording'
@@ -1516,12 +1472,7 @@ async function connectAllDevs() {
 }
 
 // ── Config modal ──────────────────────────────────────────────────────────────
-function openConfigModal() {
-  showConfigModal.value = true
-}
-
 function goToDevMgr() {
-  showConfigModal.value = false
   router.push('/devices')
 }
 
@@ -1535,17 +1486,6 @@ async function renameDevice(deviceId, newName) {
   }
 }
 
-function saveConfig() {
-  // mf4Pattern and mf4Dir are reactive; just persist to localStorage
-  try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
-    stored.mf4Pattern = mf4Pattern.value
-    stored.mf4Dir = mf4Dir.value
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(stored))
-  } catch {}
-  showConfigModal.value = false
-  toast('✓ Settings saved')
-}
 
 // ── DCM Export picker ─────────────────────────────────────────────────────────
 
@@ -1708,8 +1648,6 @@ function saveState() {
       tabs: tabs.value,
       activeTabId: activeTabId.value,
       tabCounter: tabCounter.value,
-      mf4Pattern: mf4Pattern.value,
-      mf4Dir: mf4Dir.value,
     }))
   } catch {}
 }
@@ -1721,8 +1659,6 @@ function loadState() {
     const s = JSON.parse(raw)
     if (s.expTitle) expTitle.value = s.expTitle
     if (s.tabCounter) tabCounter.value = s.tabCounter
-    if (s.mf4Pattern) mf4Pattern.value = s.mf4Pattern
-    if (s.mf4Dir) mf4Dir.value = s.mf4Dir
     if (Array.isArray(s.tabs) && s.tabs.length > 0) {
       tabs.value = s.tabs
       activeTabId.value = (s.activeTabId && tabs.value.find(t => t.id === s.activeTabId))
@@ -1910,7 +1846,6 @@ function handleEsc(e) {
   if (showHelpModal.value) { showHelpModal.value = false; return }
   if (showDeviceMapModal.value) { showDeviceMapModal.value = false; return }
   if (showDcmModal.value) { showDcmModal.value = false; return }
-  if (showConfigModal.value) { showConfigModal.value = false; return }
   if (showConnectModal.value) { showConnectModal.value = false; return }
   if (showChecksumModal.value) { showChecksumModal.value = false; return }
   if (matrixTarget.value) { matrixTarget.value = null; return }
