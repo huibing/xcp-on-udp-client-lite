@@ -137,6 +137,11 @@ pub async fn add_device(
 /// Otherwise a new placeholder `DeviceState` is created with the provided `id` — preserving
 /// the original identity so that experiment variable references (which store device_id) remain
 /// valid after the registration.
+///
+/// If `a2l_path` is provided and the file exists, the A2L is parsed and used to populate
+/// calibration / measurement lists immediately (same behaviour as startup restore).
+/// If `address` is provided, it is set on the device (takes lower priority than A2L-derived
+/// address if A2L restore also sets one).
 #[tauri::command]
 pub async fn ensure_devices_registered(
     state: State<'_, SharedState>,
@@ -148,6 +153,9 @@ pub async fn ensure_devices_registered(
     for entry in &devices {
         let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let a2l_path = entry.get("a2l_path").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let address = entry.get("address").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
         if id.is_empty() && name.is_empty() {
             continue;
         }
@@ -170,8 +178,30 @@ pub async fn ensure_devices_registered(
         };
         let device_name = if !name.is_empty() { name.clone() } else { device_id.clone() };
 
+        let mut device = crate::state::DeviceState::new_empty(device_id.clone(), device_name.clone());
+
+        // Set address as initial value (may be overridden by A2L-derived address below)
+        if !address.is_empty() {
+            device.address = address.clone();
+        }
+
+        // Restore A2L if the file path is known and accessible
+        if !a2l_path.is_empty() {
+            if std::path::Path::new(&a2l_path).exists() {
+                if let Err(e) = crate::state::TauriAppState::restore_a2l_pub(&mut device, &a2l_path) {
+                    tracing::warn!("ensure_devices_registered: A2L restore failed for '{}': {}", device_name, e);
+                    // Still set the path so it can be retried on next connect
+                    device.a2l_path = a2l_path.clone();
+                    device.original_filename = a2l_path.split(['/', '\\']).last().unwrap_or(&a2l_path).to_string();
+                }
+            } else {
+                tracing::warn!("ensure_devices_registered: A2L file not found at '{}' for '{}'", a2l_path, device_name);
+                device.a2l_path = a2l_path.clone();
+                device.original_filename = a2l_path.split(['/', '\\']).last().unwrap_or(&a2l_path).to_string();
+            }
+        }
+
         let mut app = state.write().await;
-        let device = DeviceState::new_empty(device_id.clone(), device_name.clone());
         app.devices.push(device);
         app.save_config()?;
         registered.push(device_name);

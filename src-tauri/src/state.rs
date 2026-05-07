@@ -267,6 +267,11 @@ impl TauriAppState {
     }
 
     fn restore_a2l(device: &mut DeviceState, file_path: &str) -> Result<(), String> {
+        Self::restore_a2l_pub(device, file_path)
+    }
+
+    /// Public alias for `restore_a2l`, callable from other command modules.
+    pub fn restore_a2l_pub(device: &mut DeviceState, file_path: &str) -> Result<(), String> {
         let reader = A2lReader::load(file_path).map_err(|e| format!("A2L parse error: {}", e))?;
         let characteristics = reader.get_characteristics();
         let measurements = reader.get_measurements();

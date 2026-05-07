@@ -278,6 +278,7 @@ pub async fn experiment_status(state: State<'_, SharedState>) -> Result<Value, S
 
         device_statuses.push(json!({
             "device_id": device_id,
+            "config_device_id": dev.id,
             "device_name": dev.display_name(),
             "connected": dev.connected,
             "daq_running": daq_running,
@@ -287,6 +288,8 @@ pub async fn experiment_status(state: State<'_, SharedState>) -> Result<Value, S
                 PageMode::Reference => "reference",
             },
             "a2l_file": dev.original_filename,
+            "a2l_path": dev.a2l_path,
+            "address": dev.address,
         }));
     }
 

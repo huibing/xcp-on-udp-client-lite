@@ -815,6 +815,9 @@ const showDeviceMapModal = ref(false)
 const deviceMapRows = ref([])           // [{savedId, savedName, currentDevices: []}]
 const deviceMapSelections = reactive({})
 let pendingLoadData = null
+// Devices map from the last loaded .exp.json — { savedId: {name, a2l_path, address} }
+// Used by registerVarDevices to restore A2L when registering devices.
+let lastLoadedExpDevices = {}
 
 // ── Help modal state ──────────────────────────────────────────────────────────
 const showHelpModal = ref(false)
@@ -1495,7 +1498,21 @@ async function registerVarDevices() {
       const key = id || name
       if (key && !seen.has(key)) {
         seen.add(key)
-        devicesToRegister.push({ id, name })
+
+        // Enrich with a2l_path and address from:
+        // 1. statusDevices (already registered / currently known devices)
+        // 2. lastLoadedExpDevices (from last .exp.json load)
+        const statusInfo = statusDevices.value.find(
+          d => d.config_device_id === id || d.device_id === id
+        )
+        const expInfo = lastLoadedExpDevices[id]
+
+        devicesToRegister.push({
+          id,
+          name,
+          a2l_path: statusInfo?.a2l_path || expInfo?.a2l_path || '',
+          address:  statusInfo?.address  || expInfo?.address  || '',
+        })
       }
     }
   }
@@ -1725,8 +1742,14 @@ function buildExpSnapshot() {
     for (const v of tab.variables) {
       const id = v.config_device_id || v.device_id || ''
       if (id && !deviceMap[id]) {
-        const info = statusDevices.value.find(d => d.device_id === id)
-        deviceMap[id] = { name: info?.device_name || v.device_name || id }
+        const info = statusDevices.value.find(
+          d => d.config_device_id === id || d.device_id === id
+        )
+        deviceMap[id] = {
+          name: info?.device_name || v.device_name || id,
+          a2l_path: info?.a2l_path || '',
+          address: info?.address || '',
+        }
       }
     }
   }
@@ -1799,6 +1822,9 @@ async function loadExpSetup() {
  * Unresolvable ones go into the mapping modal.
  */
 async function resolveAndLoadExp(data) {
+  // Remember the devices block so registerVarDevices can restore A2L paths
+  lastLoadedExpDevices = data.devices || {}
+
   // Current device list from status
   const currentDevs = statusDevices.value.length > 0
     ? statusDevices.value
