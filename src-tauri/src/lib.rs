@@ -16,6 +16,7 @@ pub fn run() {
             // Device management
             commands::device::list_devices,
             commands::device::add_device,
+            commands::device::ensure_devices_registered,
             commands::device::connect_device,
             commands::device::disconnect_device,
             commands::device::remove_device,

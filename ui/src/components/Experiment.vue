@@ -14,6 +14,7 @@
       <div class="exp-sidebar">
         <!-- Device connect / config group -->
         <button class="sb-btn" title="Connect / Disconnect devices" @click="openConnectModal">🔌</button>
+        <button class="sb-btn" title="Register devices from experiment variables&#10;Creates placeholder device entries for all devices referenced by variables in this experiment" @click="registerVarDevices">🔗</button>
         <button class="sb-btn" title="Export calibration variables to DCM file" @click="openDcmExportModal" :disabled="dcmExporting">
           {{ dcmExporting ? '⏳' : '💾' }}
         </button>
@@ -1474,6 +1475,47 @@ async function connectAllDevs() {
 // ── Config modal ──────────────────────────────────────────────────────────────
 function goToDevMgr() {
   router.push('/devices')
+}
+
+/**
+ * Collect every unique device referenced by variables across all tabs and
+ * register any that are not already present in the backend device list.
+ * This is useful when re-opening a saved experiment whose devices are no
+ * longer in config.toml — it creates placeholder entries (no address, no A2L)
+ * that the user can then configure and connect.
+ */
+async function registerVarDevices() {
+  // Collect unique {id, name} pairs from all tab variables
+  const seen = new Set()
+  const devicesToRegister = []
+  for (const tab of tabs.value) {
+    for (const v of tab.variables) {
+      const id = v.config_device_id || v.device_id || ''
+      const name = v.device_name || ''
+      const key = id || name
+      if (key && !seen.has(key)) {
+        seen.add(key)
+        devicesToRegister.push({ id, name })
+      }
+    }
+  }
+
+  if (devicesToRegister.length === 0) {
+    toast('No device references found in experiment variables', true)
+    return
+  }
+
+  try {
+    const res = await invoke('ensure_devices_registered', { devices: devicesToRegister })
+    await pollStatus()
+    if (res.registered?.length > 0) {
+      toast(`✓ Registered ${res.registered.length} device(s): ${res.registered.join(', ')}`)
+    } else {
+      toast(`All ${devicesToRegister.length} device(s) already registered`)
+    }
+  } catch (e) {
+    toast('Register devices failed: ' + String(e), true)
+  }
 }
 
 async function renameDevice(deviceId, newName) {

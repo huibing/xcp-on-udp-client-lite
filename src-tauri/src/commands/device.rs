@@ -131,6 +131,59 @@ pub async fn add_device(
     }))
 }
 
+/// Register devices by their saved IDs and names, idempotent.
+///
+/// For each entry, if a device with the same `id` or `name` already exists, it is skipped.
+/// Otherwise a new placeholder `DeviceState` is created with the provided `id` — preserving
+/// the original identity so that experiment variable references (which store device_id) remain
+/// valid after the registration.
+#[tauri::command]
+pub async fn ensure_devices_registered(
+    state: State<'_, SharedState>,
+    devices: Vec<Value>,
+) -> Result<Value, String> {
+    let mut registered: Vec<String> = Vec::new();
+    let mut already_existed: Vec<String> = Vec::new();
+
+    for entry in &devices {
+        let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if id.is_empty() && name.is_empty() {
+            continue;
+        }
+
+        let exists = {
+            let app = state.read().await;
+            app.devices.iter().any(|d| {
+                (!id.is_empty() && d.id == id)
+                    || (!name.is_empty() && d.name.eq_ignore_ascii_case(&name))
+            })
+        };
+
+        if exists {
+            already_existed.push(name.clone());
+            continue;
+        }
+
+        let device_id = if !id.is_empty() { id.clone() } else {
+            format!("device_{}", uuid::Uuid::new_v4().simple())
+        };
+        let device_name = if !name.is_empty() { name.clone() } else { device_id.clone() };
+
+        let mut app = state.write().await;
+        let device = DeviceState::new_empty(device_id.clone(), device_name.clone());
+        app.devices.push(device);
+        app.save_config()?;
+        registered.push(device_name);
+    }
+
+    Ok(json!({
+        "success": true,
+        "registered": registered,
+        "already_existed": already_existed,
+    }))
+}
+
 #[tauri::command]
 pub async fn connect_device(
     state: State<'_, SharedState>,
