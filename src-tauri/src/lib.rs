@@ -7,7 +7,35 @@ use state::TauriAppState;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Initialise file-based tracing for the desktop app.
+/// Logs go to `logs/xcp_desktop_<timestamp>.log` next to the binary.
+fn init_logging() {
+    use std::fs::{self, OpenOptions};
+    use std::path::Path;
+
+    let logs_dir = Path::new("logs");
+    let _ = fs::create_dir_all(logs_dir);
+
+    let now = chrono::Local::now();
+    let filename = format!("xcp_desktop_{}.log", now.format("%Y%m%d_%H%M%S"));
+    let log_path = logs_dir.join(filename);
+
+    if let Ok(log_file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive("debug".parse().unwrap())
+                    .add_directive("a2lfile=error".parse().unwrap()),
+            )
+            .with_ansi(false)
+            .with_writer(move || log_file.try_clone().expect("clone log fd"))
+            .try_init();
+        tracing::info!("Tauri desktop logging started → {}", log_path.display());
+    }
+}
+
 pub fn run() {
+    init_logging();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
