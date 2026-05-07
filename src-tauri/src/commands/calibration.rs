@@ -85,8 +85,18 @@ pub async fn cal_read(
         // Apply COMPU_METHOD for all scalar integer types (enum, LINEAR, IDENTICAL, …).
         // For F32/F64 and array/matrix types, cal_value_to_raw_i64 returns None and
         // the raw value.format() is already the physical value.
+        let raw_i64 = cal_value_to_raw_i64(&value);
         let display_value: Option<String> =
-            cal_value_to_raw_i64(&value).map(|raw| param.format_value(raw));
+            raw_i64.map(|raw| param.format_value(raw));
+        tracing::debug!(
+            "cal_read [xcp] '{}': data_type={:?} is_enum={} raw_i64={:?} value_format={:?} display_value={:?}",
+            param.name,
+            param.data_type,
+            is_enum,
+            raw_i64,
+            value.format(),
+            display_value,
+        );
         return Ok(json!({
             "success": true,
             "name": param.name,

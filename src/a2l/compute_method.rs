@@ -233,6 +233,17 @@ impl CompuMethod {
             _ => None,
         }
     }
+
+    /// Return a short name for the active variant (for debug logging).
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Identical => "Identical",
+            Self::Linear { .. } => "Linear",
+            Self::Rational { .. } => "Rational",
+            Self::TabVerb { .. } => "TabVerb",
+            Self::CompuVtab { .. } => "CompuVtab",
+        }
+    }
 }
 
 impl Default for CompuMethod {
@@ -291,8 +302,16 @@ impl CompuMethodFactory {
             ConversionType::Identical => CompuMethod::Identical,
             ConversionType::Linear => {
                 if let Some(ref coeffs) = compu_method.coeffs_linear {
+                    tracing::debug!(
+                        "CompuMethod '{}': LINEAR a={} b={} → Linear{{factor={}, offset={}}}",
+                        compu_method.name, coeffs.a, coeffs.b, coeffs.a, coeffs.b
+                    );
                     CompuMethod::linear(coeffs.a, coeffs.b)
                 } else {
+                    tracing::warn!(
+                        "CompuMethod '{}': LINEAR but coeffs_linear is None — falling back to Identical",
+                        compu_method.name
+                    );
                     CompuMethod::Identical
                 }
             }

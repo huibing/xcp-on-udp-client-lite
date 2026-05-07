@@ -1549,9 +1549,11 @@ impl A2lReader {
                 if cm.get_name() == conversion_name {
                     let result = CompuMethodFactory::from_a2l(cm, &vtabs);
                     tracing::debug!(
-                        "get_compu_method '{}': type={:?} -> is_enum={}",
+                        "get_compu_method '{}': a2l_type={:?} coeffs_linear={:?} -> result={} is_enum={}",
                         conversion_name,
                         cm.conversion_type,
+                        cm.coeffs_linear.as_ref().map(|c| format!("a={} b={}", c.a, c.b)),
+                        result.variant_name(),
                         result.is_enum()
                     );
                     return result;
