@@ -581,6 +581,10 @@ fn grid_from_calibration_value(param: &CalibrationParam, value: &CalibrationValu
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
             CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_bool(values[x][y])).collect()).collect())
         }
+        CalibrationValue::Ascii(s) => CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![CompareAtom::new(s.clone(), None)]],
+        ),
     }
 }
 

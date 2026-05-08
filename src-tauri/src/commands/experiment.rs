@@ -68,9 +68,74 @@ pub async fn experiment_variables(state: State<'_, SharedState>) -> Result<Value
     }))
 }
 
+/// Return available DAQ events for each device (from the loaded A2L file).
+///
+/// Response shape:
+/// `{ "success": true, "devices": [{ "device_id", "config_device_id", "device_name", "events": [{channel, name, short_name, cycle_time_ms}] }] }`
+#[tauri::command]
+pub async fn experiment_events(state: State<'_, SharedState>) -> Result<Value, String> {
+    let app = state.read().await;
+    let mut devices: Vec<Value> = Vec::new();
+
+    for dev in &app.devices {
+        let device_id = dev
+            .slave_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| dev.id.clone());
+        let config_device_id = dev.id.clone();
+        let device_name = dev.display_name();
+
+        let daq_mgr = dev.daq_manager.read().await;
+        let events: Vec<Value> = daq_mgr
+            .get_available_events()
+            .iter()
+            .map(|e| json!({
+                "channel": e.channel,
+                "name": e.name,
+                "short_name": e.short_name,
+                "cycle_time_ms": e.cycle_time_ms(),
+            }))
+            .collect();
+
+        devices.push(json!({
+            "device_id": device_id,
+            "config_device_id": config_device_id,
+            "device_name": device_name,
+            "events": events,
+        }));
+    }
+
+    Ok(json!({ "success": true, "devices": devices }))
+}
+
+/// Set the DAQ event for a specific measurement on a device.
+///
+/// Only allowed when DAQ is stopped. Calling `experiment_start` will apply the
+/// updated event assignment (it always calls `free_daq` + reconfigure).
+#[tauri::command]
+pub async fn experiment_set_event(
+    state: State<'_, SharedState>,
+    device_id: String,
+    measurement_idx: usize,
+    event_channel: u16,
+) -> Result<Value, String> {
+    let app = state.read().await;
+    let dev = find_device(&app, &device_id)
+        .ok_or_else(|| format!("Device '{}' not found", device_id))?;
+
+    if *dev.daq_running.read().await {
+        return Err("Cannot change event while DAQ is running — stop DAQ first".to_string());
+    }
+
+    let mut daq_mgr = dev.daq_manager.write().await;
+    daq_mgr.set_measurement_event(measurement_idx, event_channel);
+
+    Ok(json!({ "success": true }))
+}
+
 /// Start DAQ on the specified devices/measurement indices.
 ///
-/// `config` shape: `{ "selections": { "<device_id>": [idx, ...], ... } }`
+/// `config` shape: `{ "selections": { "<device_id>": [idx, ...], ... }, "events": { "<device_id>": { "<idx>": channel, ... }, ... } }`
 #[tauri::command]
 pub async fn experiment_start(
     app: AppHandle,
@@ -131,12 +196,25 @@ pub async fn experiment_start(
             )
         };
 
-        // Set measurement selections
+        // Set measurement selections and per-measurement event assignments
         {
             let mut daq_mgr = daq_mgr_arc.write().await;
             daq_mgr.deselect_all();
             for idx in &indices {
                 daq_mgr.select_measurement(*idx);
+            }
+            // Apply per-measurement event channel assignments if provided
+            if let Some(events_map) = config.get("events").and_then(|v| v.as_object()) {
+                if let Some(dev_events) = events_map.get(device_id_str).and_then(|v| v.as_object()) {
+                    for (idx_str, ch_val) in dev_events {
+                        if let (Ok(idx), Some(ch)) = (
+                            idx_str.parse::<usize>(),
+                            ch_val.as_u64().map(|c| c as u16),
+                        ) {
+                            daq_mgr.set_measurement_event(idx, ch);
+                        }
+                    }
+                }
             }
         }
 
@@ -726,6 +804,8 @@ pub async fn experiment_dcm_export(
                         Block::ConstantBlock(FESTWERTEBLOCK::from_f64(name.clone(), values, desc.clone(), unit.clone()))
                     })
                 }
+
+                CharacteristicType::Ascii => None, // ASCII strings are not representable in DCM format
             };
 
             if let Some(block) = block_opt {

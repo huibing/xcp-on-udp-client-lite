@@ -16,7 +16,8 @@ pub mod variable;
 pub mod web;
 
 pub use calibration::{
-    matrix_to_flat, CalibrationManager, CalibrationParam, CalibrationType, CalibrationValue,
+    a2l_characteristic_to_param, a2l_type_to_calibration, matrix_to_flat, CalibrationManager,
+    CalibrationParam, CalibrationType, CalibrationValue,
 };
 pub use client::XcpClient;
 pub use daq::{DaqConfiguration, DaqManager, DaqRecord, Measurement, OdtEntryConfig};

@@ -47,6 +47,8 @@ pub enum CalibrationType {
     F32Matrix(usize, usize),
     F64Matrix(usize, usize),
     BoolMatrix(usize, usize),
+    /// ASCII string of fixed byte length n (each char = 1 byte, null-padded)
+    Ascii(usize),
 }
 
 impl CalibrationType {
@@ -80,6 +82,7 @@ impl CalibrationType {
             CalibrationType::U64Matrix(r, c)
             | CalibrationType::I64Matrix(r, c)
             | CalibrationType::F64Matrix(r, c) => r * c * 8,
+            CalibrationType::Ascii(n) => *n,
         }
     }
 
@@ -122,6 +125,7 @@ impl CalibrationType {
             CalibrationType::F32Matrix(r, c) => format!("F32[{}][{}]", r, c),
             CalibrationType::F64Matrix(r, c) => format!("F64[{}][{}]", r, c),
             CalibrationType::BoolMatrix(r, c) => format!("BOOL[{}][{}]", r, c),
+            CalibrationType::Ascii(n) => format!("ASCII[{}]", n),
         }
     }
 }
@@ -165,6 +169,8 @@ pub enum CalibrationValue {
     F32Matrix(Vec<Vec<f32>>),
     F64Matrix(Vec<Vec<f64>>),
     BoolMatrix(Vec<Vec<bool>>),
+    /// ASCII string value
+    Ascii(String),
 }
 
 impl CalibrationValue {
@@ -207,6 +213,7 @@ impl CalibrationValue {
             CalibrationValue::F32Matrix(mat) => format_matrix(mat),
             CalibrationValue::F64Matrix(mat) => format_matrix(mat),
             CalibrationValue::BoolMatrix(mat) => format_matrix(mat),
+            CalibrationValue::Ascii(s) => s.clone(),
         }
     }
 
@@ -226,6 +233,7 @@ impl CalibrationValue {
             CalibrationValue::F32(v) => format!("{:.6}", v),
             CalibrationValue::F64(v) => format!("{:.6}", v),
             CalibrationValue::Bool(v) => v.to_string(),
+            CalibrationValue::Ascii(s) => s.clone(),
             _ => String::new(),
         }
     }
@@ -587,67 +595,7 @@ impl CalibrationManager {
         reader: &A2lReader,
         ch: A2lCharacteristic,
     ) -> Option<CalibrationParam> {
-        let data_type = Self::convert_data_type(&ch.data_type)?;
-
-        let mut param = CalibrationParam::new(&ch.name, ch.address, ch.address_ext, data_type)
-            .with_description(&ch.description)
-            .with_range(ch.min, ch.max);
-
-        if let Some(unit) = ch.unit {
-            param = param.with_unit(&unit);
-        }
-
-        // Set characteristic type, axis info, and storage order
-        param.characteristic_type = ch.characteristic_type;
-        param.axis_info = ch.axis_info;
-        param.storage_order = ch.storage_order;
-
-        // Set COMPU_METHOD for value conversion
-        param.compu_method = reader.get_compu_method(&ch.conversion_name);
-
-        Some(param)
-    }
-
-    /// Convert A2L data type to CalibrationType
-    fn convert_data_type(a2l_type: &A2lDataType) -> Option<CalibrationType> {
-        match a2l_type {
-            // Scalar types
-            A2lDataType::U8 => Some(CalibrationType::U8),
-            A2lDataType::U16 => Some(CalibrationType::U16),
-            A2lDataType::U32 => Some(CalibrationType::U32),
-            A2lDataType::U64 => Some(CalibrationType::U64),
-            A2lDataType::I8 => Some(CalibrationType::I8),
-            A2lDataType::I16 => Some(CalibrationType::I16),
-            A2lDataType::I32 => Some(CalibrationType::I32),
-            A2lDataType::I64 => Some(CalibrationType::I64),
-            A2lDataType::F32 => Some(CalibrationType::F32),
-            A2lDataType::F64 => Some(CalibrationType::F64),
-            A2lDataType::Bool => Some(CalibrationType::Bool),
-            // Array types
-            A2lDataType::U8Array(n) => Some(CalibrationType::U8Array(*n)),
-            A2lDataType::U16Array(n) => Some(CalibrationType::U16Array(*n)),
-            A2lDataType::U32Array(n) => Some(CalibrationType::U32Array(*n)),
-            A2lDataType::U64Array(n) => Some(CalibrationType::U64Array(*n)),
-            A2lDataType::I8Array(n) => Some(CalibrationType::I8Array(*n)),
-            A2lDataType::I16Array(n) => Some(CalibrationType::I16Array(*n)),
-            A2lDataType::I32Array(n) => Some(CalibrationType::I32Array(*n)),
-            A2lDataType::I64Array(n) => Some(CalibrationType::I64Array(*n)),
-            A2lDataType::F32Array(n) => Some(CalibrationType::F32Array(*n)),
-            A2lDataType::F64Array(n) => Some(CalibrationType::F64Array(*n)),
-            A2lDataType::BoolArray(n) => Some(CalibrationType::BoolArray(*n)),
-            // Matrix types
-            A2lDataType::U8Matrix(rows, cols) => Some(CalibrationType::U8Matrix(*rows, *cols)),
-            A2lDataType::U16Matrix(rows, cols) => Some(CalibrationType::U16Matrix(*rows, *cols)),
-            A2lDataType::U32Matrix(rows, cols) => Some(CalibrationType::U32Matrix(*rows, *cols)),
-            A2lDataType::U64Matrix(rows, cols) => Some(CalibrationType::U64Matrix(*rows, *cols)),
-            A2lDataType::I8Matrix(rows, cols) => Some(CalibrationType::I8Matrix(*rows, *cols)),
-            A2lDataType::I16Matrix(rows, cols) => Some(CalibrationType::I16Matrix(*rows, *cols)),
-            A2lDataType::I32Matrix(rows, cols) => Some(CalibrationType::I32Matrix(*rows, *cols)),
-            A2lDataType::I64Matrix(rows, cols) => Some(CalibrationType::I64Matrix(*rows, *cols)),
-            A2lDataType::F32Matrix(rows, cols) => Some(CalibrationType::F32Matrix(*rows, *cols)),
-            A2lDataType::F64Matrix(rows, cols) => Some(CalibrationType::F64Matrix(*rows, *cols)),
-            A2lDataType::BoolMatrix(rows, cols) => Some(CalibrationType::BoolMatrix(*rows, *cols)),
-        }
+        a2l_characteristic_to_param(ch, reader)
     }
 
     /// Get all parameters
@@ -1004,6 +952,12 @@ impl CalibrationManager {
                     param.storage_order,
                 ))
             }
+            CalibrationType::Ascii(n) => {
+                let s = String::from_utf8_lossy(data.iter().take(*n).copied().collect::<Vec<u8>>().as_slice())
+                    .trim_end_matches('\0')
+                    .to_string();
+                CalibrationValue::Ascii(s)
+            }
         };
 
         Ok(value)
@@ -1220,6 +1174,16 @@ impl CalibrationManager {
             (CalibrationType::BoolMatrix(rows, cols), CalibrationValue::BoolMatrix(mat)) => {
                 let flat: Vec<bool> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
                 let bytes: Vec<u8> = flat.iter().map(|&x| if x { 1 } else { 0 }).collect();
+                client
+                    .write_u8_array(mta, &bytes)
+                    .await
+                    .map_err(|e| e.to_string())?
+            }
+            (CalibrationType::Ascii(n), CalibrationValue::Ascii(s)) => {
+                let src = s.as_bytes();
+                let mut bytes = vec![0u8; *n];
+                let copy_len = src.len().min(*n);
+                bytes[..copy_len].copy_from_slice(&src[..copy_len]);
                 client
                     .write_u8_array(mta, &bytes)
                     .await
@@ -1571,6 +1535,9 @@ impl CalibrationManager {
                 }
                 Ok(CalibrationValue::BoolMatrix(matrix))
             }
+            CalibrationType::Ascii(_) => {
+                Ok(CalibrationValue::Ascii(input.to_string()))
+            }
         }
     }
 
@@ -1719,6 +1686,83 @@ impl Default for CalibrationManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Convert an [`A2lDataType`] to the corresponding [`CalibrationType`].
+///
+/// Returns `None` only if the variant mapping is unrecognised (should not happen in practice).
+pub fn a2l_type_to_calibration(a2l_type: &A2lDataType) -> Option<CalibrationType> {
+    match a2l_type {
+        A2lDataType::U8 => Some(CalibrationType::U8),
+        A2lDataType::U16 => Some(CalibrationType::U16),
+        A2lDataType::U32 => Some(CalibrationType::U32),
+        A2lDataType::U64 => Some(CalibrationType::U64),
+        A2lDataType::I8 => Some(CalibrationType::I8),
+        A2lDataType::I16 => Some(CalibrationType::I16),
+        A2lDataType::I32 => Some(CalibrationType::I32),
+        A2lDataType::I64 => Some(CalibrationType::I64),
+        A2lDataType::F32 => Some(CalibrationType::F32),
+        A2lDataType::F64 => Some(CalibrationType::F64),
+        A2lDataType::Bool => Some(CalibrationType::Bool),
+        A2lDataType::U8Array(n) => Some(CalibrationType::U8Array(*n)),
+        A2lDataType::U16Array(n) => Some(CalibrationType::U16Array(*n)),
+        A2lDataType::U32Array(n) => Some(CalibrationType::U32Array(*n)),
+        A2lDataType::U64Array(n) => Some(CalibrationType::U64Array(*n)),
+        A2lDataType::I8Array(n) => Some(CalibrationType::I8Array(*n)),
+        A2lDataType::I16Array(n) => Some(CalibrationType::I16Array(*n)),
+        A2lDataType::I32Array(n) => Some(CalibrationType::I32Array(*n)),
+        A2lDataType::I64Array(n) => Some(CalibrationType::I64Array(*n)),
+        A2lDataType::F32Array(n) => Some(CalibrationType::F32Array(*n)),
+        A2lDataType::F64Array(n) => Some(CalibrationType::F64Array(*n)),
+        A2lDataType::BoolArray(n) => Some(CalibrationType::BoolArray(*n)),
+        A2lDataType::U8Matrix(rows, cols) => Some(CalibrationType::U8Matrix(*rows, *cols)),
+        A2lDataType::U16Matrix(rows, cols) => Some(CalibrationType::U16Matrix(*rows, *cols)),
+        A2lDataType::U32Matrix(rows, cols) => Some(CalibrationType::U32Matrix(*rows, *cols)),
+        A2lDataType::U64Matrix(rows, cols) => Some(CalibrationType::U64Matrix(*rows, *cols)),
+        A2lDataType::I8Matrix(rows, cols) => Some(CalibrationType::I8Matrix(*rows, *cols)),
+        A2lDataType::I16Matrix(rows, cols) => Some(CalibrationType::I16Matrix(*rows, *cols)),
+        A2lDataType::I32Matrix(rows, cols) => Some(CalibrationType::I32Matrix(*rows, *cols)),
+        A2lDataType::I64Matrix(rows, cols) => Some(CalibrationType::I64Matrix(*rows, *cols)),
+        A2lDataType::F32Matrix(rows, cols) => Some(CalibrationType::F32Matrix(*rows, *cols)),
+        A2lDataType::F64Matrix(rows, cols) => Some(CalibrationType::F64Matrix(*rows, *cols)),
+        A2lDataType::BoolMatrix(rows, cols) => Some(CalibrationType::BoolMatrix(*rows, *cols)),
+    }
+}
+
+/// Canonical conversion of an [`A2lCharacteristic`] into a [`CalibrationParam`].
+///
+/// This is the single authoritative implementation.  All other copies in the
+/// codebase (`web/routes.rs`, `src-tauri/commands/helpers.rs`, `tui/app.rs`)
+/// delegate to this function so that changes to type mapping or ASCII handling
+/// propagate everywhere automatically.
+pub fn a2l_characteristic_to_param(
+    ch: A2lCharacteristic,
+    reader: &A2lReader,
+) -> Option<CalibrationParam> {
+    let mut data_type = a2l_type_to_calibration(&ch.data_type)?;
+
+    // ASCII characteristics: override data_type to Ascii(n) using the byte count
+    // from the already-resolved array size (parse_characteristic_datatype already
+    // encoded the NUMBER keyword as U8Array(n) for us).
+    if ch.characteristic_type == CharacteristicType::Ascii {
+        let byte_len = data_type.size().max(1);
+        data_type = CalibrationType::Ascii(byte_len);
+    }
+
+    let mut param = CalibrationParam::new(&ch.name, ch.address, ch.address_ext, data_type)
+        .with_description(&ch.description)
+        .with_range(ch.min, ch.max);
+
+    if let Some(unit) = ch.unit {
+        param = param.with_unit(&unit);
+    }
+
+    param.characteristic_type = ch.characteristic_type;
+    param.axis_info = ch.axis_info;
+    param.storage_order = ch.storage_order;
+    param.compu_method = reader.get_compu_method(&ch.conversion_name);
+
+    Some(param)
 }
 
 #[cfg(test)]

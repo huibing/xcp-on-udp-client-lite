@@ -1558,6 +1558,12 @@ fn bytes_to_calibration_value(
                 .map(|row| row.iter().map(|&v| v != 0).collect())
                 .collect(),
         ),
+        CalibrationType::Ascii(n) => {
+            let s = String::from_utf8_lossy(&data[..*n.min(&data.len())])
+                .trim_end_matches('\0')
+                .to_string();
+            CalibrationValue::Ascii(s)
+        }
     };
     Ok(value)
 }
@@ -2026,6 +2032,13 @@ async fn write_calibration_to_slave(
             .iter()
             .flat_map(|row| row.iter().map(|v| if *v { 1u8 } else { 0u8 }))
             .collect(),
+        (CalibrationValue::Ascii(s), CalibrationType::Ascii(n)) => {
+            let src = s.as_bytes();
+            let mut bytes = vec![0u8; *n];
+            let copy_len = src.len().min(*n);
+            bytes[..copy_len].copy_from_slice(&src[..copy_len]);
+            bytes
+        }
         _ => return Err(format!("Value type mismatch for {:?}", param.data_type)),
     };
 
@@ -3090,61 +3103,7 @@ fn convert_characteristic(
     ch: crate::a2l::A2lCharacteristic,
     reader: &crate::a2l::A2lReader,
 ) -> Option<crate::calibration::CalibrationParam> {
-    use crate::calibration::{CalibrationParam, CalibrationType};
-
-    let data_type = match ch.data_type {
-        crate::a2l::A2lDataType::U8 => CalibrationType::U8,
-        crate::a2l::A2lDataType::U16 => CalibrationType::U16,
-        crate::a2l::A2lDataType::U32 => CalibrationType::U32,
-        crate::a2l::A2lDataType::U64 => CalibrationType::U64,
-        crate::a2l::A2lDataType::I8 => CalibrationType::I8,
-        crate::a2l::A2lDataType::I16 => CalibrationType::I16,
-        crate::a2l::A2lDataType::I32 => CalibrationType::I32,
-        crate::a2l::A2lDataType::I64 => CalibrationType::I64,
-        crate::a2l::A2lDataType::F32 => CalibrationType::F32,
-        crate::a2l::A2lDataType::F64 => CalibrationType::F64,
-        crate::a2l::A2lDataType::Bool => CalibrationType::Bool,
-        crate::a2l::A2lDataType::U8Array(n) => CalibrationType::U8Array(n),
-        crate::a2l::A2lDataType::U16Array(n) => CalibrationType::U16Array(n),
-        crate::a2l::A2lDataType::U32Array(n) => CalibrationType::U32Array(n),
-        crate::a2l::A2lDataType::U64Array(n) => CalibrationType::U64Array(n),
-        crate::a2l::A2lDataType::I8Array(n) => CalibrationType::I8Array(n),
-        crate::a2l::A2lDataType::I16Array(n) => CalibrationType::I16Array(n),
-        crate::a2l::A2lDataType::I32Array(n) => CalibrationType::I32Array(n),
-        crate::a2l::A2lDataType::I64Array(n) => CalibrationType::I64Array(n),
-        crate::a2l::A2lDataType::F32Array(n) => CalibrationType::F32Array(n),
-        crate::a2l::A2lDataType::F64Array(n) => CalibrationType::F64Array(n),
-        crate::a2l::A2lDataType::BoolArray(n) => CalibrationType::BoolArray(n),
-        crate::a2l::A2lDataType::U8Matrix(r, c) => CalibrationType::U8Matrix(r, c),
-        crate::a2l::A2lDataType::U16Matrix(r, c) => CalibrationType::U16Matrix(r, c),
-        crate::a2l::A2lDataType::U32Matrix(r, c) => CalibrationType::U32Matrix(r, c),
-        crate::a2l::A2lDataType::U64Matrix(r, c) => CalibrationType::U64Matrix(r, c),
-        crate::a2l::A2lDataType::I8Matrix(r, c) => CalibrationType::I8Matrix(r, c),
-        crate::a2l::A2lDataType::I16Matrix(r, c) => CalibrationType::I16Matrix(r, c),
-        crate::a2l::A2lDataType::I32Matrix(r, c) => CalibrationType::I32Matrix(r, c),
-        crate::a2l::A2lDataType::I64Matrix(r, c) => CalibrationType::I64Matrix(r, c),
-        crate::a2l::A2lDataType::F32Matrix(r, c) => CalibrationType::F32Matrix(r, c),
-        crate::a2l::A2lDataType::F64Matrix(r, c) => CalibrationType::F64Matrix(r, c),
-        crate::a2l::A2lDataType::BoolMatrix(r, c) => CalibrationType::BoolMatrix(r, c),
-    };
-
-    let mut param = CalibrationParam::new(&ch.name, ch.address, ch.address_ext, data_type)
-        .with_description(&ch.description)
-        .with_range(ch.min, ch.max);
-
-    if let Some(unit) = ch.unit {
-        param = param.with_unit(&unit);
-    }
-
-    // Set characteristic type, axis info, and storage order
-    param.characteristic_type = ch.characteristic_type;
-    param.axis_info = ch.axis_info;
-    param.storage_order = ch.storage_order;
-
-    // Resolve COMPU_METHOD for value conversion (enum, linear, etc.)
-    param.compu_method = reader.get_compu_method(&ch.conversion_name);
-
-    Some(param)
+    crate::calibration::a2l_characteristic_to_param(ch, reader)
 }
 
 /// Convert A2L measurement to DAQ measurement
@@ -3738,6 +3697,7 @@ fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -> serde_jso
                 .map(|row| row.iter().map(|v| json!(*v)).collect::<Vec<_>>())
                 .collect::<Vec<_>>())
         }
+        CalibrationValue::Ascii(s) => json!([s]),
     }
 }
 
@@ -5595,6 +5555,8 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Ve
                     ))
                 })
             }
+
+            CharacteristicType::Ascii => None, // ASCII strings are not representable in DCM format
         };
 
         if let Some(block) = block_opt {

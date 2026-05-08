@@ -653,6 +653,9 @@ fn parse_json_value_to_cal(
                 .map(|s| parse_f64(s))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
+        CalibrationType::Ascii(_) => {
+            CalibrationValue::Ascii(v0.to_string())
+        }
         _ => return Err(format!("Unsupported write type: {:?}", data_type)),
     })
 }

@@ -769,6 +769,7 @@ impl App {
                 let cols = m.first().map(|r| r.len()).unwrap_or(0);
                 format!("[{}x{} matrix]", rows, cols)
             }
+            CalibrationValue::Ascii(s) => s.clone(),
         }
     }
 
@@ -1539,7 +1540,7 @@ impl App {
     ) -> Option<xcp_client::CalibrationParam> {
         use xcp_client::{CalibrationParam, CalibrationType};
 
-        let data_type = match ch.data_type {
+        let mut data_type = match ch.data_type {
             // Scalar types
             xcp_client::A2lDataType::U8 => CalibrationType::U8,
             xcp_client::A2lDataType::U16 => CalibrationType::U16,
@@ -1595,6 +1596,12 @@ impl App {
                 CalibrationType::BoolMatrix(rows, cols)
             }
         };
+
+        // ASCII characteristics: override data_type to Ascii(n)
+        if ch.characteristic_type == xcp_client::CharacteristicType::Ascii {
+            let byte_len = data_type.size().max(1);
+            data_type = CalibrationType::Ascii(byte_len);
+        }
 
         let mut param = CalibrationParam::new(&ch.name, ch.address, ch.address_ext, data_type)
             .with_description(&ch.description)

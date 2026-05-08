@@ -869,7 +869,8 @@ impl A2lReader {
             a2lfile::CharacteristicType::Curve => CharacteristicType::Curve,
             a2lfile::CharacteristicType::Map => CharacteristicType::Map,
             a2lfile::CharacteristicType::ValBlk => CharacteristicType::ValBlk,
-            // ASCII, Cuboid, Cube4, Cube5 are treated as VAL_BLK for now
+            a2lfile::CharacteristicType::Ascii => CharacteristicType::Ascii,
+            // Cuboid, Cube4, Cube5 are treated as VAL_BLK for now
             _ => CharacteristicType::ValBlk,
         }
     }

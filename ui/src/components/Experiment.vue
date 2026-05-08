@@ -14,7 +14,7 @@
       <div class="exp-sidebar">
         <!-- Device connect / config group -->
         <button class="sb-btn" title="Connect / Disconnect devices" @click="openConnectModal">🔌</button>
-        <button class="sb-btn" title="Register devices from experiment variables&#10;Creates placeholder device entries for all devices referenced by variables in this experiment" @click="registerVarDevices">🔗</button>
+        <button class="sb-btn" title="Re-map variables to current devices&#10;Matches saved variables to currently connected devices by device name.&#10;Variables not found in any connected device's A2L are removed." @click="remapVarDevices">🔗</button>
         <button class="sb-btn" title="Export calibration variables to DCM file" @click="openDcmExportModal" :disabled="dcmExporting">
           {{ dcmExporting ? '⏳' : '💾' }}
         </button>
@@ -88,6 +88,12 @@
                         title="Toggle signal graph">📈</span>
                       <span class="card-info-btn" @click.stop="showInfo(v)">ℹ</span>
                       <span
+                        class="card-event-btn"
+                        :class="{ 'card-locked': mode !== 'idle' }"
+                        @click.stop="openEventModal(v)"
+                        :title="mode !== 'idle' ? 'Stop DAQ to change event' : 'Change event (send cycle)'"
+                        >⏱</span>
+                      <span
                         class="card-remove"
                         :class="{ 'card-locked': mode !== 'idle' }"
                         @click.stop="removeVar(v)"
@@ -95,6 +101,9 @@
                     </div>
                   </div>
                   <div class="card-name">{{ v.name }}</div>
+                  <div v-if="v.event_channel != null" class="card-event-badge">
+                    ⏱ {{ getEventName(v.config_device_id || v.device_id, v.event_channel) }}
+                  </div>
                   <div class="card-value">
                     <span class="val-num">{{ getLiveValue(v) }}</span>
                     <span v-if="v.unit" class="val-unit">{{ v.unit }}</span>
@@ -251,7 +260,11 @@
               Type
               <div class="vt-resize-handle" @mousedown.stop="onResizeHandleDown('type', $event)"></div>
             </div>
-            <div class="vt-col-addr vt-th">Address</div>
+            <div class="vt-col-addr vt-th">
+              Address
+              <div class="vt-resize-handle" @mousedown.stop="onResizeHandleDown('addr', $event)"></div>
+            </div>
+            <div class="vt-col-evt vt-th">Event</div>
           </div>
           <!-- Virtual-scrolling body: only renders visible rows -->
           <div class="vt-scroll-body" ref="vtContainer" @scroll.passive="onVtScroll">
@@ -273,6 +286,23 @@
                   </div>
                   <div class="vt-col-type vt-type">{{ v.kind === 'measurement' ? v.type : (v.calType + ' / ' + v.type) }}</div>
                   <div class="vt-col-addr vt-addr mono">{{ v.address_hex }}</div>
+                  <div class="vt-col-evt" @click.stop>
+                    <template v-if="v.kind === 'measurement'">
+                      <select
+                        class="evt-sel"
+                        :value="pendingEventSelections[varModalKey(v)] ?? firstEventChannel(v.config_device_id)"
+                        @change="e => { pendingEventSelections[varModalKey(v)] = Number(e.target.value) }"
+                      >
+                        <option
+                          v-for="evt in getEventsForDevice(v.config_device_id)"
+                          :key="evt.channel"
+                          :value="evt.channel"
+                        >{{ evt.name }} ({{ evt.cycle_time_ms }}ms)</option>
+                        <option v-if="!getEventsForDevice(v.config_device_id).length" :value="0">— No events —</option>
+                      </select>
+                    </template>
+                    <span v-else class="vt-evt-na">—</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -282,6 +312,38 @@
           <span class="modal-count">{{ pendingVarsSet.size }} selected</span>
           <button class="exp-btn" @click="showVarModal = false">Cancel</button>
           <button class="exp-btn primary" @click="applyVarSelection">Apply</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Event Change modal -->
+    <div v-if="showEventModal" class="modal-overlay" @click.self="showEventModal = false">
+      <div class="modal" style="width:420px">
+        <div class="modal-hdr">
+          <h3>⏱ Change Event: {{ eventModalTarget?.name }}</h3>
+          <button class="modal-close" @click="showEventModal = false">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="field-row" style="margin-bottom:8px">
+            <span class="field-label">Device:</span>
+            <span class="bright">{{ eventModalTarget?.device_name }}</span>
+          </div>
+          <div class="field-row" style="margin-bottom:4px">
+            <span class="field-label">Event:</span>
+          </div>
+          <select v-model="eventModalChannel" class="exp-inp" style="width:100%">
+            <option
+              v-for="evt in getEventsForDevice(eventModalTarget?.config_device_id || eventModalTarget?.device_id)"
+              :key="evt.channel"
+              :value="evt.channel"
+            >{{ evt.name }} ({{ evt.cycle_time_ms }}ms)</option>
+            <option v-if="!getEventsForDevice(eventModalTarget?.config_device_id || eventModalTarget?.device_id).length" :value="0">— No events available —</option>
+          </select>
+          <p class="form-hint" style="margin-top:8px">Changing the event requires a DAQ restart. The new event will be applied on the next Start.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="exp-btn" @click="showEventModal = false">Cancel</button>
+          <button class="exp-btn primary" @click="applyEventChange">Apply</button>
         </div>
       </div>
     </div>
@@ -571,6 +633,33 @@
       </div>
     </div>
 
+    <!-- Removed Variables modal (stale-ID remap) -->
+    <div v-if="showRemovedVarsModal" class="modal-overlay" @click.self="showRemovedVarsModal = false">
+      <div class="modal" style="width:560px;max-width:95vw">
+        <div class="modal-hdr">
+          <h3>⚠ Variables Removed</h3>
+          <button class="modal-close" @click="showRemovedVarsModal = false">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="muted" style="margin-bottom:12px;font-size:13px;">
+            The following variables could not be found in any currently connected device's A2L.
+            They have been removed from the experiment. This can happen when a device was replaced,
+            renamed, or its A2L was changed.
+          </p>
+          <div class="removed-vars-list">
+            <div v-for="(item, i) in removedVarsList" :key="i" class="removed-var-row">
+              <span class="removed-tab">{{ item.tabTitle }}</span>
+              <span class="removed-dev">{{ item.deviceName }}</span>
+              <span class="removed-name">{{ item.varName }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="exp-btn primary" @click="showRemovedVarsModal = false">OK</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Help modal -->
     <div v-if="showHelpModal" class="modal-overlay" @click.self="showHelpModal = false">
       <div class="modal" style="width:860px;max-width:95vw;max-height:85vh">
@@ -714,7 +803,7 @@ const vtTotalH = computed(() => filteredVarList.value.length * VT_ROW_H)
 function onVtScroll(e) { vtScrollTop.value = e.target.scrollTop }
 
 // ── Column resize ─────────────────────────────────────────────────────────────
-const vtColWidths = reactive({ name: 240, dev: 150, kind: 100, type: 120, addr: 100 })
+const vtColWidths = reactive({ name: 240, dev: 150, kind: 100, type: 120, addr: 100, evt: 150 })
 let vtResizing = null
 
 function onResizeHandleDown(col, e) {
@@ -738,6 +827,7 @@ const vtGridVars = computed(() => ({
   '--vt-w-kind': vtColWidths.kind + 'px',
   '--vt-w-type': vtColWidths.type + 'px',
   '--vt-w-addr': vtColWidths.addr + 'px',
+  '--vt-w-evt':  vtColWidths.evt  + 'px',
 }))
 
 // scroll-reset watch needs to include varCalTypeFilter
@@ -820,8 +910,21 @@ let pendingLoadData = null
 // Used by registerVarDevices to restore A2L when registering devices.
 let lastLoadedExpDevices = {}
 
+// ── Removed-variables modal state ─────────────────────────────────────────────
+const showRemovedVarsModal = ref(false)
+const removedVarsList = ref([])   // [{tabTitle, varName, deviceName}]
+
 // ── Help modal state ──────────────────────────────────────────────────────────
 const showHelpModal = ref(false)
+
+// ── Event selection state ─────────────────────────────────────────────────────
+// config_device_id → [{channel, name, short_name, cycle_time_ms}]
+const availableEventsByDevice = reactive({})
+// varModalKey → event_channel (undefined = use first event)
+const pendingEventSelections = reactive({})
+const showEventModal = ref(false)
+const eventModalTarget = ref(null)   // variable being reassigned
+const eventModalChannel = ref(null)  // channel selected in the modal
 
 const router = useRouter()
 
@@ -1056,8 +1159,15 @@ function openVarModal() {
     return
   }
   pendingVarsSet.clear()
+  // Reset event selections and pre-populate from existing variables
+  for (const key in pendingEventSelections) delete pendingEventSelections[key]
   if (activeTab.value) {
-    for (const v of activeTab.value.variables) pendingVarsSet.add(varKey(v))
+    for (const v of activeTab.value.variables) {
+      pendingVarsSet.add(varKey(v))
+      if (v.kind === 'measurement' && v.event_channel != null) {
+        pendingEventSelections[varKey(v)] = v.event_channel
+      }
+    }
   }
   varSearch.value = ''
   varDeviceFilter.value = ''
@@ -1085,7 +1195,15 @@ function applyVarSelection() {
   if (!activeTab.value) return
   activeTab.value.variables = varModalCombined.value
     .filter(v => pendingVarsSet.has(varModalKey(v)))
-    .map(v => ({ ...v }))
+    .map(v => {
+      const result = { ...v }
+      if (v.kind === 'measurement') {
+        const key = varModalKey(v)
+        const configDev = v.config_device_id || v.device_id
+        result.event_channel = pendingEventSelections[key] ?? firstEventChannel(configDev)
+      }
+      return result
+    })
   showVarModal.value = false
   saveState()
   // Snapshot originals for newly added cal vars
@@ -1113,11 +1231,17 @@ function removeVar(v) {
 // ── DAQ control ───────────────────────────────────────────────────────────────
 async function startDaq() {
   const selections = {}
+  const events = {}
   for (const tab of tabs.value) {
     for (const v of tab.variables) {
       if (v.kind !== 'measurement') continue
       if (!selections[v.device_id]) selections[v.device_id] = []
       if (!selections[v.device_id].includes(v.idx)) selections[v.device_id].push(v.idx)
+      // Collect per-measurement event assignments
+      if (v.event_channel != null) {
+        if (!events[v.device_id]) events[v.device_id] = {}
+        events[v.device_id][String(v.idx)] = v.event_channel
+      }
     }
   }
   if (Object.keys(selections).length === 0) {
@@ -1127,7 +1251,7 @@ async function startDaq() {
   resetHistory()
   chartStartEpoch.value = Date.now()
   try {
-    const res = await invoke('experiment_start', { config: { selections } })
+    const res = await invoke('experiment_start', { config: { selections, events } })
     if (res.success || res.started > 0) {
       mode.value = 'running'
       toast(`DAQ started on ${res.started} device(s)`)
@@ -1429,6 +1553,15 @@ async function connectDev(dev) {
       toast(res.message || `Connected to ${dev.name}`)
       await refreshConnectDevices()
       await loadVariables()
+      await pollStatus()
+      const { remapped, removed } = await remapStaleDeviceIds()
+      saveState()
+      if (removed.length > 0) {
+        removedVarsList.value = removed
+        showRemovedVarsModal.value = true
+      } else if (remapped > 0) {
+        toast(`✓ Remapped ${remapped} variable(s) to ${dev.name}`)
+      }
     } else {
       toast(res.error || 'Connect failed', true)
     }
@@ -1470,6 +1603,15 @@ async function connectAllDevs() {
     toast(res.message || 'Done')
     await refreshConnectDevices()
     await loadVariables()
+    await pollStatus()
+    const { remapped, removed } = await remapStaleDeviceIds()
+    saveState()
+    if (removed.length > 0) {
+      removedVarsList.value = removed
+      showRemovedVarsModal.value = true
+    } else if (remapped > 0) {
+      toast(`✓ Remapped ${remapped} variable(s) to current device IDs`)
+    }
   } catch (e) {
     toast(String(e), true)
   } finally {
@@ -1483,57 +1625,87 @@ function goToDevMgr() {
 }
 
 /**
- * Collect every unique device referenced by variables across all tabs and
- * register any that are not already present in the backend device list.
- * This is useful when re-opening a saved experiment whose devices are no
- * longer in config.toml — it creates placeholder entries (no address, no A2L)
- * that the user can then configure and connect.
+ * Re-resolve all tab variables against the current backend variable pool.
+ *
+ * For each variable, if its stored device_id is no longer valid (i.e. the
+ * runtime UUID changed after a reconnect), find the matching entry in the
+ * live allMeasurements / allCalibrations lists by device_name + variable name.
+ *
+ * Variables that cannot be matched to any currently connected A2L are removed
+ * from the tabs and returned in the `removed` array so the caller can notify
+ * the user.
+ *
+ * Returns { remapped: number, removed: [{tabTitle, varName, deviceName}] }
  */
-async function registerVarDevices() {
-  // Collect unique {id, name} pairs from all tab variables
-  const seen = new Set()
-  const devicesToRegister = []
-  for (const tab of tabs.value) {
+async function remapStaleDeviceIds() {
+  const removed = []
+  let remapped = 0
+
+  tabs.value = tabs.value.map(tab => {
+    const newVars = []
     for (const v of tab.variables) {
-      const id = v.config_device_id || v.device_id || ''
-      const name = v.device_name || ''
-      const key = id || name
-      if (key && !seen.has(key)) {
-        seen.add(key)
+      const pool = v.kind === 'measurement' ? allMeasurements.value : allCalibrations.value
+      const devId = v.config_device_id || v.device_id || ''
 
-        // Enrich with a2l_path and address from:
-        // 1. statusDevices (already registered / currently known devices)
-        // 2. lastLoadedExpDevices (from last .exp.json load)
-        const statusInfo = statusDevices.value.find(
-          d => d.config_device_id === id || d.device_id === id
+      // Check if the stored ID still refers to a currently known device
+      const idValid = statusDevices.value.some(
+        d => d.device_id === devId || d.config_device_id === devId
+      )
+
+      if (idValid) {
+        // ID is still current — refresh metadata from pool in case A2L was reloaded
+        const fresh = pool.find(p =>
+          p.name === v.name &&
+          ((p.config_device_id || p.device_id) === devId || p.device_name === v.device_name)
         )
-        const expInfo = lastLoadedExpDevices[id]
+        newVars.push(fresh ? { ...fresh } : { ...v })
+        continue
+      }
 
-        devicesToRegister.push({
-          id,
-          name,
-          a2l_path: statusInfo?.a2l_path || expInfo?.a2l_path || '',
-          address:  statusInfo?.address  || expInfo?.address  || '',
+      // Stale ID — try to find variable by device_name + name in current pool
+      let fresh = pool.find(p => p.name === v.name && p.device_name === v.device_name)
+
+      // Fallback: name-only match if unambiguous across all current devices
+      if (!fresh) {
+        const nameMatches = pool.filter(p => p.name === v.name)
+        if (nameMatches.length === 1) fresh = nameMatches[0]
+      }
+
+      if (fresh) {
+        newVars.push({ ...fresh })
+        remapped++
+      } else {
+        removed.push({
+          tabTitle: tab.title,
+          varName: v.name,
+          deviceName: v.device_name || devId,
         })
       }
     }
+    return { ...tab, variables: newVars }
+  })
+
+  return { remapped, removed }
+}
+
+/**
+ * Manual trigger (🔗 sidebar button): remap stale device IDs and report results.
+ * Automatically called on startup; can also be called manually after reconnecting
+ * a device with a fresh UUID.
+ */
+async function remapVarDevices() {
+  const { remapped, removed } = await remapStaleDeviceIds()
+  saveState()
+
+  if (removed.length > 0) {
+    removedVarsList.value = removed
+    showRemovedVarsModal.value = true
   }
 
-  if (devicesToRegister.length === 0) {
-    toast('No device references found in experiment variables', true)
-    return
-  }
-
-  try {
-    const res = await invoke('ensure_devices_registered', { devices: devicesToRegister })
-    await pollStatus()
-    if (res.registered?.length > 0) {
-      toast(`✓ Registered ${res.registered.length} device(s): ${res.registered.join(', ')}`)
-    } else {
-      toast(`All ${devicesToRegister.length} device(s) already registered`)
-    }
-  } catch (e) {
-    toast('Register devices failed: ' + String(e), true)
+  if (remapped > 0) {
+    toast(`✓ Remapped ${remapped} variable(s) to current device IDs`)
+  } else if (removed.length === 0) {
+    toast('All variables are already up to date')
   }
 }
 
@@ -1699,6 +1871,75 @@ async function loadVariables() {
   } catch (e) {
     toast('Failed to load variables: ' + String(e), true)
   }
+}
+
+// ── Event helpers ─────────────────────────────────────────────────────────────
+async function loadEvents() {
+  try {
+    const res = await invoke('experiment_events')
+    if (res.success) {
+      for (const dev of res.devices || []) {
+        availableEventsByDevice[dev.config_device_id] = dev.events || []
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to load events:', e)
+  }
+}
+
+function getEventsForDevice(configDeviceId) {
+  return availableEventsByDevice[configDeviceId] || []
+}
+
+function firstEventChannel(configDeviceId) {
+  const evts = getEventsForDevice(configDeviceId)
+  return evts.length > 0 ? evts[0].channel : 0
+}
+
+function getEventName(configDeviceId, channel) {
+  const evts = getEventsForDevice(configDeviceId)
+  const evt = evts.find(e => e.channel === channel)
+  if (!evt) return `Ch${channel}`
+  return evt.cycle_time_ms != null
+    ? `${evt.name} (${evt.cycle_time_ms}ms)`
+    : evt.name
+}
+
+function openEventModal(v) {
+  if (mode.value !== 'idle') {
+    toast('Stop DAQ before changing the event', true)
+    return
+  }
+  eventModalTarget.value = v
+  eventModalChannel.value = v.event_channel ?? firstEventChannel(v.config_device_id || v.device_id)
+  showEventModal.value = true
+}
+
+async function applyEventChange() {
+  const v = eventModalTarget.value
+  if (!v) return
+  const channel = eventModalChannel.value
+  const configDev = v.config_device_id || v.device_id
+  try {
+    const res = await invoke('experiment_set_event', {
+      deviceId: configDev,
+      measurementIdx: v.idx,
+      eventChannel: channel,
+    })
+    if (!res.success) { toast('Failed to set event', true); return }
+    // Update all occurrences of this measurement across all tabs
+    for (const tab of tabs.value) {
+      for (const tv of tab.variables) {
+        if (tv.kind === 'measurement' && tv.idx === v.idx && (tv.config_device_id || tv.device_id) === configDev) {
+          tv.event_channel = channel
+        }
+      }
+    }
+    saveState()
+    showEventModal.value = false
+    eventModalTarget.value = null
+    toast(`Event set to ${getEventName(configDev, channel)}`)
+  } catch (e) { toast(String(e), true) }
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -1914,10 +2155,12 @@ function applyLoadedExp(data, deviceIdMap) {
 function handleEsc(e) {
   if (e.key !== 'Escape') return
   if (showHelpModal.value) { showHelpModal.value = false; return }
+  if (showRemovedVarsModal.value) { showRemovedVarsModal.value = false; return }
   if (showDeviceMapModal.value) { showDeviceMapModal.value = false; return }
   if (showDcmModal.value) { showDcmModal.value = false; return }
   if (showConnectModal.value) { showConnectModal.value = false; return }
   if (showChecksumModal.value) { showChecksumModal.value = false; return }
+  if (showEventModal.value) { showEventModal.value = false; return }
   if (matrixTarget.value) { matrixTarget.value = null; return }
   if (infoTarget.value) { infoTarget.value = null; return }
   if (calEditTarget.value) { calEditTarget.value = null; return }
@@ -1929,7 +2172,17 @@ onMounted(async () => {
   if (!hadState) addTab()
 
   await loadVariables()
+  await loadEvents()
   await pollStatus()
+
+  // Auto-remap variables whose device IDs became stale after a reconnect.
+  // Silent when everything resolves; shows modal only if variables are dropped.
+  const { removed } = await remapStaleDeviceIds()
+  saveState()
+  if (removed.length > 0) {
+    removedVarsList.value = removed
+    showRemovedVarsModal.value = true
+  }
 
   // Snapshot originals for already-saved cal vars
   const calVars = tabs.value.flatMap(t => t.variables.filter(v => v.kind === 'calibration'))
@@ -2405,7 +2658,7 @@ onUnmounted(() => {
   box-shadow: 0 8px 32px rgba(0,0,0,0.6);
 }
 .modal.modal-xl {
-  width: 820px;
+  width: 960px;
   max-width: 96vw;
 }
 .modal.matrix-modal {
@@ -2482,10 +2735,11 @@ onUnmounted(() => {
   --vt-w-kind: 100px;
   --vt-w-type: 120px;
   --vt-w-addr: 100px;
+  --vt-w-evt:  150px;
 }
 .vt-header {
   display: grid;
-  grid-template-columns: 32px var(--vt-w-name) var(--vt-w-dev) var(--vt-w-kind) var(--vt-w-type) minmax(var(--vt-w-addr), 1fr);
+  grid-template-columns: 32px var(--vt-w-name) var(--vt-w-dev) var(--vt-w-kind) var(--vt-w-type) var(--vt-w-addr) minmax(var(--vt-w-evt), 1fr);
   align-items: center;
   height: 32px;
   background: var(--exp-bg4);
@@ -2522,7 +2776,7 @@ onUnmounted(() => {
 }
 .vt-row {
   display: grid;
-  grid-template-columns: 32px var(--vt-w-name) var(--vt-w-dev) var(--vt-w-kind) var(--vt-w-type) minmax(var(--vt-w-addr), 1fr);
+  grid-template-columns: 32px var(--vt-w-name) var(--vt-w-dev) var(--vt-w-kind) var(--vt-w-type) var(--vt-w-addr) minmax(var(--vt-w-evt), 1fr);
   align-items: center;
   height: 36px;
   cursor: pointer;
@@ -2546,7 +2800,39 @@ onUnmounted(() => {
 .vt-kind { font-size: 12px; }
 .vt-type { color: var(--exp-fg-dim); font-size: 12px; }
 .vt-addr { font-family: monospace; font-size: 12px; color: var(--exp-fg-dim2); }
+.vt-col-evt { padding: 0 6px; }
+.vt-evt-na { color: var(--exp-fg-dim4); font-size: 12px; }
+.evt-sel {
+  background: var(--exp-bg3);
+  border: 1px solid var(--exp-border2);
+  color: var(--exp-fg);
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 12px;
+  cursor: pointer;
+  width: 100%;
+  max-width: 145px;
+}
+.evt-sel:focus { outline: none; border-color: var(--exp-fg); }
 .mono { font-family: 'Consolas', monospace; }
+
+/* ── Card event badge / button ───────────────────────────────────────────────── */
+.card-event-badge {
+  font-size: 11px;
+  color: var(--exp-fg-dim2);
+  padding: 2px 8px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-event-btn {
+  cursor: pointer;
+  opacity: 0.7;
+  font-size: 14px;
+  transition: opacity 0.15s;
+}
+.card-event-btn:hover { opacity: 1; }
+.card-event-btn.card-locked { opacity: 0.3; cursor: not-allowed; }
 
 /* ── Info table ───────────────────────────────────────────────────────────── */
 .info-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -2731,5 +3017,26 @@ onUnmounted(() => {
 .help-state.running { background: var(--exp-ok-bg); color: var(--exp-fg); border: 1px solid #00aa44; }
 .help-state.recording { background: var(--exp-err-bg); color: #ff4466; border: 1px solid #880022; }
 .help-arrow { color: #444; font-size: 20px; }
+
+/* ── Removed Variables modal ──────────────────────────────────────────────── */
+.removed-vars-list {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--exp-border2);
+  border-radius: 5px;
+}
+.removed-var-row {
+  display: grid;
+  grid-template-columns: 90px 150px 1fr;
+  gap: 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--exp-border3);
+  font-size: 13px;
+  align-items: center;
+}
+.removed-var-row:last-child { border-bottom: none; }
+.removed-tab { color: var(--exp-fg-dim4); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.removed-dev { color: #ff9944; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.removed-name { color: var(--exp-fg-bright); font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
 

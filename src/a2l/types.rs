@@ -147,6 +147,8 @@ pub enum CharacteristicType {
     Map,
     /// Value block - array/matrix without axis semantics (VAL_BLK)
     ValBlk,
+    /// ASCII string (ASCII)
+    Ascii,
 }
 
 impl CharacteristicType {
@@ -157,6 +159,7 @@ impl CharacteristicType {
             Self::Curve => "CURVE",
             Self::Map => "MAP",
             Self::ValBlk => "VAL_BLK",
+            Self::Ascii => "ASCII",
         }
     }
 }

@@ -229,6 +229,12 @@ pub(crate) fn decode_calibration_bytes(
             let flat: Vec<bool> = data.iter().take(total).map(|&b| b != 0).collect();
             CalibrationValue::BoolMatrix(flat_to_matrix(&flat, *rows, *cols, param.storage_order))
         }
+        CalibrationType::Ascii(n) => {
+            let s = String::from_utf8_lossy(&data[..*n.min(&data.len())])
+                .trim_end_matches('\0')
+                .to_string();
+            CalibrationValue::Ascii(s)
+        }
     };
 
     Ok(value)
@@ -501,5 +507,6 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
             .iter()
             .map(|row| row.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>())
             .collect::<Vec<_>>()),
+        CalibrationValue::Ascii(s) => serde_json::json!([s]),
     }
 }
