@@ -495,6 +495,35 @@ a.exp-sb-btn { text-decoration: none; }
     border-top: 8px solid #44cc66;
 }
 
+/* Event badge on measurement cards */
+.exp-evt-badge {
+    font-size: 0.68rem;
+    color: #4488ff;
+    background: rgba(68, 136, 255, 0.1);
+    border: 1px solid rgba(68, 136, 255, 0.3);
+    border-radius: 3px;
+    padding: 1px 5px;
+    margin-top: 0.2rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+/* Change-event button on measurement cards */
+.card-evt-btn {
+    position: absolute;
+    bottom: 0.4rem;
+    right: 1.8rem;
+    cursor: pointer;
+    opacity: 0.5;
+    font-size: 0.85rem;
+    line-height: 1;
+    padding: 2px 3px;
+    border-radius: 2px;
+    transition: opacity 0.15s;
+}
+.card-evt-btn:hover { opacity: 1; background: rgba(68,136,255,0.15); }
+
 /* Matrix/array cell changed indicator */
 .matrix-cell-changed {
     position: relative;
@@ -591,11 +620,12 @@ a.exp-sb-btn { text-decoration: none; }
                 <thead style="position:sticky; top:0; background:#2a2a2a; z-index:1;">
                     <tr>
                         <th style="width:40px; padding:0.5rem;"><input type="checkbox" id="expSelectAll" onclick="expToggleSelectAll()"></th>
-                        <th style="text-align:left; padding:0.5rem; width:30%;">Name</th>
-                        <th style="text-align:left; padding:0.5rem; width:20%;">Device</th>
-                        <th style="text-align:left; padding:0.5rem; width:15%;">Kind</th>
-                        <th style="text-align:left; padding:0.5rem; width:15%;">Type</th>
-                        <th style="text-align:left; padding:0.5rem; width:15%;">Address</th>
+                        <th style="text-align:left; padding:0.5rem; width:28%;">Name</th>
+                        <th style="text-align:left; padding:0.5rem; width:18%;">Device</th>
+                        <th style="text-align:left; padding:0.5rem; width:12%;">Kind</th>
+                        <th style="text-align:left; padding:0.5rem; width:12%;">Type</th>
+                        <th style="text-align:left; padding:0.5rem; width:14%;">Address</th>
+                        <th style="text-align:left; padding:0.5rem; width:16%;">Event</th>
                     </tr>
                 </thead>
                 <tbody id="expVarList"></tbody>
@@ -649,6 +679,27 @@ a.exp-sb-btn { text-decoration: none; }
         <div class="exp-modal-body" id="expChecksumResults"></div>
         <div class="exp-modal-footer">
             <button onclick="document.getElementById('expChecksumModal').style.display='none'">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Event Change Modal -->
+<div id="expEventModal" class="exp-modal" style="display:none;">
+    <div class="exp-modal-content" style="width:420px;">
+        <div class="exp-modal-header">
+            <h3 style="margin:0;">⏱ Change Event</h3>
+            <button class="exp-modal-close" onclick="expCloseEventModal()">&times;</button>
+        </div>
+        <div class="exp-modal-body">
+            <p id="expEventModalDesc" style="color:#888; font-size:0.85rem; margin-bottom:1rem;"></p>
+            <div class="form-group">
+                <label>Select Event</label>
+                <select id="expEventModalSelect" style="width:100%; padding:0.4rem; background:#1a1a2e; color:#e0e0e0; border:1px solid #444; border-radius:4px;"></select>
+            </div>
+        </div>
+        <div class="exp-modal-footer">
+            <button class="secondary" onclick="expCloseEventModal()">Cancel</button>
+            <button onclick="expApplyEventChange()">Apply</button>
         </div>
     </div>
 </div>
@@ -794,6 +845,7 @@ const ExpState = {
     pageModeResults: {},   // device_id -> {success, read_only}
     calEnumOptions: {},    // "device_id:idx" -> [{raw, text}, ...]
     measEnumOptions: {},   // "device_id:name" -> [{raw, text}, ...]
+    availableEventsByDevice: {}, // config_device_id -> [{channel, name, short_name, cycle_time_ms}]
     config: {
         mf4Pattern: '{title}_{YYYYMMDD}_{HHMMSS}.mf4',
         mf4Dir: 'records/',
@@ -804,6 +856,10 @@ const ExpState = {
 
 // ===== Tab Management =====
 let tabCounter = 0;
+
+// ===== Event Selections (for variable selection modal) =====
+// Maps "device_id:idx" -> event channel (u16)
+var expEventSelections = {};
 
 // ===== LocalStorage Persistence =====
 const EXP_STORAGE_KEY = 'experiment_state';
@@ -848,6 +904,7 @@ function expLoadStateFromStorage() {
     }
     expStartStatusPolling();
     expRefreshVariables();
+    expLoadEvents();
 
     // Intercept nav links: prevent leaving when DAQ is running/recording
     document.querySelectorAll('.nav a').forEach(function(link) {
@@ -971,12 +1028,21 @@ function expRenderTabContent() {
             var key = v.device_id + ':' + v.name;
             var val = ExpState.liveValues[key];
             var displayVal = val !== undefined ? expMeasDisplayVal(key, val) : '—';
+            var configDevId = v.config_device_id || '';
+            var evtCh = v.event_channel !== undefined ? v.event_channel : expGetFirstEventChannel(configDevId);
+            var evtName = expGetEventName(configDevId, evtCh);
+            var evtBadge = '<div class="exp-evt-badge" title="Event: ' + escapeHtml(evtName) + '">⏱ ' + escapeHtml(evtName) + '</div>';
+            var evtBtn = ExpState.mode === 'idle'
+                ? '<span class="card-evt-btn" onclick="event.stopPropagation(); expOpenEventModal(\'' + v.device_id + '\', \'' + escapeHtml(configDevId) + '\', ' + v.idx + ', ' + evtCh + ')" title="Change event">⏱</span>'
+                : '';
             html +=
                 '<div class="exp-var-card measurement" title="' + escapeHtml(v.device_name + ' / ' + v.name) + '">' +
                 '<div class="card-device">' + escapeHtml(v.device_name) + '</div>' +
                 '<div class="card-name">' + escapeHtml(v.name) + '</div>' +
                 '<div class="card-value"><span data-live-key="' + escapeHtml(key) + '">' + displayVal + '</span><span class="card-unit">' + escapeHtml(v.unit || '') + '</span></div>' +
+                evtBadge +
                 '<span class="card-info-btn" onclick="event.stopPropagation(); expShowInfo(\'measurement\', \'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')" title="Variable info">ℹ️</span>' +
+                evtBtn +
                 (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
                 '</div>';
         });
@@ -1154,6 +1220,7 @@ var EXP_VAR_BATCH_SIZE = 500;
 function expOpenVarModal() {
     document.getElementById('expVarModal').style.display = 'flex';
     expVarModalSelection = {};
+    expEventSelections = {};
     expFilteredItems = [];
     expDisplayedCount = 0;
     expIsLoadingMore = false;
@@ -1161,6 +1228,9 @@ function expOpenVarModal() {
     if (tab) {
         tab.variables.forEach(function(v) {
             expVarModalSelection[v.kind + ':' + v.device_id + ':' + v.idx] = true;
+            if (v.kind === 'measurement' && v.event_channel !== undefined) {
+                expEventSelections[v.device_id + ':' + v.idx] = v.event_channel;
+            }
         });
     }
     expPopulateVarModal();
@@ -1195,6 +1265,39 @@ function expRefreshVariables() {
         .catch(function(e) { console.error('Failed to load variables:', e); });
 }
 
+function expLoadEvents() {
+    fetch('/api/experiment/events')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success && data.devices) {
+                data.devices.forEach(function(d) {
+                    var key = d.config_device_id || d.device_id;
+                    ExpState.availableEventsByDevice[key] = d.events || [];
+                });
+            }
+        })
+        .catch(function(e) { console.error('Failed to load events:', e); });
+}
+
+function expGetEventsForDevice(configDeviceId) {
+    return ExpState.availableEventsByDevice[configDeviceId] || [];
+}
+
+function expGetFirstEventChannel(configDeviceId) {
+    var evts = expGetEventsForDevice(configDeviceId);
+    return evts.length > 0 ? evts[0].channel : 0;
+}
+
+function expGetEventName(configDeviceId, channel) {
+    var evts = expGetEventsForDevice(configDeviceId);
+    var evt = evts.find(function(e) { return e.channel === channel; });
+    if (!evt) return channel !== undefined ? 'Ch' + channel : '—';
+    if (evt.cycle_time_ms > 0) {
+        return evt.name + ' (' + evt.cycle_time_ms.toFixed(1) + 'ms)';
+    }
+    return evt.name;
+}
+
 function expPopulateVarFilterDevices() {
     var sel = document.getElementById('expVarFilterDevice');
     var devices = {};
@@ -1217,7 +1320,8 @@ function expPopulateVarModal() {
     if (typeFilter !== 'calibration') {
         ExpState.allMeasurements.forEach(function(m) {
             items.push({
-                kind: 'measurement', device_id: m.device_id, device_name: m.device_name,
+                kind: 'measurement', device_id: m.device_id, config_device_id: m.config_device_id || '',
+                device_name: m.device_name,
                 idx: m.idx, name: m.name, type: m.type || '', address: m.address_hex || '',
                 unit: m.unit || '', connected: m.connected,
             });
@@ -1265,6 +1369,7 @@ function expRenderVarRows(items) {
     var daqActive = ExpState.mode !== 'idle';
     items.forEach(function(v) {
         var key = v.kind + ':' + v.device_id + ':' + v.idx;
+        var selKey = v.device_id + ':' + v.idx;
         var checked = expVarModalSelection[key] ? 'checked' : '';
         var kindLabel = v.kind === 'measurement' ? '📊 Meas' : '🔧 Cal';
         var kindColor = v.kind === 'measurement' ? '#4488ff' : '#ff8844';
@@ -1272,6 +1377,31 @@ function expRenderVarRows(items) {
         var disabledAttr = measLocked ? 'disabled' : '';
         var rowStyle = measLocked ? 'cursor:not-allowed; opacity:0.5;' : 'cursor:pointer;';
         var rowClick = measLocked ? '' : 'onclick="expToggleVarCheckbox(\'' + key + '\')"';
+
+        // Build event cell
+        var eventCell;
+        if (v.kind === 'measurement') {
+            var configDevId = v.config_device_id || '';
+            var evts = expGetEventsForDevice(configDevId);
+            var curCh = expEventSelections[selKey] !== undefined ? expEventSelections[selKey] : expGetFirstEventChannel(configDevId);
+            if (evts.length > 0) {
+                var opts = evts.map(function(e) {
+                    var label = e.name + (e.cycle_time_ms > 0 ? ' (' + e.cycle_time_ms.toFixed(1) + 'ms)' : '');
+                    var sel = e.channel === curCh ? ' selected' : '';
+                    return '<option value="' + e.channel + '"' + sel + '>' + escapeHtml(label) + '</option>';
+                }).join('');
+                eventCell = '<td style="padding:0.3rem;" onclick="event.stopPropagation();">' +
+                    '<select data-evt-key="' + escapeHtml(selKey) + '" ' + disabledAttr +
+                    ' style="width:100%; font-size:0.78rem; background:#1a1a2e; color:#ccc; border:1px solid #444; border-radius:3px; padding:2px 4px;"' +
+                    ' onchange="expEventSelections[this.dataset.evtKey]=parseInt(this.value)">' +
+                    opts + '</select></td>';
+            } else {
+                eventCell = '<td style="padding:0.5rem; color:#555; font-size:0.8rem;">—</td>';
+            }
+        } else {
+            eventCell = '<td style="padding:0.5rem; color:#555; font-size:0.8rem;">—</td>';
+        }
+
         html +=
             '<tr ' + rowClick + ' style="' + rowStyle + '" class="' + (checked ? 'selected-row' : '') + '">' +
             '<td style="padding:0.5rem; text-align:center;"><input type="checkbox" ' + checked + ' ' + disabledAttr + ' data-key="' + key + '" onclick="event.stopPropagation(); expToggleVar(\'' + key + '\')"></td>' +
@@ -1280,6 +1410,7 @@ function expRenderVarRows(items) {
             '<td style="padding:0.5rem;"><span style="color:' + kindColor + '; font-size:0.8rem;">' + kindLabel + '</span></td>' +
             '<td style="padding:0.5rem; font-family:monospace; font-size:0.8rem;">' + escapeHtml(v.type) + '</td>' +
             '<td style="padding:0.5rem; font-family:monospace; font-size:0.8rem; color:#888;">' + escapeHtml(v.address) + '</td>' +
+            eventCell +
             '</tr>';
     });
     return html;
@@ -1377,10 +1508,17 @@ function expApplyVarSelection() {
         if (kind === 'measurement') {
             source = ExpState.allMeasurements.find(function(m) { return m.device_id === device_id && m.idx === idx; });
             if (source) {
+                var selKey = device_id + ':' + idx;
+                var configDevId = source.config_device_id || '';
+                var eventCh = expEventSelections[selKey] !== undefined
+                    ? expEventSelections[selKey]
+                    : expGetFirstEventChannel(configDevId);
                 newVars.push({
                     kind: 'measurement', device_id: source.device_id, device_name: source.device_name,
+                    config_device_id: configDevId,
                     idx: source.idx, name: source.name, type: source.type || '',
                     unit: source.unit || '', isMapCurve: false,
+                    event_channel: eventCh,
                 });
             }
         } else {
@@ -1411,6 +1549,7 @@ function expStart() {
 
     // Collect unique measurements across all tabs, grouped by device
     var selections = {};
+    var events = {};  // config_device_id -> { idx_str: channel }
     var seen = {};
     ExpState.tabs.forEach(function(tab) {
         tab.variables.filter(function(v) { return v.kind === 'measurement'; }).forEach(function(v) {
@@ -1419,6 +1558,12 @@ function expStart() {
                 seen[key] = true;
                 if (!selections[v.device_id]) selections[v.device_id] = [];
                 selections[v.device_id].push(v.idx);
+                // Record event assignment keyed by config_device_id for backend
+                var configDevId = v.config_device_id || v.device_id;
+                if (!events[configDevId]) events[configDevId] = {};
+                if (v.event_channel !== undefined) {
+                    events[configDevId][String(v.idx)] = v.event_channel;
+                }
             }
         });
     });
@@ -1433,7 +1578,7 @@ function expStart() {
     fetch('/api/experiment/start', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ selections: selections }),
+        body: JSON.stringify({ selections: selections, events: events }),
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
@@ -2711,6 +2856,89 @@ function expDoDcmExport() {
         document.getElementById('btnDcmExport').textContent = 'Export DCM';
     });
 }
+// ===== Event Change Modal =====
+var expEventModalTarget = null; // { deviceId, configDeviceId, idx }
+
+function expOpenEventModal(deviceId, configDeviceId, idx, currentChannel) {
+    if (ExpState.mode !== 'idle') {
+        expToast('Cannot change event while DAQ is running', 'error');
+        return;
+    }
+    expEventModalTarget = { deviceId: deviceId, configDeviceId: configDeviceId, idx: idx };
+
+    // Find variable name for description
+    var varName = '';
+    for (var i = 0; i < ExpState.tabs.length; i++) {
+        var v = (ExpState.tabs[i].variables || []).find(function(v) {
+            return v.kind === 'measurement' && v.device_id === deviceId && v.idx === idx;
+        });
+        if (v) { varName = v.name; break; }
+    }
+    document.getElementById('expEventModalDesc').textContent = varName
+        ? 'Variable: ' + varName
+        : 'Measurement index: ' + idx;
+
+    var evts = expGetEventsForDevice(configDeviceId);
+    var sel = document.getElementById('expEventModalSelect');
+    sel.innerHTML = evts.map(function(e) {
+        var label = e.name + (e.cycle_time_ms > 0 ? ' (' + e.cycle_time_ms.toFixed(1) + 'ms)' : '');
+        var selected = e.channel === currentChannel ? ' selected' : '';
+        return '<option value="' + e.channel + '"' + selected + '>' + escapeHtml(label) + '</option>';
+    }).join('');
+    if (evts.length === 0) {
+        sel.innerHTML = '<option>No events available</option>';
+    }
+    document.getElementById('expEventModal').style.display = 'flex';
+}
+
+function expCloseEventModal() {
+    document.getElementById('expEventModal').style.display = 'none';
+    expEventModalTarget = null;
+}
+
+function expApplyEventChange() {
+    if (!expEventModalTarget) return;
+    var deviceId = expEventModalTarget.deviceId;
+    var configDeviceId = expEventModalTarget.configDeviceId;
+    var idx = expEventModalTarget.idx;
+    var channel = parseInt(document.getElementById('expEventModalSelect').value, 10);
+
+    if (isNaN(channel)) { expCloseEventModal(); return; }
+
+    // Update all tabs in memory
+    var updated = false;
+    ExpState.tabs.forEach(function(tab) {
+        (tab.variables || []).forEach(function(v) {
+            if (v.kind === 'measurement' && v.device_id === deviceId && v.idx === idx) {
+                v.event_channel = channel;
+                updated = true;
+            }
+        });
+    });
+
+    if (updated) {
+        // Persist to backend
+        fetch('/api/experiment/set-event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId, measurement_idx: idx, event_channel: channel }),
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.success) {
+                expToast('Set event failed: ' + (data.error || ''), 'error');
+            } else {
+                expToast('Event updated to ' + expGetEventName(configDeviceId, channel), 'success');
+            }
+        })
+        .catch(function(e) { expToast('Set event failed: ' + e, 'error'); });
+
+        expSaveStateToStorage();
+        expRenderTabContent();
+    }
+    expCloseEventModal();
+}
+
 function expToast(msg, type) {
     var toast = document.querySelector('.exp-toast');
     if (!toast) {
@@ -2733,6 +2961,7 @@ document.addEventListener('keydown', function(e) {
         expCloseInfo();
         expCloseMatrix();
         expCancelDeviceMap();
+        expCloseEventModal();
         document.getElementById('expChecksumModal').style.display = 'none';
     } else if (e.key === 'Enter' && !e.target.matches('input, textarea, select')) {
         var varModal = document.getElementById('expVarModal');

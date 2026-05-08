@@ -4516,6 +4516,7 @@ pub async fn experiment_variables(State(state): State<AppState>) -> impl IntoRes
                 .unwrap_or_default();
             measurements.push(json!({
                 "device_id": device_id,
+                "config_device_id": device.id,
                 "device_name": device_name,
                 "idx": i,
                 "name": m.name,
@@ -4546,6 +4547,89 @@ pub async fn experiment_variables(State(state): State<AppState>) -> impl IntoRes
         "measurements": measurements,
         "calibrations": calibrations,
     }))
+}
+
+/// Get available DAQ events for all devices (GET /api/experiment/events)
+pub async fn experiment_events(State(state): State<AppState>) -> impl IntoResponse {
+    let devices = state.all_devices().await;
+    let mut result: Vec<serde_json::Value> = Vec::new();
+
+    for device in &devices {
+        let device_id = if let Some(slave_id) = device.slave_id {
+            slave_id.to_string()
+        } else {
+            device.id.clone()
+        };
+        let device_name = device.display_name_or_custom().await;
+
+        let daq_mgr = device.daq_manager.read().await;
+        let events: Vec<serde_json::Value> = daq_mgr
+            .get_available_events()
+            .iter()
+            .map(|e| {
+                json!({
+                    "channel": e.channel,
+                    "name": e.name,
+                    "short_name": e.short_name,
+                    "cycle_time_ms": e.cycle_time_ms(),
+                })
+            })
+            .collect();
+
+        result.push(json!({
+            "device_id": device_id,
+            "config_device_id": device.id,
+            "device_name": device_name,
+            "events": events,
+        }));
+    }
+
+    Json(json!({
+        "success": true,
+        "devices": result,
+    }))
+}
+
+/// Set the DAQ event for a single measurement variable (POST /api/experiment/set-event)
+pub async fn experiment_set_event(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let device_id_str = match payload.get("device_id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return Json(json!({ "success": false, "error": "Missing device_id" })),
+    };
+    let measurement_idx = match payload.get("measurement_idx").and_then(|v| v.as_u64()) {
+        Some(n) => n as usize,
+        None => return Json(json!({ "success": false, "error": "Missing measurement_idx" })),
+    };
+    let event_channel = match payload.get("event_channel").and_then(|v| v.as_u64()) {
+        Some(n) => n as u16,
+        None => return Json(json!({ "success": false, "error": "Missing event_channel" })),
+    };
+
+    // Resolve device (try by slave UUID first, then by config ID)
+    let device = if let Some(d) = state.get_device(&device_id_str).await {
+        d
+    } else if let Ok(uuid) = uuid::Uuid::parse_str(&device_id_str) {
+        let slave_id = SlaveId(uuid);
+        let devices = state.all_devices().await;
+        match devices.into_iter().find(|d| d.slave_id == Some(slave_id)) {
+            Some(d) => d,
+            None => return Json(json!({ "success": false, "error": "Device not found" })),
+        }
+    } else {
+        return Json(json!({ "success": false, "error": "Device not found" }));
+    };
+
+    if *device.daq_running.read().await {
+        return Json(json!({ "success": false, "error": "Cannot change event while DAQ is running" }));
+    }
+
+    let mut daq_mgr = device.daq_manager.write().await;
+    daq_mgr.set_measurement_event(measurement_idx, event_channel);
+
+    Json(json!({ "success": true }))
 }
 
 /// Start DAQ on specified slaves (POST /api/experiment/start)
@@ -4616,12 +4700,26 @@ pub async fn experiment_start(
             }
         };
 
-        // Set measurement selections
+        // Set measurement selections and event assignments
         {
             let mut daq_manager = device.daq_manager.write().await;
             daq_manager.deselect_all();
             for idx in &indices {
                 daq_manager.select_measurement(*idx);
+            }
+            // Apply event channel assignments if provided
+            if let Some(events_map) = payload.get("events").and_then(|v| v.as_object()) {
+                let dev_events = events_map
+                    .get(device.id.as_str())
+                    .or_else(|| events_map.get(device_id_str.as_str()))
+                    .and_then(|v| v.as_object());
+                if let Some(dev_events) = dev_events {
+                    for (idx_str, ch_val) in dev_events {
+                        if let (Ok(idx), Some(ch)) = (idx_str.parse::<usize>(), ch_val.as_u64()) {
+                            daq_manager.set_measurement_event(idx, ch as u16);
+                        }
+                    }
+                }
             }
         }
 
