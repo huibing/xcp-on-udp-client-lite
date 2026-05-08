@@ -102,6 +102,12 @@ pub async fn cal_read(
         let display_value_arr = cal_value_display_string(&value, &param);
         let display_value_data = calibration_value_to_display_json(&value, is_1d, &param);
         let effective_display = display_value.or(display_value_arr);
+        tracing::debug!(
+            "cal_read [xcp] '{}': compu_method={} effective_display={:?}",
+            param.name,
+            param.compu_method.variant_name(),
+            effective_display,
+        );
         return Ok(json!({
             "success": true,
             "name": param.name,
@@ -149,6 +155,12 @@ pub async fn cal_read(
             let display_value_arr = cal_value_display_string(&value, &param);
             let display_value_data = calibration_value_to_display_json(&value, is_1d, &param);
             let effective_display = display_value.or(display_value_arr);
+            tracing::debug!(
+                "cal_read [hex] '{}': compu_method={} effective_display={:?}",
+                param.name,
+                param.compu_method.variant_name(),
+                effective_display,
+            );
             return Ok(json!({
                 "success": true,
                 "name": param.name,
