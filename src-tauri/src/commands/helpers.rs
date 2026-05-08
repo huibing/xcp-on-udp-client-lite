@@ -126,8 +126,20 @@ pub fn calibration_value_to_display_json(
         CalibrationValue::U32Matrix(mat) => Some(json!(mat.iter().map(|row| {
             row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
         }).collect::<Vec<_>>())),
+        CalibrationValue::U64Matrix(mat) => Some(json!(mat.iter().map(|row| {
+            row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
+        }).collect::<Vec<_>>())),
+        CalibrationValue::I8Matrix(mat) => Some(json!(mat.iter().map(|row| {
+            row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
+        }).collect::<Vec<_>>())),
+        CalibrationValue::I16Matrix(mat) => Some(json!(mat.iter().map(|row| {
+            row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
+        }).collect::<Vec<_>>())),
         CalibrationValue::I32Matrix(mat) => Some(json!(mat.iter().map(|row| {
             row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
+        }).collect::<Vec<_>>())),
+        CalibrationValue::I64Matrix(mat) => Some(json!(mat.iter().map(|row| {
+            row.iter().map(|&v| fmt(v)).collect::<Vec<_>>()
         }).collect::<Vec<_>>())),
         _ => None,
     }
