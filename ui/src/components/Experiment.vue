@@ -2174,6 +2174,12 @@ onMounted(async () => {
   await loadVariables()
   await loadEvents()
   await pollStatus()
+  // If DAQ is already running when we navigate back, initialize epoch so incoming
+  // data gets proper relative timestamps (otherwise all land at t=0 = vertical line).
+  if (mode.value !== 'idle') {
+    resetHistory()
+    chartStartEpoch.value = Date.now()
+  }
 
   // Auto-remap variables whose device IDs became stale after a reconnect.
   // Silent when everything resolves; shows modal only if variables are dropped.
