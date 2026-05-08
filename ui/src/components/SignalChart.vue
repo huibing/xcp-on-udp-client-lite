@@ -11,6 +11,7 @@
         </span>
       </div>
       <span v-if="running" class="schart-live-badge">● LIVE</span>
+      <button class="schart-close-btn" @click="$emit('close')" title="Close graph panel">✕</button>
     </div>
 
     <!-- Canvas area -->
@@ -67,7 +68,7 @@ const props = defineProps({
   tickColor: { type: String, default: '#00aa33' },
 })
 
-// ── Local state ───────────────────────────────────────────────────────────────
+const emit = defineEmits(['close'])
 const canvasEl = ref(null)
 
 const windowIdx = ref((() => {
@@ -331,6 +332,23 @@ watch([() => props.gridColor, () => props.tickColor], () => {
   margin-top: 14px;
   overflow: hidden;
   flex-shrink: 0;
+}
+
+.schart-close-btn {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--exp-fg-dim3);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+}
+.schart-close-btn:hover {
+  color: #ff5555;
+  background: rgba(255, 85, 85, 0.12);
 }
 
 /* ── Header ────────────────────────────────────────────────────────────────── */

@@ -187,6 +187,7 @@
               :startEpoch="chartStartEpoch"
               :gridColor="chartGridColor"
               :tickColor="chartTickColor"
+              @close="closeAllGraphs"
             />
         </div>
       </div>
@@ -1088,6 +1089,13 @@ const chartTickColor = computed(() => {
 /** Clear history on new DAQ session */
 function resetHistory() {
   signalHistoryStore.clear()
+}
+
+/** Close graph panel — clear all graphed keys for the active tab */
+function closeAllGraphs() {
+  if (!activeTab.value) return
+  activeTab.value.graphedKeys = []
+  saveState()
 }
 
 function getChangeMark(v) {
