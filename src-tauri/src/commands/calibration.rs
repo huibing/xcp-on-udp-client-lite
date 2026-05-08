@@ -127,8 +127,18 @@ pub async fn cal_read(
             cal_values_arc.write().await.insert(param.name.clone(), value.clone());
 
             let is_enum = param.is_enum();
+            let raw_i64 = cal_value_to_raw_i64(&value);
             let display_value: Option<String> =
-                cal_value_to_raw_i64(&value).map(|raw| param.format_value(raw));
+                raw_i64.map(|raw| param.format_value(raw));
+            tracing::debug!(
+                "cal_read [hex] '{}': data_type={:?} is_enum={} raw_i64={:?} value_format={:?} display_value={:?}",
+                param.name,
+                param.data_type,
+                is_enum,
+                raw_i64,
+                value.format(),
+                display_value,
+            );
             return Ok(json!({
                 "success": true,
                 "name": param.name,

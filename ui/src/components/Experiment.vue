@@ -1187,6 +1187,10 @@ async function refreshCalValues() {
   for (let i = 0; i < calVars.length; i++) {
     const r = results[i]
     if (r?.success) {
+      // DEBUG: log the raw response to browser console to trace COMPU_METHOD conversion
+      if (r.display_value !== null && r.display_value !== undefined && r.display_value !== r.value) {
+        console.debug('[cal_read]', calVars[i].name, { value: r.value, display_value: r.display_value, is_enum: r.is_enum })
+      }
       calValues[calKey(calVars[i])] = r.display_value ?? r.value
       count++
     }
