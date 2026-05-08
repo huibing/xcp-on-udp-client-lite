@@ -1187,10 +1187,7 @@ async function refreshCalValues() {
   for (let i = 0; i < calVars.length; i++) {
     const r = results[i]
     if (r?.success) {
-      // DEBUG: log the raw response to browser console to trace COMPU_METHOD conversion
-      if (r.display_value !== null && r.display_value !== undefined && r.display_value !== r.value) {
-        console.debug('[cal_read]', calVars[i].name, { value: r.value, display_value: r.display_value, is_enum: r.is_enum })
-      }
+      console.log('[cal_read]', calVars[i].name, 'value=', r.value, 'display_value=', r.display_value)
       calValues[calKey(calVars[i])] = r.display_value ?? r.value
       count++
     }
@@ -1312,7 +1309,7 @@ async function showMatrix(v) {
     matrixXAxisName.value = axes[0]?.pts_ref_name ?? 'X'
     matrixYAxisName.value = axes[1]?.pts_ref_name ?? 'Y'
 
-    const val = readRes.value_data ?? readRes.value
+    const val = readRes.display_value_data ?? readRes.value_data ?? readRes.value
     if (Array.isArray(val) && Array.isArray(val[0])) {
       // 2D map: stored as val[x_idx][y_idx], transpose for display → display[y_idx][x_idx]
       const numX = val.length
