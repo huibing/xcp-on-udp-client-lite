@@ -524,6 +524,114 @@ a.exp-sb-btn { text-decoration: none; }
 }
 .card-evt-btn:hover { opacity: 1; background: rgba(68,136,255,0.15); }
 
+/* Signal Graph Panel */
+.exp-graph-panel {
+    flex-shrink: 0;
+    border-top: 1px solid #333;
+    background: #0d0d1a;
+    display: flex;
+    flex-direction: column;
+}
+.exp-graph-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 10px;
+    background: #1a1a2e;
+    border-bottom: 1px solid #333;
+    min-height: 32px;
+}
+.exp-graph-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #ccc;
+    white-space: nowrap;
+}
+.exp-graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    flex: 1;
+    overflow: hidden;
+}
+.exp-graph-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: #ccc;
+    white-space: nowrap;
+}
+.exp-graph-legend-line {
+    width: 20px;
+    height: 2px;
+    border-radius: 1px;
+    flex-shrink: 0;
+}
+.exp-graph-live-badge {
+    font-size: 11px;
+    font-weight: 700;
+    color: #00ff66;
+    white-space: nowrap;
+    animation: exp-graph-blink 1.2s ease-in-out infinite;
+}
+@keyframes exp-graph-blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+.exp-graph-close-btn {
+    background: none;
+    border: none;
+    color: #666;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 2px 5px;
+    border-radius: 3px;
+    line-height: 1;
+    transition: color 0.15s, background 0.15s;
+}
+.exp-graph-close-btn:hover { color: #ff5555; background: rgba(255,85,85,0.12); }
+.exp-graph-canvas-wrap {
+    height: 220px;
+    padding: 6px 8px 4px;
+    background: #0d0d1a;
+    position: relative;
+}
+.exp-graph-canvas-wrap canvas {
+    width: 100%;
+    height: 100%;
+}
+.exp-graph-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 10px;
+    background: #1a1a2e;
+    border-top: 1px solid #333;
+}
+.exp-graph-slider {
+    flex: 1;
+    accent-color: #00ff88;
+    cursor: pointer;
+    height: 4px;
+}
+/* Graph toggle button on measurement cards */
+.card-graph-btn {
+    position: absolute;
+    bottom: 0.4rem;
+    right: 3.5rem;
+    cursor: pointer;
+    opacity: 0.4;
+    font-size: 0.85rem;
+    line-height: 1;
+    padding: 2px 3px;
+    border-radius: 2px;
+    transition: opacity 0.15s;
+    user-select: none;
+}
+.card-graph-btn:hover { opacity: 1; background: rgba(0,255,136,0.1); }
+.card-graph-btn.graphed { opacity: 1; color: #00ff88; background: rgba(0,255,136,0.15); }
+
 /* Matrix/array cell changed indicator */
 .matrix-cell-changed {
     position: relative;
@@ -583,11 +691,28 @@ a.exp-sb-btn { text-decoration: none; }
             <a href="/experiment/help" class="exp-sb-btn" title="Help &amp; user guide">❓</a>
         </div>
 
-        <!-- Right side: tabs + content -->
+        <!-- Right side: tabs + content + graph -->
         <div class="exp-right">
             <div class="exp-tab-bar" id="expTabBar">
             </div>
             <div class="exp-tab-content" id="expTabContent"></div>
+            <!-- Signal Graph Panel -->
+            <div id="expGraphPanel" class="exp-graph-panel" style="display:none;">
+                <div class="exp-graph-header">
+                    <span class="exp-graph-title">📈 Graph</span>
+                    <div class="exp-graph-legend" id="expGraphLegend"></div>
+                    <span id="expGraphLiveBadge" class="exp-graph-live-badge" style="display:none;">● LIVE</span>
+                    <button class="exp-graph-close-btn" onclick="expCloseGraph()" title="Close graph panel">✕</button>
+                </div>
+                <div class="exp-graph-canvas-wrap">
+                    <canvas id="expGraphCanvas"></canvas>
+                </div>
+                <div class="exp-graph-controls">
+                    <span id="expGraphWinLabel" style="font-size:12px; min-width:48px; text-align:right; color:#ccc;">30 s</span>
+                    <input type="range" id="expGraphWindowSlider" class="exp-graph-slider" min="0" max="6" value="3" oninput="expGraphOnWindowChange(this.value)">
+                    <span style="font-size:11px; color:#666;">time window</span>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -861,6 +986,15 @@ let tabCounter = 0;
 // Maps "device_id:idx" -> event channel (u16)
 var expEventSelections = {};
 
+// ===== Signal Graph State =====
+var EXP_GRAPH_WINDOWS = [5, 10, 20, 30, 60, 120, 300];
+var EXP_GRAPH_COLORS = ['#00ff88','#4488ff','#ff8844','#ff44ff','#ffff44','#44ffff','#88ff44','#ff4488'];
+var EXP_MAX_HIST = 6000;
+var expSignalHistory = {};    // "device_id:name" -> {times:[], values:[]}
+var expGraphStartTime = null; // Date.now() when current DAQ session started
+var expGraphInterval = null;  // canvas redraw interval handle
+var expGraphWindowIdx = 3;    // index into EXP_GRAPH_WINDOWS (default 30s)
+
 // ===== LocalStorage Persistence =====
 const EXP_STORAGE_KEY = 'experiment_state';
 
@@ -883,6 +1017,9 @@ function expLoadStateFromStorage() {
         var data = JSON.parse(raw);
         if (!data.tabs || !data.tabs.length) return false;
         ExpState.tabs = data.tabs;
+        ExpState.tabs.forEach(function(tab) {
+            tab.graphedKeys = tab.graphedKeys || [];
+        });
         ExpState.activeTabId = data.activeTabId || data.tabs[0].id;
         tabCounter = data.tabCounter || data.tabs.length;
         if (data.config) {
@@ -900,6 +1037,7 @@ function expLoadStateFromStorage() {
     } else {
         expRenderTabs();
         expRenderTabContent();
+        expUpdateGraphPanel();
         expReadAllCalValues();
     }
     expStartStatusPolling();
@@ -925,11 +1063,12 @@ function expAddTab() {
         return;
     }
     tabCounter++;
-    const tab = { id: 'tab-' + tabCounter, title: 'Tab ' + tabCounter, variables: [] };
+    const tab = { id: 'tab-' + tabCounter, title: 'Tab ' + tabCounter, variables: [], graphedKeys: [] };
     ExpState.tabs.push(tab);
     ExpState.activeTabId = tab.id;
     expRenderTabs();
     expRenderTabContent();
+    expUpdateGraphPanel();
 }
 
 function expCloseTab(tabId, ev) {
@@ -945,12 +1084,14 @@ function expCloseTab(tabId, ev) {
     }
     expRenderTabs();
     expRenderTabContent();
+    expUpdateGraphPanel();
 }
 
 function expSelectTab(tabId) {
     ExpState.activeTabId = tabId;
     expRenderTabs();
     expRenderTabContent();
+    expUpdateGraphPanel();
 }
 
 function expRenameTab(tabId, ev) {
@@ -1035,13 +1176,15 @@ function expRenderTabContent() {
             var evtBtn = ExpState.mode === 'idle'
                 ? '<span class="card-evt-btn" onclick="event.stopPropagation(); expOpenEventModal(\'' + v.device_id + '\', \'' + escapeHtml(configDevId) + '\', ' + v.idx + ', ' + evtCh + ')" title="Change event">⏱</span>'
                 : '';
+            var isGraphed = (tab.graphedKeys || []).indexOf(key) >= 0;
             html +=
-                '<div class="exp-var-card measurement" title="' + escapeHtml(v.device_name + ' / ' + v.name) + '">' +
+                '<div class="exp-var-card measurement' + (isGraphed ? ' graphed-card' : '') + '" title="' + escapeHtml(v.device_name + ' / ' + v.name) + '">' +
                 '<div class="card-device">' + escapeHtml(v.device_name) + '</div>' +
                 '<div class="card-name">' + escapeHtml(v.name) + '</div>' +
                 '<div class="card-value"><span data-live-key="' + escapeHtml(key) + '">' + displayVal + '</span><span class="card-unit">' + escapeHtml(v.unit || '') + '</span></div>' +
                 evtBadge +
                 '<span class="card-info-btn" onclick="event.stopPropagation(); expShowInfo(\'measurement\', \'' + v.device_id + '\', ' + v.idx + ', \'' + escapeHtml(v.name) + '\')" title="Variable info">ℹ️</span>' +
+                '<span class="card-graph-btn' + (isGraphed ? ' graphed' : '') + '" onclick="event.stopPropagation(); expToggleGraph(\'' + v.device_id + '\', \'' + escapeHtml(v.name) + '\')" title="Toggle graph">📈</span>' +
                 evtBtn +
                 (ExpState.mode === 'idle' ? '<span class="card-remove" onclick="event.stopPropagation(); expRemoveVar(\'' + tab.id + '\', \'' + v.device_id + '\', ' + v.idx + ', \'' + v.kind + '\')" title="Remove">✕</span>' : '') +
                 '</div>';
@@ -1203,10 +1346,19 @@ function expRemoveVar(tabId, deviceId, idx, kind) {
     if (ExpState.mode !== 'idle' && kind === 'measurement') return;
     var tab = ExpState.tabs.find(function(t) { return t.id === tabId; });
     if (!tab) return;
+    var removed = tab.variables.find(function(v) {
+        return v.device_id === deviceId && v.idx === idx && v.kind === kind;
+    });
     tab.variables = tab.variables.filter(function(v) {
         return !(v.device_id === deviceId && v.idx === idx && v.kind === kind);
     });
+    if (removed && removed.kind === 'measurement') {
+        tab.graphedKeys = (tab.graphedKeys || []).filter(function(key) {
+            return key !== expGraphKey(removed.device_id, removed.name);
+        });
+    }
     expRenderTabContent();
+    expUpdateGraphPanel();
     expSaveStateToStorage();
 }
 
@@ -1537,8 +1689,14 @@ function expApplyVarSelection() {
     });
 
     tab.variables = newVars;
+    tab.graphedKeys = (tab.graphedKeys || []).filter(function(graphKey) {
+        return newVars.some(function(v) {
+            return v.kind === 'measurement' && expGraphKey(v.device_id, v.name) === graphKey;
+        });
+    });
     expCloseVarModal();
     expRenderTabContent();
+    expUpdateGraphPanel();
     expReadAllCalValues();
     expSaveStateToStorage();
 }
@@ -1585,7 +1743,11 @@ function expStart() {
         if (data.success) {
             ExpState.mode = 'running';
             expUpdateToolbarState();
+            expSignalHistory = {};
+            expGraphStartTime = Date.now();
             expStartDataPolling();
+            expStartGraphInterval();
+            expUpdateGraphPanel();
             expToast('DAQ started on ' + data.started + ' device(s)', 'success');
         } else {
             expToast('Start failed: ' + (data.error || (data.errors ? data.errors.join('; ') : '')), 'error');
@@ -1632,7 +1794,9 @@ function expStop() {
     .then(function(data) {
         ExpState.mode = 'idle';
         expStopDataPolling();
+        expStopGraphInterval();
         expUpdateToolbarState();
+        expUpdateGraphPanel();
         if (data.success) {
             expToast('DAQ stopped on ' + data.stopped + ' device(s)', 'success');
         } else {
@@ -1642,7 +1806,9 @@ function expStop() {
     .catch(function(e) {
         ExpState.mode = 'idle';
         expStopDataPolling();
+        expStopGraphInterval();
         expUpdateToolbarState();
+        expUpdateGraphPanel();
         expToast('Stop error: ' + e, 'error');
     });
 }
@@ -1729,6 +1895,17 @@ function expPollData() {
             data.values.forEach(function(entry) {
                 var key = entry.device_id + ':' + entry.var_name;
                 ExpState.liveValues[key] = parseFloat(entry.value);
+                if (expGraphStartTime !== null) {
+                    var relT = (Date.now() - expGraphStartTime) / 1000;
+                    if (!expSignalHistory[key]) expSignalHistory[key] = { times: [], values: [] };
+                    var h = expSignalHistory[key];
+                    h.times.push(relT);
+                    h.values.push(isNaN(ExpState.liveValues[key]) ? 0 : ExpState.liveValues[key]);
+                    if (h.times.length > EXP_MAX_HIST) {
+                        h.times.splice(0, 500);
+                        h.values.splice(0, 500);
+                    }
+                }
             });
             document.querySelectorAll('[data-live-key]').forEach(function(el) {
                 var key = el.dataset.liveKey;
@@ -1758,7 +1935,15 @@ function expPollStatus() {
                     if (data.daq_running_count > 0) {
                         ExpState.mode = data.recording_count > 0 ? 'recording' : 'running';
                         expUpdateToolbarState();
-                        if (ExpState.mode !== 'idle') expStartDataPolling();
+                        if (ExpState.mode !== 'idle') {
+                            expStartDataPolling();
+                            if (expGraphStartTime === null) {
+                                expSignalHistory = {};
+                                expGraphStartTime = Date.now();
+                                expStartGraphInterval();
+                            }
+                            expUpdateGraphPanel();
+                        }
                     }
                 }
             }
@@ -2937,6 +3122,179 @@ function expApplyEventChange() {
         expRenderTabContent();
     }
     expCloseEventModal();
+}
+
+// ===== Signal Graph =====
+
+function expGraphKey(deviceId, name) { return deviceId + ':' + name; }
+
+function expIsGraphed(deviceId, name) {
+    var tab = ExpState.tabs.find(function(t) { return t.id === ExpState.activeTabId; });
+    return tab && (tab.graphedKeys || []).indexOf(expGraphKey(deviceId, name)) >= 0;
+}
+
+function expToggleGraph(deviceId, name) {
+    var tab = ExpState.tabs.find(function(t) { return t.id === ExpState.activeTabId; });
+    if (!tab) return;
+    if (!tab.graphedKeys) tab.graphedKeys = [];
+    var key = expGraphKey(deviceId, name);
+    var idx = tab.graphedKeys.indexOf(key);
+    if (idx >= 0) tab.graphedKeys.splice(idx, 1);
+    else tab.graphedKeys.push(key);
+    expSaveStateToStorage();
+    expRenderTabContent();
+    expUpdateGraphPanel();
+}
+
+function expCloseGraph() {
+    var tab = ExpState.tabs.find(function(t) { return t.id === ExpState.activeTabId; });
+    if (tab) { tab.graphedKeys = []; }
+    expSaveStateToStorage();
+    expRenderTabContent();
+    expUpdateGraphPanel();
+}
+
+function expGraphOnWindowChange(val) {
+    expGraphWindowIdx = parseInt(val, 10);
+    var secs = EXP_GRAPH_WINDOWS[expGraphWindowIdx] || 30;
+    var label = secs >= 60 ? (secs / 60) + ' min' : secs + ' s';
+    document.getElementById('expGraphWinLabel').textContent = label;
+    expDrawGraph();
+}
+
+function expStartGraphInterval() {
+    expStopGraphInterval();
+    expGraphInterval = setInterval(expDrawGraph, 200);
+}
+
+function expStopGraphInterval() {
+    if (expGraphInterval) { clearInterval(expGraphInterval); expGraphInterval = null; }
+}
+
+function expUpdateGraphPanel() {
+    var tab = ExpState.tabs.find(function(t) { return t.id === ExpState.activeTabId; });
+    var keys = (tab && tab.graphedKeys) || [];
+    var panel = document.getElementById('expGraphPanel');
+    if (!panel) return;
+    if (keys.length === 0) {
+        panel.style.display = 'none';
+        return;
+    }
+    panel.style.display = 'flex';
+    var badge = document.getElementById('expGraphLiveBadge');
+    if (badge) badge.style.display = ExpState.mode !== 'idle' ? 'inline' : 'none';
+    var legend = document.getElementById('expGraphLegend');
+    if (legend) {
+        legend.innerHTML = keys.map(function(key, i) {
+            var parts = key.split(':');
+            var name = parts.slice(1).join(':');
+            var color = EXP_GRAPH_COLORS[i % EXP_GRAPH_COLORS.length];
+            return '<span class="exp-graph-legend-item">' +
+                '<span class="exp-graph-legend-line" style="background:' + color + '"></span>' +
+                '<span>' + escapeHtml(name) + '</span>' +
+                '</span>';
+        }).join('');
+    }
+    expDrawGraph();
+}
+
+function expDrawGraph() {
+    var canvas = document.getElementById('expGraphCanvas');
+    if (!canvas) return;
+    var wrap = canvas.parentElement;
+    if (!wrap) return;
+    var W = wrap.clientWidth - 16;
+    var H = wrap.clientHeight - 10;
+    if (W <= 0 || H <= 0) return;
+    canvas.width = W;
+    canvas.height = H;
+    var ctx = canvas.getContext('2d');
+
+    var tab = ExpState.tabs.find(function(t) { return t.id === ExpState.activeTabId; });
+    var keys = (tab && tab.graphedKeys) || [];
+
+    ctx.fillStyle = '#0d0d1a';
+    ctx.fillRect(0, 0, W, H);
+
+    if (keys.length === 0) return;
+
+    var winSecs = EXP_GRAPH_WINDOWS[expGraphWindowIdx] || 30;
+    var nowSecs = expGraphStartTime ? (Date.now() - expGraphStartTime) / 1000 : 0;
+    var xMax = Math.max(winSecs, nowSecs);
+    var xMin = xMax - winSecs;
+
+    var mx = 52, mr = 10, mt = 8, mb = 28;
+    var plotW = W - mx - mr;
+    var plotH = H - mt - mb;
+    if (plotW <= 0 || plotH <= 0) return;
+
+    var yMin = Infinity, yMax = -Infinity;
+    keys.forEach(function(key) {
+        var h = expSignalHistory[key];
+        if (!h || !h.times.length) return;
+        for (var i = 0; i < h.times.length; i++) {
+            if (h.times[i] < xMin - 1 || h.times[i] > xMax + 1) continue;
+            if (h.values[i] < yMin) yMin = h.values[i];
+            if (h.values[i] > yMax) yMax = h.values[i];
+        }
+    });
+    if (!isFinite(yMin) || !isFinite(yMax)) { yMin = -1; yMax = 1; }
+    if (Math.abs(yMax - yMin) < 1e-9) { yMin -= 1; yMax += 1; }
+    var yRange = yMax - yMin;
+    var yPad = yRange * 0.1;
+    yMin -= yPad; yMax += yPad; yRange = yMax - yMin;
+
+    ctx.strokeStyle = 'rgba(0,200,100,0.1)';
+    ctx.lineWidth = 1;
+    var yTicks = 5, xTicks = 6;
+    for (var i = 0; i <= yTicks; i++) {
+        var gy = mt + (i / yTicks) * plotH;
+        ctx.beginPath(); ctx.moveTo(mx, gy); ctx.lineTo(mx + plotW, gy); ctx.stroke();
+    }
+
+    keys.forEach(function(key, ki) {
+        var h = expSignalHistory[key];
+        if (!h || !h.times.length) return;
+        ctx.strokeStyle = EXP_GRAPH_COLORS[ki % EXP_GRAPH_COLORS.length];
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        var first = true;
+        for (var i = 0; i < h.times.length; i++) {
+            var t = h.times[i];
+            if (t < xMin - 1 || t > xMax + 1) continue;
+            var px = mx + ((t - xMin) / winSecs) * plotW;
+            var py = mt + plotH - ((h.values[i] - yMin) / yRange) * plotH;
+            if (first) { ctx.moveTo(px, py); first = false; }
+            else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+    });
+
+    ctx.fillStyle = '#00aa33';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (var i = 0; i <= xTicks; i++) {
+        var t = xMin + (i / xTicks) * winSecs;
+        var px = mx + (i / xTicks) * plotW;
+        ctx.fillText(t.toFixed(1) + 's', px, mt + plotH + 4);
+    }
+
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (var i = 0; i <= yTicks; i++) {
+        var v = yMin + (i / yTicks) * yRange;
+        var py = mt + plotH - (i / yTicks) * plotH;
+        var vStr = Math.abs(v) >= 1000 ? v.toExponential(1) : (Math.abs(v) < 0.001 && v !== 0 ? v.toExponential(1) : v.toPrecision(4));
+        ctx.fillText(vStr, mx - 3, py);
+    }
+
+    ctx.strokeStyle = 'rgba(0,200,100,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(mx, mt);
+    ctx.lineTo(mx, mt + plotH);
+    ctx.stroke();
 }
 
 function expToast(msg, type) {
