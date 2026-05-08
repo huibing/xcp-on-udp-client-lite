@@ -9,8 +9,9 @@ use xcp_client::slave::PageMode;
 use xcp_client::CharacteristicType;
 
 use crate::commands::helpers::{
-    bytes_to_calibration_value, calibration_value_to_json, read_axis_values_from_hex,
-    read_axis_values_from_slave, read_calibration_from_slave, write_calibration_to_slave,
+    bytes_to_calibration_value, cal_value_display_string, calibration_value_to_display_json,
+    calibration_value_to_json, read_axis_values_from_hex, read_axis_values_from_slave,
+    read_calibration_from_slave, write_calibration_to_slave,
 };
 use crate::state::SharedState;
 
@@ -97,13 +98,18 @@ pub async fn cal_read(
             value.format(),
             display_value,
         );
+        let is_1d = param.characteristic_type == CharacteristicType::Curve;
+        let display_value_arr = cal_value_display_string(&value, &param);
+        let display_value_data = calibration_value_to_display_json(&value, is_1d, &param);
+        let effective_display = display_value.or(display_value_arr);
         return Ok(json!({
             "success": true,
             "name": param.name,
             "value": value.format(),
-            "value_data": calibration_value_to_json(&value, param.characteristic_type == CharacteristicType::Curve),
+            "value_data": calibration_value_to_json(&value, is_1d),
             "is_enum": is_enum,
-            "display_value": display_value,
+            "display_value": effective_display,
+            "display_value_data": display_value_data,
             "source": "xcp",
         }));
     }
@@ -139,13 +145,18 @@ pub async fn cal_read(
                 value.format(),
                 display_value,
             );
+            let is_1d = param.characteristic_type == CharacteristicType::Curve;
+            let display_value_arr = cal_value_display_string(&value, &param);
+            let display_value_data = calibration_value_to_display_json(&value, is_1d, &param);
+            let effective_display = display_value.or(display_value_arr);
             return Ok(json!({
                 "success": true,
                 "name": param.name,
                 "value": value.format(),
-                "value_data": calibration_value_to_json(&value, param.characteristic_type == CharacteristicType::Curve),
+                "value_data": calibration_value_to_json(&value, is_1d),
                 "is_enum": is_enum,
-                "display_value": display_value,
+                "display_value": effective_display,
+                "display_value_data": display_value_data,
                 "source": "hex",
             }));
         }
