@@ -40,6 +40,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Arc::new(RwLock::new(TauriAppState::new())))
+        .manage(commands::mf4_viewer::Mf4FileCache::new())
         .invoke_handler(tauri::generate_handler![
             // Device management
             commands::device::list_devices,
@@ -90,6 +91,11 @@ pub fn run() {
             commands::compare::compare_variables,
             commands::compare::compare_select_variables,
             commands::compare::compare_result,
+            // MF4 Viewer
+            commands::mf4_viewer::mf4_list_record_files,
+            commands::mf4_viewer::mf4_open_file,
+            commands::mf4_viewer::mf4_get_channel_data,
+            commands::mf4_viewer::mf4_get_channel_time,
             // Experiment
             commands::experiment::experiment_variables,
             commands::experiment::experiment_events,

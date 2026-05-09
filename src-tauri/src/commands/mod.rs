@@ -7,3 +7,4 @@ pub mod daq_live;
 pub mod device;
 pub mod experiment;
 pub mod helpers;
+pub mod mf4_viewer;

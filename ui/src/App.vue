@@ -6,6 +6,7 @@
       <router-link to="/devices">Devices</router-link>
       <router-link to="/experiment">Experiment</router-link>
       <router-link to="/compare">Compare</router-link>
+      <router-link to="/mf4">MF4 Viewer</router-link>
       <router-link to="/settings" class="settings-link">⚙ Settings</router-link>
     </nav>
     <main class="content" :class="{ 'content-flush': $route.path === '/experiment' }">
