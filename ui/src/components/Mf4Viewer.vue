@@ -151,15 +151,6 @@
           <span class="hint-text">Tip: drag a channel from the list and drop it onto an existing chart to overlay signals.</span>
         </div>
         <template v-else>
-          <div class="loaded-tags">
-            <span v-for="signal in loadedSignals" :key="signal.key" class="signal-tag">
-              <span class="signal-color" :style="{ background: signal.color }"></span>
-              <span class="signal-label">{{ signal.name }}</span>
-              <span class="signal-file">{{ signal.device_name }}</span>
-              <button class="tag-close" @click="removeSignal(signal.key)">✕</button>
-            </span>
-          </div>
-
           <div
             v-for="group in chartGroups"
             :key="group.id"
@@ -257,6 +248,7 @@
             <table class="stats-table">
               <thead>
                 <tr>
+                  <th></th>
                   <th>Signal</th>
                   <th>File</th>
                   <th>Samples</th>
@@ -267,7 +259,13 @@
               </thead>
               <tbody>
                 <tr v-for="row in loadedSignalRows" :key="row.key">
-                  <td>{{ row.name }}</td>
+                  <td>
+                    <button class="stats-remove-btn" @click="removeSignal(row.key)" title="Remove signal">✕</button>
+                  </td>
+                  <td>
+                    <span class="stats-signal-swatch" :style="{ background: row.color }"></span>
+                    {{ row.name }}
+                  </td>
                   <td>{{ row.file }}</td>
                   <td>{{ row.samples }}</td>
                   <td>{{ row.min }}</td>
@@ -546,6 +544,7 @@ const loadedSignalRows = computed(() => loadedSignals.value.map(signal => {
     return {
       key: signal.key,
       name: signal.name,
+      color: signal.color ?? '#00cc44',
       file: signal.device_name,
       samples: '0',
       min: '—',
@@ -576,6 +575,7 @@ const loadedSignalRows = computed(() => loadedSignals.value.map(signal => {
   return {
     key: signal.key,
     name: signal.name,
+    color: signal.color ?? '#00cc44',
     file: signal.device_name,
     samples: count.toLocaleString(),
     min: vtab ? fmtEnum(min) : formatValue(min),
@@ -1272,13 +1272,6 @@ onMounted(() => {
   font-style: italic;
 }
 
-.loaded-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
 .graph-header-right {
   display: flex;
   align-items: center;
@@ -1304,43 +1297,27 @@ onMounted(() => {
   background: rgba(255, 204, 0, 0.05);
 }
 
-.signal-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--exp-border2, #002211);
-  background: var(--exp-bg2, #060606);
-  color: var(--exp-fg, #00cc44);
-  font-size: 0.8rem;
-}
-
-.signal-color {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.signal-label {
-  color: var(--exp-fg-bright, #00ff66);
-}
-
-.signal-file {
-  color: var(--exp-fg-dim, #556644);
-}
-
-.tag-close {
+.stats-remove-btn {
+  background: none;
   border: none;
-  background: transparent;
   color: var(--exp-fg-dim3, #335522);
   cursor: pointer;
-  padding: 0 2px;
+  font-size: 12px;
+  padding: 0 4px;
+  line-height: 1;
 }
 
-.tag-close:hover {
+.stats-remove-btn:hover {
   color: #ff6666;
+}
+
+.stats-signal-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
 }
 
 .stats-card {
