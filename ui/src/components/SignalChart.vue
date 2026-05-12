@@ -19,6 +19,7 @@
         </span>
       </div>
       <span v-if="running" class="schart-live-badge">● LIVE</span>
+      <button v-if="yOverrideMin !== null" class="schart-reset-y-btn" @click="resetYZoom" title="Reset Y zoom">↕ Reset Y</button>
       <button class="schart-close-btn" @click="$emit('close')" title="Close graph panel">✕</button>
     </div>
 
@@ -29,7 +30,12 @@
       <div v-if="showCursor"
            class="schart-cursor-overlay"
            ref="cursorOverlayEl"
-           @mousedown.prevent="onCursorDown">
+           @mousedown.prevent="onCanvasDown"
+           @dblclick.prevent="resetYZoom">
+        <!-- Zoom selection rectangle -->
+        <div v-if="zoomRect" class="schart-zoom-rect" :style="zoomRectStyle">
+          <span v-if="zoomAxis" class="schart-zoom-axis-label">{{ zoomAxis === 'x' ? '↔ X zoom' : '↕ Y zoom' }}</span>
+        </div>
         <div class="schart-cursor-line" :style="cursorLineStyle"></div>
         <div v-if="cursorValues.length > 0" class="schart-cursor-tooltip" :style="cursorTooltipStyle">
           <div class="schart-cursor-time">t = {{ localCursorTime !== null ? localCursorTime.toFixed(4) : '—' }} s</div>
@@ -107,7 +113,7 @@ const props = defineProps({
   cursorTime: { type: Number, default: null },
 })
 
-const emit = defineEmits(['close', 'cursor-move', 'color-change'])
+const emit = defineEmits(['close', 'cursor-move', 'color-change', 'zoom-x'])
 const canvasEl = ref(null)
 
 const windowIdx = ref((() => {
@@ -143,6 +149,12 @@ const localCursorTime = ref(null)  // internal cursor time (seconds), source of 
 const chartXRange = ref({ min: 0, max: 1 })
 const chartPlotArea = ref({ left: 0, right: 1, top: 0, bottom: 1 })
 let cursorDragging = false
+
+// ── Zoom state ────────────────────────────────────────────────────────────────
+const zoomRect = ref(null)       // { x1, y1, x2, y2 } px in overlay
+const zoomAxis = ref(null)       // 'x' | 'y' | null (determined by drag direction)
+const yOverrideMin = ref(null)   // manual Y-axis override; null = auto
+const yOverrideMax = ref(null)
 
 function getElapsed() {
   if (props.startEpoch == null) return 0
@@ -236,8 +248,11 @@ function doUpdate() {
   chart.options.scales.x.min = xMin
   chart.options.scales.x.max = xMax
 
-  // Apply y-axis bounds with margin
-  if (yMin === Infinity) {
+  // Apply y-axis bounds with margin (or manual override)
+  if (yOverrideMin.value !== null && yOverrideMax.value !== null) {
+    chart.options.scales.y.min = yOverrideMin.value
+    chart.options.scales.y.max = yOverrideMax.value
+  } else if (yMin === Infinity) {
     chart.options.scales.y.min = -1
     chart.options.scales.y.max = 1
   } else if (Math.abs(yMax - yMin) < 1e-9) {
@@ -324,19 +339,109 @@ function _placeCursorAt(clientX) {
   emit('cursor-move', localCursorTime.value)
 }
 
-function onCursorDown(e) {
+function onCanvasDown(e) {
   e.preventDefault()
-  cursorDragging = true
-  _placeCursorAt(e.clientX)
-  function onMove(e) { if (cursorDragging) _placeCursorAt(e.clientX) }
-  function onUp() {
-    cursorDragging = false
-    document.removeEventListener('mousemove', onMove)
-    document.removeEventListener('mouseup', onUp)
+  if (!cursorOverlayEl.value) return
+
+  const overlayRect = cursorOverlayEl.value.getBoundingClientRect()
+  const clickX = e.clientX - overlayRect.left
+  const isNearCursor = cursorPx.value !== null && Math.abs(clickX - cursorPx.value) <= 8
+
+  if (isNearCursor) {
+    // ── Cursor-drag mode (existing behaviour) ──────────────────────────────
+    cursorDragging = true
+    _placeCursorAt(e.clientX)
+    function onMoveCursor(e) { if (cursorDragging) _placeCursorAt(e.clientX) }
+    function onUpCursor() {
+      cursorDragging = false
+      document.removeEventListener('mousemove', onMoveCursor)
+      document.removeEventListener('mouseup', onUpCursor)
+    }
+    document.addEventListener('mousemove', onMoveCursor)
+    document.addEventListener('mouseup', onUpCursor)
+    return
   }
-  document.addEventListener('mousemove', onMove)
-  document.addEventListener('mouseup', onUp)
+
+  // ── Zoom-select / click-to-place-cursor mode ───────────────────────────────
+  const startX = clickX
+  const startY = e.clientY - overlayRect.top
+  let zooming = false
+
+  function onMoveZoom(e) {
+    const x = e.clientX - overlayRect.left
+    const y = e.clientY - overlayRect.top
+    const dx = Math.abs(x - startX)
+    const dy = Math.abs(y - startY)
+    if (!zooming && dx + dy > 5) zooming = true
+    if (zooming) {
+      zoomRect.value = { x1: startX, y1: startY, x2: x, y2: y }
+      zoomAxis.value = dx >= dy ? 'x' : 'y'
+    }
+  }
+
+  function onUpZoom(e) {
+    document.removeEventListener('mousemove', onMoveZoom)
+    document.removeEventListener('mouseup', onUpZoom)
+
+    if (!zooming) {
+      // Plain click: place cursor
+      _placeCursorAt(e.clientX)
+      return
+    }
+
+    const r = zoomRect.value
+    const axis = zoomAxis.value
+    zoomRect.value = null
+    zoomAxis.value = null
+    if (!r || !axis) return
+
+    if (axis === 'x') {
+      const t1 = _pixelToTime(Math.min(r.x1, r.x2))
+      const t2 = _pixelToTime(Math.max(r.x1, r.x2))
+      if (t2 - t1 > 1e-6) emit('zoom-x', { xMin: t1, xMax: t2 })
+    } else {
+      // Y zoom: resolve pixels → data values via chart scale
+      const y1px = Math.min(r.y1, r.y2)
+      const y2px = Math.max(r.y1, r.y2)
+      if (chart && y2px - y1px > 5) {
+        const vBottom = chart.scales.y.getValueForPixel(y2px)
+        const vTop = chart.scales.y.getValueForPixel(y1px)
+        if (vBottom !== undefined && vTop !== undefined && Math.abs(vTop - vBottom) > 1e-10) {
+          yOverrideMin.value = Math.min(vBottom, vTop)
+          yOverrideMax.value = Math.max(vBottom, vTop)
+          doUpdate()
+        }
+      }
+    }
+  }
+
+  document.addEventListener('mousemove', onMoveZoom)
+  document.addEventListener('mouseup', onUpZoom)
 }
+
+function resetYZoom() {
+  if (yOverrideMin.value !== null) {
+    yOverrideMin.value = null
+    yOverrideMax.value = null
+    doUpdate()
+  }
+}
+
+/** Style for the zoom-selection rubber-band rectangle */
+const zoomRectStyle = computed(() => {
+  if (!zoomRect.value || !zoomAxis.value) return { display: 'none' }
+  const { x1, y1, x2, y2 } = zoomRect.value
+  const ca = chartPlotArea.value
+  if (zoomAxis.value === 'x') {
+    const left = Math.max(ca.left, Math.min(x1, x2))
+    const right = Math.min(ca.right, Math.max(x1, x2))
+    return { left: `${left}px`, top: `${ca.top}px`, width: `${Math.max(0, right - left)}px`, height: `${ca.bottom - ca.top}px` }
+  } else {
+    const top = Math.max(ca.top, Math.min(y1, y2))
+    const bottom = Math.min(ca.bottom, Math.max(y1, y2))
+    return { left: `${ca.left}px`, top: `${top}px`, width: `${ca.right - ca.left}px`, height: `${Math.max(0, bottom - top)}px` }
+  }
+})
 
 /** Binary search: value of signal `key` at the given time (nearest sample) */
 function getValueAtTime(key, time) {
@@ -738,5 +843,49 @@ watch(() => props.cursorTime, v => {
   font-variant-numeric: tabular-nums;
   color: #ffffff;
   white-space: nowrap;
+}
+
+/* ── Zoom selection rectangle ─────────────────────────────────────────────── */
+.schart-zoom-rect {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(0, 220, 80, 0.07);
+  border: 1px solid rgba(0, 220, 80, 0.45);
+  box-sizing: border-box;
+  z-index: 9;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.schart-zoom-axis-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(0, 220, 80, 0.9);
+  background: rgba(0,0,0,0.6);
+  padding: 1px 4px;
+  border-radius: 2px;
+  letter-spacing: 0.4px;
+  margin-top: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Y-zoom reset button in chart header */
+.schart-reset-y-btn {
+  background: transparent;
+  border: 1px solid rgba(0, 220, 80, 0.35);
+  color: rgba(0, 220, 80, 0.7);
+  border-radius: 3px;
+  padding: 2px 7px;
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.schart-reset-y-btn:hover {
+  color: var(--exp-fg-bright, #00ff66);
+  border-color: var(--exp-fg-bright, #00ff66);
 }
 </style>

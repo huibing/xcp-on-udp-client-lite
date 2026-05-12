@@ -164,6 +164,7 @@
             :cursorTime="sharedCursorTime"
             @cursor-move="sharedCursorTime = $event"
             @color-change="onSignalColorChange"
+            @zoom-x="applyChartZoom"
             @close="removeSignal(signal.key)"
           />
 
@@ -737,6 +738,13 @@ function removeSignal(key) {
 function onSignalColorChange({ key, color }) {
   const sig = loadedSignals.value.find(s => s.key === key)
   if (sig) sig.color = color
+}
+
+function applyChartZoom({ xMin, xMax }) {
+  viewStart.value = Math.max(dataTimeMin.value ?? xMin, xMin)
+  viewEnd.value = Math.min(dataTimeMax.value ?? xMax, xMax)
+  viewStartInput.value = Number(viewStart.value.toFixed(4))
+  viewEndInput.value = Number(viewEnd.value.toFixed(4))
 }
 
 function clearSignals() {
