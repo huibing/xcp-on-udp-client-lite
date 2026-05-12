@@ -96,10 +96,9 @@
               v-for="channel in filteredChannels"
               :key="`${activeFile.path}::${channel}`"
               class="channel-row"
-              draggable="true"
+              :class="{ 'channel-row-dragging': draggingChannel && draggingChannel.channel === channel }"
               @dblclick="addSignal(channel)"
-              @dragstart="onChannelDragStart(channel, $event)"
-              @dragend="onChannelDragEnd"
+              @mousedown="onChannelMouseDown(channel, $event)"
             >
               <span class="channel-name">
                 {{ channel }}
@@ -166,9 +165,7 @@
             :key="group.id"
             class="chart-group-wrap"
             :class="{ 'chart-drag-over': dragOverGroupId === group.id }"
-            @dragover.prevent="dragOverGroupId = group.id"
-            @dragleave="onGroupDragLeave(group.id, $event)"
-            @drop.prevent="onDropOnGroup(group.id, $event)"
+            :data-group-id="group.id"
           >
             <SignalChart
               :signals="group.signals"
@@ -284,6 +281,17 @@
       </section>
     </div>
   </div>
+
+  <!-- Drag ghost: floating label following the cursor during channel drag -->
+  <Teleport to="body">
+    <div
+      v-if="dragGhost"
+      class="channel-drag-ghost"
+      :style="{ left: dragGhost.x + 'px', top: dragGhost.y + 'px' }"
+    >
+      📈 {{ dragGhost.channel }}
+    </div>
+  </Teleport>
 </template>
 
 <script setup>
@@ -801,31 +809,58 @@ function clearSignals() {
   chartGroups.value = []
 }
 
-// ── Drag-and-drop handlers ────────────────────────────────────────────────────
-function onChannelDragStart(channel, e) {
-  draggingChannel.value = { channel, file: activeFile.value }
-  e.dataTransfer.effectAllowed = 'copy'
-  e.dataTransfer.setData('text/plain', channel)
+// ── Mouse-based drag handlers (replaces unreliable HTML5 drag API in Tauri) ───
+const dragGhost = ref(null)   // { channel, x, y } | null — ghost follows cursor
+let _mouseMoveHandler = null
+let _mouseUpHandler = null
+
+function onChannelMouseDown(channel, e) {
+  if (e.button !== 0) return   // left button only
+  e.preventDefault()           // prevent text selection during drag
+
+  const startX = e.clientX
+  const startY = e.clientY
+  let isDragging = false
+
+  _mouseMoveHandler = (e) => {
+    const dx = e.clientX - startX
+    const dy = e.clientY - startY
+    if (!isDragging && Math.sqrt(dx * dx + dy * dy) > 6) {
+      isDragging = true
+      draggingChannel.value = { channel, file: activeFile.value }
+    }
+    if (!isDragging) return
+
+    dragGhost.value = { channel, x: e.clientX + 14, y: e.clientY - 14 }
+
+    // Identify which chart-group-wrap (if any) is under the cursor
+    // pointer-events:none on ghost ensures we can hit-test what's below it
+    const els = document.elementsFromPoint(e.clientX, e.clientY)
+    const wrap = els.find(el => el.dataset && el.dataset.groupId)
+    dragOverGroupId.value = wrap ? wrap.dataset.groupId : null
+  }
+
+  _mouseUpHandler = async (e) => {
+    document.removeEventListener('mousemove', _mouseMoveHandler)
+    document.removeEventListener('mouseup', _mouseUpHandler)
+    _mouseMoveHandler = null
+    _mouseUpHandler = null
+
+    const drag = draggingChannel.value
+    const targetGroupId = dragOverGroupId.value
+    dragGhost.value = null
+    draggingChannel.value = null
+    dragOverGroupId.value = null
+
+    if (!isDragging || !drag || !targetGroupId) return
+    await onDropOnGroup(targetGroupId, drag)
+  }
+
+  document.addEventListener('mousemove', _mouseMoveHandler)
+  document.addEventListener('mouseup', _mouseUpHandler)
 }
 
-function onChannelDragEnd() {
-  draggingChannel.value = null
-  dragOverGroupId.value = null
-}
-
-function onGroupDragLeave(groupId, e) {
-  // Only clear when the pointer truly leaves the wrapper (not entering a child inside it)
-  if (e.currentTarget.contains(e.relatedTarget)) return
-  if (dragOverGroupId.value === groupId) dragOverGroupId.value = null
-}
-
-async function onDropOnGroup(groupId, e) {
-  e.preventDefault()
-  dragOverGroupId.value = null
-  const drag = draggingChannel.value
-  draggingChannel.value = null
-  if (!drag) return
-
+async function onDropOnGroup(groupId, drag) {
   const { channel, file } = drag
   if (!file) return
   const key = signalKey(file.path, channel)
@@ -1161,10 +1196,29 @@ onMounted(() => {
   border-radius: 5px;
   background: var(--exp-bg2, #060606);
   cursor: grab;
+  user-select: none;
 }
 
-.channel-row:active {
+.channel-row:active,
+.channel-row-dragging {
   cursor: grabbing;
+  opacity: 0.7;
+}
+
+/* Floating ghost label that follows the cursor during a drag */
+.channel-drag-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 9999;
+  background: rgba(0, 30, 10, 0.92);
+  border: 1px solid rgba(0, 220, 80, 0.6);
+  border-radius: 5px;
+  padding: 5px 10px;
+  color: #00ff66;
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
+  transform: translate(0, -50%);
 }
 
 /* Wrapper for each chart group — enables native drag events */
