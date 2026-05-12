@@ -23,15 +23,16 @@
       <button class="schart-close-btn" @click="$emit('close')" title="Close graph panel">✕</button>
     </div>
 
-    <!-- Canvas area -->
-    <div class="schart-canvas-wrap">
+    <!-- Canvas area — mousedown/dblclick always active regardless of cursor mode -->
+    <div class="schart-canvas-wrap"
+         ref="canvasWrapEl"
+         @mousedown.prevent="onCanvasDown"
+         @dblclick.prevent="resetYZoom">
       <canvas ref="canvasEl"></canvas>
       <!-- Draggable time cursor (MF4 viewer mode) -->
       <div v-if="showCursor"
            class="schart-cursor-overlay"
-           ref="cursorOverlayEl"
-           @mousedown.prevent="onCanvasDown"
-           @dblclick.prevent="resetYZoom">
+           ref="cursorOverlayEl">
         <!-- Zoom selection rectangle -->
         <div v-if="zoomRect" class="schart-zoom-rect" :style="zoomRectStyle">
           <span v-if="zoomAxis" class="schart-zoom-axis-label">{{ zoomAxis === 'x' ? '↔ X zoom' : '↕ Y zoom' }}</span>
@@ -143,6 +144,7 @@ let updateTimer = null
 
 // ── Cursor state ──────────────────────────────────────────────────────────────
 const cursorOverlayEl = ref(null)
+const canvasWrapEl = ref(null)     // always available; used for bounds in zoom + cursor
 const cursorPx = ref(null)         // pixel x within canvas, null = not placed yet
 const localCursorTime = ref(null)  // internal cursor time (seconds), source of truth
 // Reactive snapshots of chart internals — updated after every doUpdate() call
@@ -329,7 +331,7 @@ function _refreshCursorPx() {
 
 /** Place cursor at a client-space X coordinate */
 function _placeCursorAt(clientX) {
-  const rect = cursorOverlayEl.value?.getBoundingClientRect()
+  const rect = canvasWrapEl.value?.getBoundingClientRect()
   if (!rect || !chart) return
   const px = clientX - rect.left
   const ca = chartPlotArea.value
@@ -341,14 +343,14 @@ function _placeCursorAt(clientX) {
 
 function onCanvasDown(e) {
   e.preventDefault()
-  if (!cursorOverlayEl.value) return
+  if (!canvasWrapEl.value) return
 
-  const overlayRect = cursorOverlayEl.value.getBoundingClientRect()
-  const clickX = e.clientX - overlayRect.left
-  const isNearCursor = cursorPx.value !== null && Math.abs(clickX - cursorPx.value) <= 8
+  const wrapRect = canvasWrapEl.value.getBoundingClientRect()
+  const clickX = e.clientX - wrapRect.left
+  const isNearCursor = props.showCursor && cursorPx.value !== null && Math.abs(clickX - cursorPx.value) <= 8
 
   if (isNearCursor) {
-    // ── Cursor-drag mode (existing behaviour) ──────────────────────────────
+    // ── Cursor-drag mode (only when cursor visible) ─────────────────────────
     cursorDragging = true
     _placeCursorAt(e.clientX)
     function onMoveCursor(e) { if (cursorDragging) _placeCursorAt(e.clientX) }
@@ -364,12 +366,12 @@ function onCanvasDown(e) {
 
   // ── Zoom-select / click-to-place-cursor mode ───────────────────────────────
   const startX = clickX
-  const startY = e.clientY - overlayRect.top
+  const startY = e.clientY - wrapRect.top
   let zooming = false
 
   function onMoveZoom(e) {
-    const x = e.clientX - overlayRect.left
-    const y = e.clientY - overlayRect.top
+    const x = e.clientX - wrapRect.left
+    const y = e.clientY - wrapRect.top
     const dx = Math.abs(x - startX)
     const dy = Math.abs(y - startY)
     if (!zooming && dx + dy > 5) zooming = true
@@ -384,8 +386,8 @@ function onCanvasDown(e) {
     document.removeEventListener('mouseup', onUpZoom)
 
     if (!zooming) {
-      // Plain click: place cursor
-      _placeCursorAt(e.clientX)
+      // Plain click: place cursor (only if cursor is visible)
+      if (props.showCursor) _placeCursorAt(e.clientX)
       return
     }
 
