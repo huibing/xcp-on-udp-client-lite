@@ -26,7 +26,7 @@
     <!-- Canvas area — mousedown/dblclick always active regardless of cursor mode -->
     <div class="schart-canvas-wrap"
          ref="canvasWrapEl"
-         :style="{ cursor: canvasWrapCursor }"
+         :style="{ height: chartHeight + 'px', cursor: canvasWrapCursor }"
          @mousemove.passive="onWrapMouseMove"
          @mouseleave="nearCursor = false"
          @mousedown.prevent="onCanvasDown"
@@ -51,6 +51,9 @@
         </div>
       </div>
     </div>
+
+    <!-- Height resize handle -->
+    <div class="schart-resize-handle" @mousedown.prevent="onResizeDown" title="Drag to resize chart height"></div>
 
     <!-- Slider controls (live mode only) -->
     <div v-if="showWindowSlider" class="schart-controls">
@@ -175,6 +178,27 @@ const zoomRect = ref(null)       // { x1, y1, x2, y2 } px in overlay
 const zoomAxis = ref(null)       // 'x' | 'y' | null (determined by drag direction)
 const yOverrideMin = ref(null)   // manual Y-axis override; null = auto
 const yOverrideMax = ref(null)
+
+// ── Chart height (user-resizable) ─────────────────────────────────────────────
+const chartHeight = ref(240)
+const MIN_CHART_H = 80
+const MAX_CHART_H = 1200
+
+function onResizeDown(e) {
+  const startY = e.clientY
+  const startH = chartHeight.value
+  document.documentElement.style.cursor = 'ns-resize'
+  function onMove(e) {
+    chartHeight.value = Math.max(MIN_CHART_H, Math.min(MAX_CHART_H, startH + e.clientY - startY))
+  }
+  function onUp() {
+    document.documentElement.style.cursor = ''
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
 
 function getElapsed() {
   if (props.startEpoch == null) return 0
@@ -798,15 +822,28 @@ watch(() => props.cursorTime, v => {
 
 /* ── Canvas area ───────────────────────────────────────────────────────────── */
 .schart-canvas-wrap {
-  height: 240px;
   padding: 8px 8px 4px;
   background: var(--exp-bg);
   position: relative;
+  min-height: 80px;
 }
 
 .schart-canvas-wrap canvas {
   width: 100% !important;
   height: 100% !important;
+}
+
+/* ── Resize handle ───────────────────────────────────────────────────────────── */
+.schart-resize-handle {
+  height: 5px;
+  cursor: ns-resize;
+  background: var(--exp-border2, #001a08);
+  transition: background 0.15s;
+  user-select: none;
+}
+
+.schart-resize-handle:hover {
+  background: var(--exp-fg-dim3, #335522);
 }
 
 /* ── Controls ──────────────────────────────────────────────────────────────── */
