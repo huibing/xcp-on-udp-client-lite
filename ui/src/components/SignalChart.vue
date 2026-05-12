@@ -599,7 +599,14 @@ watch(() => props.showCursor, v => {
     chart.options.plugins.tooltip.enabled = !v
     chart.update('none')
   }
-  if (!v) { cursorPx.value = null; localCursorTime.value = null }
+  if (!v) {
+    cursorPx.value = null
+    localCursorTime.value = null
+  } else if (props.cursorTime !== null && props.cursorTime !== undefined) {
+    // Restore cursor to last known position when re-enabling
+    localCursorTime.value = props.cursorTime
+    _refreshCursorPx()
+  }
 })
 
 // Sync cursor from parent when in multi-chart synchronized mode
