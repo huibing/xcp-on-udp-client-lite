@@ -310,12 +310,30 @@ function applyColors() {
 }
 
 // ── Cursor helpers ────────────────────────────────────────────────────────────
-/** Convert a canvas pixel x to time using current chart x range */
-function _pixelToTime(px) {
+/**
+ * Return fresh chart bounds directly from the Chart.js instance.
+ * Falls back to cached refs if chart is not ready.
+ * Calling this at drag-start prevents stale-cache issues after container resize.
+ */
+function _liveChartArea() {
+  if (chart?.chartArea && chart.scales?.x) {
+    const ca = chart.chartArea
+    const x = chart.scales.x
+    return { ca: { ...ca }, xMin: x.min, xMax: x.max }
+  }
   const ca = chartPlotArea.value
-  const { min, max } = chartXRange.value
+  const { min: xMin, max: xMax } = chartXRange.value
+  return { ca, xMin, xMax }
+}
+
+/** Convert a canvas pixel x to time using current chart x range */
+function _pixelToTime(px, ca, xMin, xMax) {
+  // Accept live bounds as arguments so callers can pass fresh values
+  ca = ca ?? chartPlotArea.value
+  xMin = xMin ?? chartXRange.value.min
+  xMax = xMax ?? chartXRange.value.max
   const pct = Math.max(0, Math.min(1, (px - ca.left) / (ca.right - ca.left)))
-  return min + pct * (max - min)
+  return xMin + pct * (xMax - xMin)
 }
 
 /** Re-derive cursor pixel position from stored localCursorTime after a range change */
@@ -334,16 +352,22 @@ function _placeCursorAt(clientX) {
   const rect = canvasWrapEl.value?.getBoundingClientRect()
   if (!rect || !chart) return
   const px = clientX - rect.left
-  const ca = chartPlotArea.value
+  // Read live bounds to guard against stale cache after container resize
+  const { ca, xMin, xMax } = _liveChartArea()
   const clamped = Math.max(ca.left, Math.min(ca.right, px))
   cursorPx.value = clamped
-  localCursorTime.value = _pixelToTime(clamped)
+  localCursorTime.value = _pixelToTime(clamped, ca, xMin, xMax)
   emit('cursor-move', localCursorTime.value)
 }
 
 function onCanvasDown(e) {
   e.preventDefault()
   if (!canvasWrapEl.value) return
+
+  // Refresh cache from live chart to fix stale-area bug after container resize
+  const { ca: liveCa, xMin: liveXMin, xMax: liveXMax } = _liveChartArea()
+  chartPlotArea.value = liveCa
+  chartXRange.value = { min: liveXMin, max: liveXMax }
 
   const wrapRect = canvasWrapEl.value.getBoundingClientRect()
   const clickX = e.clientX - wrapRect.left
@@ -365,6 +389,8 @@ function onCanvasDown(e) {
   }
 
   // ── Zoom-select / click-to-place-cursor mode ───────────────────────────────
+  // Capture bounds at drag-start so all zoom calculations are consistent
+  const { ca: snapCa, xMin: snapXMin, xMax: snapXMax } = _liveChartArea()
   const startX = clickX
   const startY = e.clientY - wrapRect.top
   let zooming = false
@@ -398,8 +424,8 @@ function onCanvasDown(e) {
     if (!r || !axis) return
 
     if (axis === 'x') {
-      const t1 = _pixelToTime(Math.min(r.x1, r.x2))
-      const t2 = _pixelToTime(Math.max(r.x1, r.x2))
+      const t1 = _pixelToTime(Math.min(r.x1, r.x2), snapCa, snapXMin, snapXMax)
+      const t2 = _pixelToTime(Math.max(r.x1, r.x2), snapCa, snapXMin, snapXMax)
       if (t2 - t1 > 1e-6) emit('zoom-x', { xMin: t1, xMax: t2 })
     } else {
       // Y zoom: resolve pixels → data values via chart scale
