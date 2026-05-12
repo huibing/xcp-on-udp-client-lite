@@ -29,14 +29,14 @@
          @mousedown.prevent="onCanvasDown"
          @dblclick.prevent="resetYZoom">
       <canvas ref="canvasEl"></canvas>
+      <!-- Zoom selection rectangle — always visible during drag regardless of cursor mode -->
+      <div v-if="zoomRect" class="schart-zoom-rect" :style="zoomRectStyle">
+        <span v-if="zoomAxis" class="schart-zoom-axis-label">{{ zoomAxis === 'x' ? '↔ X zoom' : '↕ Y zoom' }}</span>
+      </div>
       <!-- Draggable time cursor (MF4 viewer mode) -->
       <div v-if="showCursor"
            class="schart-cursor-overlay"
            ref="cursorOverlayEl">
-        <!-- Zoom selection rectangle -->
-        <div v-if="zoomRect" class="schart-zoom-rect" :style="zoomRectStyle">
-          <span v-if="zoomAxis" class="schart-zoom-axis-label">{{ zoomAxis === 'x' ? '↔ X zoom' : '↕ Y zoom' }}</span>
-        </div>
         <div class="schart-cursor-line" :style="cursorLineStyle"></div>
         <div v-if="cursorValues.length > 0" class="schart-cursor-tooltip" :style="cursorTooltipStyle">
           <div class="schart-cursor-time">t = {{ localCursorTime !== null ? localCursorTime.toFixed(4) : '—' }} s</div>
