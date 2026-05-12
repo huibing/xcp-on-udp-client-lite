@@ -163,6 +163,7 @@
             :showCursor="true"
             :cursorTime="sharedCursorTime"
             @cursor-move="sharedCursorTime = $event"
+            @color-change="onSignalColorChange"
             @close="removeSignal(signal.key)"
           />
 
@@ -731,6 +732,11 @@ async function addSignal(channelName) {
 function removeSignal(key) {
   historyStore.delete(key)
   loadedSignals.value = loadedSignals.value.filter(signal => signal.key !== key)
+}
+
+function onSignalColorChange({ key, color }) {
+  const sig = loadedSignals.value.find(s => s.key === key)
+  if (sig) sig.color = color
 }
 
 function clearSignals() {

@@ -5,7 +5,15 @@
       <span class="schart-title">📈 Graph</span>
       <div class="schart-legend">
         <span v-for="s in signals" :key="s.key" class="schart-leg-item">
-          <span class="schart-leg-line" :style="{ background: s.color }"></span>
+          <label class="schart-leg-color-lbl" :title="`Click to change color of ${s.name}`">
+            <span class="schart-leg-line" :style="{ background: s.color }"></span>
+            <input
+              type="color"
+              class="schart-leg-color-input"
+              :value="s.color"
+              @input="emit('color-change', { key: s.key, color: $event.target.value })"
+            />
+          </label>
           <span class="schart-leg-name">{{ s.name }}</span>
           <span v-if="showDevice && s.device_name" class="schart-leg-dev">[{{ s.device_name }}]</span>
         </span>
@@ -99,7 +107,7 @@ const props = defineProps({
   cursorTime: { type: Number, default: null },
 })
 
-const emit = defineEmits(['close', 'cursor-move'])
+const emit = defineEmits(['close', 'cursor-move', 'color-change'])
 const canvasEl = ref(null)
 
 const windowIdx = ref((() => {
@@ -567,6 +575,32 @@ watch(() => props.cursorTime, v => {
   height: 2px;
   border-radius: 1px;
   flex-shrink: 0;
+}
+
+.schart-leg-color-lbl {
+  position: relative;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 2px;
+  padding: 4px 2px;
+}
+
+.schart-leg-color-lbl:hover .schart-leg-line {
+  outline: 1px solid rgba(255, 255, 255, 0.45);
+  outline-offset: 2px;
+}
+
+.schart-leg-color-input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  top: 0;
+  left: 0;
+  cursor: pointer;
+  padding: 0;
+  border: none;
 }
 
 .schart-leg-name {
