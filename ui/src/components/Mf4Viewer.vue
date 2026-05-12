@@ -35,10 +35,13 @@
           </div>
           <div v-else-if="loadingList" class="empty-state">Loading MF4 files…</div>
           <div v-else-if="recordFiles.length === 0" class="empty-state">No MF4 files found in the configured recording directory.</div>
+          <div v-else-if="visibleFiles.length === 0" class="empty-state">
+            All files hidden. <button class="link-btn" @click="hiddenFilePaths.clear()">Show all</button>
+          </div>
 
           <div v-else class="file-list">
-            <button
-              v-for="file in recordFiles"
+            <div
+              v-for="file in visibleFiles"
               :key="file.path"
               class="file-row"
               :class="{ active: activeFile?.path === file.path }"
@@ -46,10 +49,13 @@
             >
               <span class="file-main">
                 <span class="file-name">{{ file.name }}</span>
-                <span class="file-size">{{ formatBytes(file.size_bytes) }}</span>
+                <span class="file-row-right">
+                  <span class="file-size">{{ formatBytes(file.size_bytes) }}</span>
+                  <button class="file-remove-btn" @click.stop="hideFile(file.path)" title="Remove from list">✕</button>
+                </span>
               </span>
               <span class="file-path">{{ file.path }}</span>
-            </button>
+            </div>
           </div>
         </template>
 
@@ -257,7 +263,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 
@@ -468,6 +474,14 @@ function startPan(event) {
 
 const loadedSignalKeys = computed(() => new Set(loadedSignals.value.map(signal => signal.key)))
 
+// ── Hidden files (session-local; Refresh resets) ──────────────────────────────
+const hiddenFilePaths = reactive(new Set())
+const visibleFiles = computed(() => recordFiles.value.filter(f => !hiddenFilePaths.has(f.path)))
+
+function hideFile(path) {
+  hiddenFilePaths.add(path)
+}
+
 /** vtabMaps keyed by signal key for SignalChart — { [signalKey]: Array<{key, text}> } */
 const signalVtabMaps = computed(() => {
   const result = {}
@@ -629,6 +643,7 @@ function singlePath(result) {
 
 async function refreshRecordFiles() {
   loadingList.value = true
+  hiddenFilePaths.clear()
   try {
     const response = await invoke('mf4_list_record_files', { directory: mf4Dir.value || 'records' })
     recordDirectory.value = response.directory || ''
@@ -918,11 +933,46 @@ onMounted(() => {
   border-radius: 6px;
   border: 1px solid var(--exp-border2, #002211);
   background: var(--exp-bg2, #060606);
+  cursor: pointer;
 }
 
 .file-row.active {
   border-color: var(--exp-fg-bright, #00ff66);
   background: var(--exp-hover, #003311);
+}
+
+.file-row-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-remove-btn {
+  border: none;
+  background: transparent;
+  color: var(--exp-fg-dim3, #335522);
+  cursor: pointer;
+  padding: 0 3px;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
+.file-remove-btn:hover {
+  color: #ff6666;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--exp-fg, #00cc44);
+  cursor: pointer;
+  padding: 0;
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+.link-btn:hover {
+  color: var(--exp-fg-bright, #00ff66);
 }
 
 .file-main {
