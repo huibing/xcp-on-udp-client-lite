@@ -131,7 +131,17 @@
             <h2>Signal Graph</h2>
             <div class="panel-meta">{{ loadedSignals.length }} loaded signal(s)</div>
           </div>
-          <button v-if="loadedSignals.length > 0" class="secondary sm" @click="clearSignals">Clear All</button>
+          <div class="graph-header-right">
+            <button
+              class="cursor-toggle-btn"
+              :class="{ active: mf4CursorVisible }"
+              @click="mf4CursorVisible = !mf4CursorVisible"
+              title="Toggle time cursor"
+            >
+              {{ mf4CursorVisible ? '🕹 Cursor ON' : '🕹 Cursor OFF' }}
+            </button>
+            <button v-if="loadedSignals.length > 0" class="secondary sm" @click="clearSignals">Clear All</button>
+          </div>
         </div>
 
         <div v-if="loadedSignals.length === 0" class="empty-state chart-empty">
@@ -160,7 +170,7 @@
             :xMin="viewStart"
             :xMax="viewEnd"
             :showWindowSlider="false"
-            :showCursor="true"
+            :showCursor="mf4CursorVisible"
             :cursorTime="sharedCursorTime"
             @cursor-move="sharedCursorTime = $event"
             @color-change="onSignalColorChange"
@@ -293,6 +303,7 @@ const msgErr = ref(false)
 const loadedSignals = ref([])
 const historyStore = new Map()
 const sharedCursorTime = ref(null)
+const mf4CursorVisible = ref(false)
 
 // ── Panel collapse state ──────────────────────────────────────────────────────
 const filesPanelOpen = ref(true)
@@ -1075,6 +1086,31 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 10px;
+}
+
+.graph-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cursor-toggle-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid var(--exp-border2, #002211);
+  background: var(--exp-bg2, #060606);
+  color: var(--exp-fg-dim3, #667744);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.cursor-toggle-btn:hover,
+.cursor-toggle-btn.active {
+  color: #ffcc00;
+  border-color: rgba(255, 204, 0, 0.5);
+  background: rgba(255, 204, 0, 0.05);
 }
 
 .signal-tag {
