@@ -550,8 +550,17 @@ function createChart() {
           min: -1,
           max: 1,
           grid: { color: props.gridColor },
-          ticks: { color: props.tickColor, maxTicksLimit: 6 },
+          ticks: {
+            color: props.tickColor,
+            maxTicksLimit: 6,
+            callback: v => {
+              const n = Number(v)
+              if (Math.abs(n) >= 1e5 || (Math.abs(n) < 1e-3 && n !== 0)) return n.toExponential(1)
+              return parseFloat(n.toPrecision(4)).toString()
+            },
+          },
           border: { color: props.gridColor },
+          afterFit(scale) { scale.width = 58 },  // fixed Y-axis width keeps plot area stable
         },
       },
     },
