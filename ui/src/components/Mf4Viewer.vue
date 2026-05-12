@@ -96,7 +96,10 @@
               v-for="channel in filteredChannels"
               :key="`${activeFile.path}::${channel}`"
               class="channel-row"
+              draggable="true"
               @dblclick="addSignal(channel)"
+              @dragstart="onChannelDragStart(channel, $event)"
+              @dragend="onChannelDragEnd"
             >
               <span class="channel-name">
                 {{ channel }}
@@ -145,7 +148,8 @@
         </div>
 
         <div v-if="loadedSignals.length === 0" class="empty-state chart-empty">
-          Add one or more channels to render their recorded waveform here.
+          Add one or more channels to render their recorded waveform here.<br>
+          <span class="hint-text">Tip: drag a channel from the list and drop it onto an existing chart to overlay signals.</span>
         </div>
         <template v-else>
           <div class="loaded-tags">
@@ -158,9 +162,9 @@
           </div>
 
           <SignalChart
-            v-for="signal in loadedSignals"
-            :key="signal.key"
-            :signals="[signal]"
+            v-for="group in chartGroups"
+            :key="group.id"
+            :signals="group.signals"
             :historyStore="historyStore"
             :running="false"
             :startEpoch="null"
@@ -172,10 +176,14 @@
             :showWindowSlider="false"
             :showCursor="mf4CursorVisible"
             :cursorTime="sharedCursorTime"
+            :class="{ 'chart-drag-over': dragOverGroupId === group.id }"
             @cursor-move="sharedCursorTime = $event"
             @color-change="onSignalColorChange"
             @zoom-x="applyChartZoom"
-            @close="removeSignal(signal.key)"
+            @close="removeGroup(group.id)"
+            @dragover.prevent="dragOverGroupId = group.id"
+            @dragleave="dragOverGroupId = null"
+            @drop.prevent="onDropOnGroup(group.id, $event)"
           />
 
           <!-- Two-cursor time range selector -->
@@ -300,10 +308,16 @@ const openingFile = ref('')
 const loadingSignal = ref('')
 const msg = ref('')
 const msgErr = ref(false)
-const loadedSignals = ref([])
+// ── Chart groups ── each group holds one or more signals rendered in one chart ─
+const chartGroups = ref([])   // [{ id: string, signals: [sigObj, ...] }]
+const loadedSignals = computed(() => chartGroups.value.flatMap(g => g.signals))
 const historyStore = new Map()
 const sharedCursorTime = ref(null)
 const mf4CursorVisible = ref(false)
+
+// ── Drag-and-drop state ───────────────────────────────────────────────────────
+const draggingChannel = ref(null)   // { channel, file } | null
+const dragOverGroupId = ref(null)   // group.id being hovered | null
 
 // ── Panel collapse state ──────────────────────────────────────────────────────
 const filesPanelOpen = ref(true)
@@ -700,10 +714,13 @@ async function browseMf4File() {
   }
 }
 
-async function addSignal(channelName) {
+async function addSignal(channelName, targetGroupId = null) {
   if (!activeFile.value) return
   const key = signalKey(activeFile.value.path, channelName)
-  if (loadedSignalKeys.value.has(key)) return
+  if (loadedSignalKeys.value.has(key)) {
+    setMsg(`'${channelName}' is already loaded`, false)
+    return
+  }
 
   loadingSignal.value = key
   try {
@@ -723,17 +740,24 @@ async function addSignal(channelName) {
 
     historyStore.set(key, { times, values })
     const vtabEntries = activeVtabMaps.value[channelName] || null
-    loadedSignals.value = [
-      ...loadedSignals.value,
-      {
-        key,
-        name: channelName,
-        device_name: activeFile.value.name,
-        color: pickColor(loadedSignals.value.length),
-        path: activeFile.value.path,
-        vtab_map: vtabEntries,
-      },
-    ]
+    const sigObj = {
+      key,
+      name: channelName,
+      device_name: activeFile.value.name,
+      color: pickColor(loadedSignals.value.length),
+      path: activeFile.value.path,
+      vtab_map: vtabEntries,
+    }
+
+    if (targetGroupId !== null) {
+      const group = chartGroups.value.find(g => g.id === targetGroupId)
+      if (group) {
+        group.signals = [...group.signals, sigObj]
+        return
+      }
+    }
+    // No target group → create a new chart
+    chartGroups.value = [...chartGroups.value, { id: crypto.randomUUID(), signals: [sigObj] }]
   } catch (error) {
     setMsg(String(error), true)
   } finally {
@@ -743,7 +767,17 @@ async function addSignal(channelName) {
 
 function removeSignal(key) {
   historyStore.delete(key)
-  loadedSignals.value = loadedSignals.value.filter(signal => signal.key !== key)
+  chartGroups.value = chartGroups.value
+    .map(g => ({ ...g, signals: g.signals.filter(s => s.key !== key) }))
+    .filter(g => g.signals.length > 0)
+}
+
+function removeGroup(groupId) {
+  const group = chartGroups.value.find(g => g.id === groupId)
+  if (group) {
+    for (const sig of group.signals) historyStore.delete(sig.key)
+  }
+  chartGroups.value = chartGroups.value.filter(g => g.id !== groupId)
 }
 
 function onSignalColorChange({ key, color }) {
@@ -760,7 +794,66 @@ function applyChartZoom({ xMin, xMax }) {
 
 function clearSignals() {
   historyStore.clear()
-  loadedSignals.value = []
+  chartGroups.value = []
+}
+
+// ── Drag-and-drop handlers ────────────────────────────────────────────────────
+function onChannelDragStart(channel, e) {
+  draggingChannel.value = { channel, file: activeFile.value }
+  e.dataTransfer.effectAllowed = 'copy'
+  e.dataTransfer.setData('text/plain', channel)
+}
+
+function onChannelDragEnd() {
+  draggingChannel.value = null
+  dragOverGroupId.value = null
+}
+
+async function onDropOnGroup(groupId, e) {
+  e.preventDefault()
+  dragOverGroupId.value = null
+  const drag = draggingChannel.value
+  draggingChannel.value = null
+  if (!drag) return
+
+  const { channel, file } = drag
+  if (!file) return
+  const key = signalKey(file.path, channel)
+  if (loadedSignalKeys.value.has(key)) {
+    setMsg(`'${channel}' is already loaded`, false)
+    return
+  }
+
+  loadingSignal.value = key
+  try {
+    const [rawValues, rawTimes] = await Promise.all([
+      invoke('mf4_get_channel_data', { mf4Path: file.path, channelName: channel }),
+      invoke('mf4_get_channel_time', { mf4Path: file.path, channelName: channel }),
+    ])
+    const values = toFloat64Array(rawValues)
+    const times = toFloat64Array(rawTimes)
+    if (values.length === 0 || times.length === 0) throw new Error(`Channel '${channel}' returned no samples`)
+    if (values.length !== times.length) throw new Error(`Channel '${channel}' data/time length mismatch`)
+
+    historyStore.set(key, { times, values })
+    const vtabEntries = activeVtabMaps.value[channel] || null
+    const sigObj = {
+      key,
+      name: channel,
+      device_name: file.name,
+      color: pickColor(loadedSignals.value.length),
+      path: file.path,
+      vtab_map: vtabEntries,
+    }
+    const group = chartGroups.value.find(g => g.id === groupId)
+    if (group) {
+      group.signals = [...group.signals, sigObj]
+    }
+  } catch (error) {
+    setMsg(String(error), true)
+  } finally {
+    loadingSignal.value = ''
+  }
 }
 
 watch(() => mf4Dir.value, () => {
@@ -769,7 +862,7 @@ watch(() => mf4Dir.value, () => {
 
 watch(loadedSignals, () => {
   recomputeTimeBounds()
-})
+}, { deep: true })
 
 // When cursor is toggled ON for the first time, place it at the midpoint of the view
 watch(mf4CursorVisible, (visible) => {
@@ -1057,6 +1150,18 @@ onMounted(() => {
   border: 1px solid var(--exp-border2, #002211);
   border-radius: 5px;
   background: var(--exp-bg2, #060606);
+  cursor: grab;
+}
+
+.channel-row:active {
+  cursor: grabbing;
+}
+
+/* Highlight when a dragged channel is hovering over a chart */
+.chart-drag-over {
+  outline: 2px dashed rgba(0, 220, 80, 0.6);
+  outline-offset: 2px;
+  background: rgba(0, 220, 80, 0.04);
 }
 
 .channel-name {
@@ -1087,6 +1192,15 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  text-align: center;
+}
+
+.hint-text {
+  font-size: 11px;
+  color: var(--exp-fg-dim3, #556644);
+  font-style: italic;
 }
 
 .loaded-tags {
