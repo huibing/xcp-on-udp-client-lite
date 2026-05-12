@@ -17,10 +17,25 @@
     <!-- Canvas area -->
     <div class="schart-canvas-wrap">
       <canvas ref="canvasEl"></canvas>
+      <!-- Draggable time cursor (MF4 viewer mode) -->
+      <div v-if="showCursor"
+           class="schart-cursor-overlay"
+           ref="cursorOverlayEl"
+           @mousedown.prevent="onCursorDown">
+        <div class="schart-cursor-line" :style="cursorLineStyle"></div>
+        <div v-if="cursorValues.length > 0" class="schart-cursor-tooltip" :style="cursorTooltipStyle">
+          <div class="schart-cursor-time">t = {{ localCursorTime !== null ? localCursorTime.toFixed(4) : '—' }} s</div>
+          <div v-for="v in cursorValues" :key="v.key" class="schart-cursor-val">
+            <span class="schart-cursor-swatch" :style="{ background: v.color }"></span>
+            <span class="schart-cursor-name">{{ v.name }}</span>
+            <span class="schart-cursor-num">{{ v.display }}</span>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <!-- Slider controls -->
-    <div class="schart-controls">
+    <!-- Slider controls (live mode only) -->
+    <div v-if="showWindowSlider" class="schart-controls">
       <span class="schart-win-label">{{ windowLabel }}</span>
       <input
         type="range"
@@ -72,9 +87,19 @@ const props = defineProps({
    * When present, tooltip shows text label alongside raw value for enum signals.
    */
   vtabMaps: { type: Object, default: () => ({}) },
+  /** Override x-axis min (seconds). When both xMin and xMax are non-null, used directly in getXBounds(). */
+  xMin: { type: Number, default: null },
+  /** Override x-axis max (seconds). When both xMin and xMax are non-null, used directly in getXBounds(). */
+  xMax: { type: Number, default: null },
+  /** When false, hide the time-window slider (set false for static MF4 viewer mode). */
+  showWindowSlider: { type: Boolean, default: true },
+  /** Show a draggable time cursor with signal value tooltip. Disables Chart.js hover tooltip. */
+  showCursor: { type: Boolean, default: false },
+  /** External cursor time (seconds) for synchronized multi-chart mode. When provided, cursor syncs from parent. */
+  cursorTime: { type: Number, default: null },
 })
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'cursor-move'])
 const canvasEl = ref(null)
 
 const windowIdx = ref((() => {
@@ -102,6 +127,15 @@ watch(windowIdx, v => localStorage.setItem('schart_window_idx', String(v)))
 let chart = null
 let updateTimer = null
 
+// ── Cursor state ──────────────────────────────────────────────────────────────
+const cursorOverlayEl = ref(null)
+const cursorPx = ref(null)         // pixel x within canvas, null = not placed yet
+const localCursorTime = ref(null)  // internal cursor time (seconds), source of truth
+// Reactive snapshots of chart internals — updated after every doUpdate() call
+const chartXRange = ref({ min: 0, max: 1 })
+const chartPlotArea = ref({ left: 0, right: 1, top: 0, bottom: 1 })
+let cursorDragging = false
+
 function getElapsed() {
   if (props.startEpoch == null) return 0
   return (Date.now() - props.startEpoch) / 1000
@@ -109,13 +143,17 @@ function getElapsed() {
 
 /** Compute x-axis bounds in seconds */
 function getXBounds() {
+  // Explicit range override (MF4 viewer two-cursor mode)
+  if (props.xMin !== null && props.xMax !== null) {
+    return { xMin: props.xMin, xMax: props.xMax }
+  }
   const ws = windowSeconds.value
   if (props.running && props.startEpoch != null) {
     const now = getElapsed()
     const xMax = Math.max(ws, now)
     return { xMin: xMax - ws, xMax }
   }
-  // Static: find latest time across all signals
+  // Static fallback: show last windowSeconds of data
   let maxT = ws
   for (const sig of props.signals) {
     const h = props.historyStore.get(sig.key)
@@ -204,6 +242,10 @@ function doUpdate() {
   }
 
   chart.update('none')
+  // Sync reactive chart area refs so cursor stays accurate after range changes
+  chartXRange.value = { min: chart.scales.x.min, max: chart.scales.x.max }
+  chartPlotArea.value = { ...chart.chartArea }
+  _refreshCursorPx()
 }
 
 /** Resolve a raw numeric value to vtab text for a given signal key */
@@ -242,6 +284,97 @@ function applyColors() {
   chart.update('none')
 }
 
+// ── Cursor helpers ────────────────────────────────────────────────────────────
+/** Convert a canvas pixel x to time using current chart x range */
+function _pixelToTime(px) {
+  const ca = chartPlotArea.value
+  const { min, max } = chartXRange.value
+  const pct = Math.max(0, Math.min(1, (px - ca.left) / (ca.right - ca.left)))
+  return min + pct * (max - min)
+}
+
+/** Re-derive cursor pixel position from stored localCursorTime after a range change */
+function _refreshCursorPx() {
+  if (localCursorTime.value === null) { cursorPx.value = null; return }
+  const ca = chartPlotArea.value
+  const { min, max } = chartXRange.value
+  const span = max - min
+  if (span <= 0) { cursorPx.value = null; return }
+  const pct = (localCursorTime.value - min) / span
+  cursorPx.value = (pct >= 0 && pct <= 1) ? ca.left + pct * (ca.right - ca.left) : null
+}
+
+/** Place cursor at a client-space X coordinate */
+function _placeCursorAt(clientX) {
+  const rect = cursorOverlayEl.value?.getBoundingClientRect()
+  if (!rect || !chart) return
+  const px = clientX - rect.left
+  const ca = chartPlotArea.value
+  const clamped = Math.max(ca.left, Math.min(ca.right, px))
+  cursorPx.value = clamped
+  localCursorTime.value = _pixelToTime(clamped)
+  emit('cursor-move', localCursorTime.value)
+}
+
+function onCursorDown(e) {
+  e.preventDefault()
+  cursorDragging = true
+  _placeCursorAt(e.clientX)
+  function onMove(e) { if (cursorDragging) _placeCursorAt(e.clientX) }
+  function onUp() {
+    cursorDragging = false
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
+/** Binary search: value of signal `key` at the given time (nearest sample) */
+function getValueAtTime(key, time) {
+  const h = props.historyStore.get(key)
+  if (!h || h.times.length === 0) return null
+  if (time < h.times[0] || time > h.times[h.times.length - 1]) return null
+  let lo = 0, hi = h.times.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (h.times[mid] < time) lo = mid + 1
+    else hi = mid
+  }
+  if (lo > 0 && Math.abs(h.times[lo - 1] - time) < Math.abs(h.times[lo] - time)) lo--
+  return h.values[lo]
+}
+
+const cursorLineStyle = computed(() => {
+  if (cursorPx.value === null) return { display: 'none' }
+  const ca = chartPlotArea.value
+  return { left: `${cursorPx.value}px`, top: `${ca.top}px`, height: `${ca.bottom - ca.top}px` }
+})
+
+const cursorTooltipStyle = computed(() => {
+  if (cursorPx.value === null) return { display: 'none' }
+  const w = canvasEl.value?.offsetWidth ?? 400
+  const showLeft = cursorPx.value > w * 0.62
+  return {
+    top: `${chartPlotArea.value.top + 6}px`,
+    left: showLeft ? 'auto' : `${cursorPx.value + 14}px`,
+    right: showLeft ? `${w - cursorPx.value + 14}px` : 'auto',
+  }
+})
+
+const cursorValues = computed(() => {
+  if (localCursorTime.value === null) return []
+  return props.signals.map(sig => {
+    const v = getValueAtTime(sig.key, localCursorTime.value)
+    if (v === null) return null
+    const text = vtabLookup(sig.key, v)
+    const display = text != null
+      ? `${text} (${v.toFixed(0)})`
+      : Number.isFinite(v) ? v.toFixed(4) : '—'
+    return { key: sig.key, name: sig.name, color: sig.color, display }
+  }).filter(Boolean)
+})
+
 function startLoop() {
   stopLoop()
   updateTimer = setInterval(doUpdate, UPDATE_MS)
@@ -266,6 +399,7 @@ function createChart() {
         tooltip: {
           mode: 'index',
           intersect: false,
+          enabled: !props.showCursor,
           backgroundColor: 'rgba(0,0,0,0.85)',
           titleColor: props.tickColor,
           bodyColor: '#cccccc',
@@ -341,6 +475,29 @@ watch(windowSeconds, () => {
 
 watch([() => props.gridColor, () => props.tickColor], () => {
   applyColors()
+})
+
+watch([() => props.xMin, () => props.xMax], () => {
+  doUpdate()
+})
+
+watch(() => props.showCursor, v => {
+  if (chart) {
+    chart.options.plugins.tooltip.enabled = !v
+    chart.update('none')
+  }
+  if (!v) { cursorPx.value = null; localCursorTime.value = null }
+})
+
+// Sync cursor from parent when in multi-chart synchronized mode
+watch(() => props.cursorTime, v => {
+  if (v !== null && v !== undefined) {
+    localCursorTime.value = v
+    _refreshCursorPx()
+  } else {
+    localCursorTime.value = null
+    cursorPx.value = null
+  }
 })
 </script>
 
@@ -477,6 +634,75 @@ watch([() => props.gridColor, () => props.tickColor], () => {
 .schart-win-hint {
   font-size: 11px;
   color: var(--exp-fg-dim3);
+  white-space: nowrap;
+}
+
+/* ── Cursor overlay ──────────────────────────────────────────────────────────── */
+.schart-cursor-overlay {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+  z-index: 10;
+}
+
+.schart-cursor-line {
+  position: absolute;
+  width: 1px;
+  background: rgba(255, 204, 0, 0.85);
+  box-shadow: 0 0 5px rgba(255, 204, 0, 0.35);
+  pointer-events: none;
+  z-index: 11;
+}
+
+.schart-cursor-tooltip {
+  position: absolute;
+  z-index: 12;
+  background: rgba(0, 0, 0, 0.9);
+  border: 1px solid rgba(255, 204, 0, 0.4);
+  border-radius: 5px;
+  padding: 6px 10px;
+  pointer-events: none;
+  min-width: 130px;
+  max-width: 280px;
+}
+
+.schart-cursor-time {
+  font-size: 11px;
+  color: #ffcc00;
+  font-weight: 700;
+  margin-bottom: 5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.schart-cursor-val {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #cccccc;
+  margin-top: 2px;
+}
+
+.schart-cursor-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.schart-cursor-name {
+  color: var(--exp-fg-dim3);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.schart-cursor-num {
+  font-variant-numeric: tabular-nums;
+  color: #ffffff;
   white-space: nowrap;
 }
 </style>

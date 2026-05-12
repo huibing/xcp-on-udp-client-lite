@@ -15,85 +15,107 @@
 
     <div v-if="msg" class="msg" :class="msgErr ? 'err' : ''">{{ msg }}</div>
 
-    <div class="layout">
-      <section class="panel file-panel">
-        <div class="panel-header">
-          <div>
-            <h2>Recorded Files</h2>
-            <div class="panel-meta">{{ recordDirectory || 'records/' }}</div>
+    <div class="layout" :style="layoutGridStyle">
+      <!-- ── File list panel ─────────────────────────────────────────────── -->
+      <section class="panel file-panel" :class="{ 'panel-collapsed': !filesPanelOpen }">
+        <template v-if="filesPanelOpen">
+          <div class="panel-header">
+            <div>
+              <h2>Recorded Files</h2>
+              <div class="panel-meta">{{ recordDirectory || 'records/' }}</div>
+            </div>
+            <div class="panel-header-actions">
+              <span class="badge">{{ recordFiles.length }}</span>
+              <button class="icon-btn" @click="filesPanelOpen = false" title="Collapse panel">◀</button>
+            </div>
           </div>
-          <span class="badge">{{ recordFiles.length }}</span>
-        </div>
 
-        <div v-if="!directoryExists" class="empty-state">
-          Directory not found yet. Set a recording folder in Settings or open an MF4 file manually.
-        </div>
-        <div v-else-if="loadingList" class="empty-state">Loading MF4 files…</div>
-        <div v-else-if="recordFiles.length === 0" class="empty-state">No MF4 files found in the configured recording directory.</div>
+          <div v-if="!directoryExists" class="empty-state">
+            Directory not found yet. Set a recording folder in Settings or open an MF4 file manually.
+          </div>
+          <div v-else-if="loadingList" class="empty-state">Loading MF4 files…</div>
+          <div v-else-if="recordFiles.length === 0" class="empty-state">No MF4 files found in the configured recording directory.</div>
 
-        <div v-else class="file-list">
-          <button
-            v-for="file in recordFiles"
-            :key="file.path"
-            class="file-row"
-            :class="{ active: activeFile?.path === file.path }"
-            @click="openMf4File(file.path)"
-          >
-            <span class="file-main">
-              <span class="file-name">{{ file.name }}</span>
-              <span class="file-size">{{ formatBytes(file.size_bytes) }}</span>
-            </span>
-            <span class="file-path">{{ file.path }}</span>
-          </button>
+          <div v-else class="file-list">
+            <button
+              v-for="file in recordFiles"
+              :key="file.path"
+              class="file-row"
+              :class="{ active: activeFile?.path === file.path }"
+              @click="openMf4File(file.path)"
+            >
+              <span class="file-main">
+                <span class="file-name">{{ file.name }}</span>
+                <span class="file-size">{{ formatBytes(file.size_bytes) }}</span>
+              </span>
+              <span class="file-path">{{ file.path }}</span>
+            </button>
+          </div>
+        </template>
+
+        <div v-else class="panel-strip" @click="filesPanelOpen = true" title="Expand Files panel">
+          <span class="panel-strip-icon">▶</span>
+          <span class="panel-strip-label">Recorded Files</span>
         </div>
       </section>
 
-      <section class="panel channel-panel">
-        <div class="panel-header">
-          <div>
-            <h2>Channels</h2>
-            <div class="panel-meta">
-              {{ activeFile ? `${activeFile.name} · ${activeChannels.length} channel(s)` : 'Open an MF4 file to browse channels' }}
+      <!-- ── Channel list panel ──────────────────────────────────────────── -->
+      <section class="panel channel-panel" :class="{ 'panel-collapsed': !channelsPanelOpen }">
+        <template v-if="channelsPanelOpen">
+          <div class="panel-header">
+            <div>
+              <h2>Channels</h2>
+              <div class="panel-meta">
+                {{ activeFile ? `${activeFile.name} · ${activeChannels.length} channel(s)` : 'Open an MF4 file to browse channels' }}
+              </div>
+            </div>
+            <div class="panel-header-actions">
+              <span v-if="openingFile" class="badge loading">Loading…</span>
+              <button class="icon-btn" @click="channelsPanelOpen = false" title="Collapse panel">◀</button>
             </div>
           </div>
-          <span v-if="openingFile" class="badge loading">Loading…</span>
-        </div>
 
-        <input
-          v-model.trim="channelSearch"
-          class="inp channel-search"
-          :disabled="!activeFile"
-          placeholder="Search channel name…"
-        />
+          <input
+            v-model.trim="channelSearch"
+            class="inp channel-search"
+            :disabled="!activeFile"
+            placeholder="Search channel name…"
+          />
 
-        <div v-if="!activeFile" class="empty-state">Select a file from the left list or open an MF4 file manually.</div>
-        <div v-else-if="filteredChannels.length === 0" class="empty-state">No matching channels.</div>
+          <div v-if="!activeFile" class="empty-state">Select a file from the left list or open an MF4 file manually.</div>
+          <div v-else-if="filteredChannels.length === 0" class="empty-state">No matching channels.</div>
 
-        <div v-else class="channel-list">
-          <div
-            v-for="channel in filteredChannels"
-            :key="`${activeFile.path}::${channel}`"
-            class="channel-row"
-            @dblclick="addSignal(channel)"
-          >
-            <span class="channel-name">
-              {{ channel }}
-              <span v-if="activeVtabMaps[channel]" class="enum-badge" title="Enum channel (Value-to-Text)">ENUM</span>
-            </span>
-            <button
-              class="sm"
-              :disabled="loadingSignal === signalKey(activeFile.path, channel) || loadedSignalKeys.has(signalKey(activeFile.path, channel))"
-              @click="addSignal(channel)"
+          <div v-else class="channel-list">
+            <div
+              v-for="channel in filteredChannels"
+              :key="`${activeFile.path}::${channel}`"
+              class="channel-row"
+              @dblclick="addSignal(channel)"
             >
-              {{
-                loadedSignalKeys.has(signalKey(activeFile.path, channel))
-                  ? 'Loaded'
-                  : loadingSignal === signalKey(activeFile.path, channel)
-                    ? 'Loading…'
-                    : 'Add'
-              }}
-            </button>
+              <span class="channel-name">
+                {{ channel }}
+                <span v-if="activeVtabMaps[channel]" class="enum-badge" title="Enum channel (Value-to-Text)">ENUM</span>
+              </span>
+              <button
+                class="sm"
+                :disabled="loadingSignal === signalKey(activeFile.path, channel) || loadedSignalKeys.has(signalKey(activeFile.path, channel))"
+                @click="addSignal(channel)"
+              >
+                {{
+                  loadedSignalKeys.has(signalKey(activeFile.path, channel))
+                    ? 'Loaded'
+                    : loadingSignal === signalKey(activeFile.path, channel)
+                      ? 'Loading…'
+                      : 'Add'
+                }}
+              </button>
+            </div>
           </div>
+        </template>
+
+        <div v-else class="panel-strip" @click="channelsPanelOpen = true" title="Expand Channels panel">
+          <span class="panel-strip-icon">▶</span>
+          <span class="panel-strip-label">Channels</span>
         </div>
       </section>
 
@@ -120,15 +142,89 @@
           </div>
 
           <SignalChart
-            :signals="loadedSignals"
+            v-for="signal in loadedSignals"
+            :key="signal.key"
+            :signals="[signal]"
             :historyStore="historyStore"
             :running="false"
             :startEpoch="null"
             :gridColor="chartGridColor"
             :tickColor="chartTickColor"
             :vtabMaps="signalVtabMaps"
-            @close="clearSignals"
+            :xMin="viewStart"
+            :xMax="viewEnd"
+            :showWindowSlider="false"
+            :showCursor="true"
+            :cursorTime="sharedCursorTime"
+            @cursor-move="sharedCursorTime = $event"
+            @close="removeSignal(signal.key)"
           />
+
+          <!-- Two-cursor time range selector -->
+          <div class="trange-panel">
+            <div class="trange-header">
+              <span class="trange-title">⏱ Time Range</span>
+              <div class="trange-inputs">
+                <label class="trange-input-group">
+                  <span>Start</span>
+                  <input
+                    type="number"
+                    class="trange-input"
+                    v-model.number="viewStartInput"
+                    :min="dataTimeMin"
+                    :max="viewEnd - 0.001"
+                    step="0.001"
+                    @change="applyStartInput"
+                    @keydown.enter="applyStartInput"
+                  />
+                  <span>s</span>
+                </label>
+                <label class="trange-input-group">
+                  <span>End</span>
+                  <input
+                    type="number"
+                    class="trange-input"
+                    v-model.number="viewEndInput"
+                    :min="viewStart + 0.001"
+                    :max="dataTimeMax"
+                    step="0.001"
+                    @change="applyEndInput"
+                    @keydown.enter="applyEndInput"
+                  />
+                  <span>s</span>
+                </label>
+              </div>
+              <button class="secondary sm" @click="resetView" :disabled="isFullView">Reset</button>
+            </div>
+
+            <div class="trange-track-wrap">
+              <div class="trange-track" ref="tRangeTrackEl">
+                <div
+                  class="trange-selection"
+                  :style="[selectionStyle, selectionPanStyle]"
+                  :title="isPannable ? 'Drag to pan the time window' : ''"
+                  @mousedown.prevent.stop="startPan($event)"
+                ></div>
+                <div
+                  class="trange-handle"
+                  :style="startHandleStyle"
+                  @mousedown.prevent="startDrag('start', $event)"
+                  title="Drag to set start time"
+                ><span class="trange-handle-grip">⋮</span></div>
+                <div
+                  class="trange-handle"
+                  :style="endHandleStyle"
+                  @mousedown.prevent="startDrag('end', $event)"
+                  title="Drag to set end time"
+                ><span class="trange-handle-grip">⋮</span></div>
+              </div>
+              <div class="trange-axis">
+                <span>{{ dataTimeMin.toFixed(2) }}s</span>
+                <span>{{ dataTimeMid.toFixed(2) }}s</span>
+                <span>{{ dataTimeMax.toFixed(2) }}s</span>
+              </div>
+            </div>
+          </div>
 
           <div class="stats-card">
             <table class="stats-table">
@@ -188,6 +284,187 @@ const msg = ref('')
 const msgErr = ref(false)
 const loadedSignals = ref([])
 const historyStore = new Map()
+const sharedCursorTime = ref(null)
+
+// ── Panel collapse state ──────────────────────────────────────────────────────
+const filesPanelOpen = ref(true)
+const channelsPanelOpen = ref(true)
+
+const layoutGridStyle = computed(() => {
+  const col1 = filesPanelOpen.value ? 'minmax(240px, 280px)' : '36px'
+  const col2 = channelsPanelOpen.value ? 'minmax(260px, 340px)' : '36px'
+  return { gridTemplateColumns: `${col1} ${col2} minmax(420px, 1fr)` }
+})
+
+// ── Time range selector state ─────────────────────────────────────────────────
+const dataTimeMin = ref(0)
+const dataTimeMax = ref(1)
+const viewStart = ref(0)
+const viewEnd = ref(1)
+const viewStartInput = ref(0)
+const viewEndInput = ref(1)
+const tRangeTrackEl = ref(null)
+const isDraggingPan = ref(false)
+
+const dataTimeMid = computed(() => (dataTimeMin.value + dataTimeMax.value) / 2)
+
+const isFullView = computed(() =>
+  Math.abs(viewStart.value - dataTimeMin.value) < 0.001 &&
+  Math.abs(viewEnd.value - dataTimeMax.value) < 0.001
+)
+
+/** True when the view is narrower than the full data range — panning is meaningful */
+const isPannable = computed(() => {
+  const dataSpan = dataTimeMax.value - dataTimeMin.value
+  if (dataSpan < 1e-10) return false
+  const viewSpan = viewEnd.value - viewStart.value
+  return viewSpan < dataSpan - 1e-10
+})
+
+const selectionPanStyle = computed(() => {
+  if (!isPannable.value) return {}
+  return { cursor: isDraggingPan.value ? 'grabbing' : 'grab' }
+})
+
+function timeToPct(t) {
+  const span = dataTimeMax.value - dataTimeMin.value
+  if (span < 1e-10) return 0
+  return Math.max(0, Math.min(1, (t - dataTimeMin.value) / span))
+}
+
+function pctToTime(pct) {
+  return dataTimeMin.value + pct * (dataTimeMax.value - dataTimeMin.value)
+}
+
+const startHandleStyle = computed(() => ({ left: `${timeToPct(viewStart.value) * 100}%` }))
+const endHandleStyle = computed(() => ({ left: `${timeToPct(viewEnd.value) * 100}%` }))
+const selectionStyle = computed(() => {
+  const s = timeToPct(viewStart.value)
+  const e = timeToPct(viewEnd.value)
+  return { left: `${s * 100}%`, width: `${(e - s) * 100}%` }
+})
+
+function recomputeTimeBounds() {
+  let min = Infinity
+  let max = -Infinity
+  for (const sig of loadedSignals.value) {
+    const h = historyStore.get(sig.key)
+    if (h && h.times.length > 0) {
+      if (h.times[0] < min) min = h.times[0]
+      const last = h.times[h.times.length - 1]
+      if (last > max) max = last
+    }
+  }
+  const newMin = Number.isFinite(min) ? min : 0
+  const newMax = Number.isFinite(max) ? max : 1
+  dataTimeMin.value = newMin
+  dataTimeMax.value = newMax
+  // Expand view to include any new data beyond current range
+  if (viewStart.value > newMin) {
+    viewStart.value = newMin
+    viewStartInput.value = Number(newMin.toFixed(3))
+  }
+  if (viewEnd.value < newMax) {
+    viewEnd.value = newMax
+    viewEndInput.value = Number(newMax.toFixed(3))
+  }
+}
+
+function resetView() {
+  viewStart.value = dataTimeMin.value
+  viewEnd.value = dataTimeMax.value
+  viewStartInput.value = Number(dataTimeMin.value.toFixed(3))
+  viewEndInput.value = Number(dataTimeMax.value.toFixed(3))
+}
+
+function applyStartInput() {
+  const v = Math.max(dataTimeMin.value, Math.min(viewEnd.value - 0.001, Number(viewStartInput.value)))
+  viewStart.value = v
+  viewStartInput.value = Number(v.toFixed(3))
+}
+
+function applyEndInput() {
+  const v = Math.min(dataTimeMax.value, Math.max(viewStart.value + 0.001, Number(viewEndInput.value)))
+  viewEnd.value = v
+  viewEndInput.value = Number(v.toFixed(3))
+}
+
+function startDrag(side, event) {
+  event.preventDefault()
+  const track = tRangeTrackEl.value
+  if (!track) return
+
+  function onMove(e) {
+    const rect = track.getBoundingClientRect()
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    const t = pctToTime(pct)
+    if (side === 'start') {
+      viewStart.value = Math.max(dataTimeMin.value, Math.min(viewEnd.value - 0.001, t))
+      viewStartInput.value = Number(viewStart.value.toFixed(3))
+    } else {
+      viewEnd.value = Math.min(dataTimeMax.value, Math.max(viewStart.value + 0.001, t))
+      viewEndInput.value = Number(viewEnd.value.toFixed(3))
+    }
+  }
+
+  function onUp() {
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
+function startPan(event) {
+  if (!isPannable.value) return
+  event.preventDefault()
+
+  const track = tRangeTrackEl.value
+  if (!track) return
+
+  isDraggingPan.value = true
+  document.body.style.cursor = 'grabbing'
+
+  const startX = event.clientX
+  const startViewStart = viewStart.value
+  const startViewEnd = viewEnd.value
+  const dataSpan = dataTimeMax.value - dataTimeMin.value
+  const viewSpan = startViewEnd - startViewStart
+
+  function onMove(e) {
+    const rect = track.getBoundingClientRect()
+    const dt = (e.clientX - startX) / rect.width * dataSpan
+
+    let newStart = startViewStart + dt
+    let newEnd = startViewEnd + dt
+
+    // Clamp to data bounds, preserving span width
+    if (newStart < dataTimeMin.value) {
+      newStart = dataTimeMin.value
+      newEnd = newStart + viewSpan
+    }
+    if (newEnd > dataTimeMax.value) {
+      newEnd = dataTimeMax.value
+      newStart = newEnd - viewSpan
+    }
+
+    viewStart.value = newStart
+    viewEnd.value = newEnd
+    viewStartInput.value = Number(newStart.toFixed(3))
+    viewEndInput.value = Number(newEnd.toFixed(3))
+  }
+
+  function onUp() {
+    isDraggingPan.value = false
+    document.body.style.cursor = ''
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
 
 const loadedSignalKeys = computed(() => new Set(loadedSignals.value.map(signal => signal.key)))
 
@@ -450,6 +727,10 @@ watch(() => mf4Dir.value, () => {
   refreshRecordFiles()
 })
 
+watch(loadedSignals, () => {
+  recomputeTimeBounds()
+})
+
 onMounted(() => {
   refreshRecordFiles()
 })
@@ -489,7 +770,6 @@ onMounted(() => {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(240px, 280px) minmax(260px, 340px) minmax(420px, 1fr);
   gap: 14px;
   align-items: start;
 }
@@ -504,6 +784,80 @@ onMounted(() => {
 .panel {
   padding: 14px;
   min-height: 620px;
+}
+
+/* Collapsed sidebar strip */
+.panel-collapsed {
+  padding: 0;
+  min-height: 200px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.panel-strip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  height: 100%;
+  min-height: 200px;
+  padding: 14px 0;
+  transition: background 0.15s;
+}
+
+.panel-strip:hover {
+  background: var(--exp-hover, #003311);
+}
+
+.panel-strip-label {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  transform: rotate(180deg);
+  color: var(--exp-fg, #00cc44);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 1px;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.panel-strip:hover .panel-strip-label {
+  color: var(--exp-fg-bright, #00ff66);
+}
+
+.panel-strip-icon {
+  font-size: 0.75rem;
+  color: var(--exp-fg-dim, #556644);
+}
+
+.panel-strip:hover .panel-strip-icon {
+  color: var(--exp-fg-bright, #00ff66);
+}
+
+/* Header actions row (badge + collapse button) */
+.panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.icon-btn {
+  background: transparent;
+  border: 1px solid var(--exp-border, #003311);
+  color: var(--exp-fg-dim, #556644);
+  border-radius: 3px;
+  padding: 2px 7px;
+  cursor: pointer;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.icon-btn:hover {
+  color: var(--exp-fg-bright, #00ff66);
+  border-color: var(--exp-fg, #00cc44);
+  background: var(--exp-hover, #003311);
 }
 
 .panel-header {
@@ -763,6 +1117,136 @@ button:disabled {
 button.secondary,
 button.sm {
   font-size: 0.78rem;
+}
+
+/* ── Time range selector ────────────────────────────────────────────────────── */
+.trange-panel {
+  margin-top: 10px;
+  border: 1px solid var(--exp-border, #003311);
+  border-radius: 6px;
+  background: var(--exp-bg2, #060606);
+  padding: 10px 12px 12px;
+}
+
+.trange-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.trange-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--exp-fg-bright, #00ff66);
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.trange-inputs {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.trange-input-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--exp-fg-dim, #556644);
+}
+
+.trange-input {
+  width: 74px;
+  background: var(--exp-bg, #000);
+  border: 1px solid var(--exp-border, #003311);
+  color: var(--exp-fg-bright, #00ff66);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-family: 'Consolas', 'Courier New', monospace;
+  text-align: right;
+  outline: none;
+  -moz-appearance: textfield;
+}
+.trange-input::-webkit-inner-spin-button,
+.trange-input::-webkit-outer-spin-button { opacity: 0.3; }
+.trange-input:focus {
+  border-color: var(--exp-fg-bright, #00ff66);
+}
+
+.trange-track-wrap {
+  position: relative;
+  padding-bottom: 20px;
+}
+
+.trange-track {
+  position: relative;
+  height: 22px;
+  background: var(--exp-bg, #000);
+  border: 1px solid var(--exp-border, #003311);
+  border-radius: 4px;
+  overflow: visible;
+}
+
+.trange-selection {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: rgba(0, 220, 80, 0.12);
+  border-left: 2px solid var(--exp-fg, #00cc44);
+  border-right: 2px solid var(--exp-fg, #00cc44);
+}
+
+.trange-handle {
+  position: absolute;
+  top: -5px;
+  width: 14px;
+  height: calc(100% + 10px);
+  margin-left: -7px;
+  background: var(--exp-fg, #00cc44);
+  border-radius: 3px;
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  transition: background 0.12s, box-shadow 0.12s;
+  box-shadow: 0 0 4px rgba(0, 204, 68, 0.4);
+}
+.trange-handle:hover {
+  background: var(--exp-fg-bright, #00ff66);
+  box-shadow: 0 0 8px rgba(0, 255, 102, 0.5);
+}
+.trange-handle:active {
+  cursor: grabbing;
+  background: var(--exp-fg-bright, #00ff66);
+}
+
+.trange-handle-grip {
+  font-size: 13px;
+  color: var(--exp-bg, #000);
+  user-select: none;
+  line-height: 1;
+  font-weight: 900;
+  letter-spacing: -1px;
+}
+
+.trange-axis {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--exp-fg-dim3, #335522);
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
 }
 
 @media (max-width: 1400px) {
