@@ -26,6 +26,9 @@
     <!-- Canvas area — mousedown/dblclick always active regardless of cursor mode -->
     <div class="schart-canvas-wrap"
          ref="canvasWrapEl"
+         :style="{ cursor: canvasWrapCursor }"
+         @mousemove.passive="onWrapMouseMove"
+         @mouseleave="nearCursor = false"
          @mousedown.prevent="onCanvasDown"
          @dblclick.prevent="resetYZoom">
       <canvas ref="canvasEl"></canvas>
@@ -150,7 +153,22 @@ const localCursorTime = ref(null)  // internal cursor time (seconds), source of 
 // Reactive snapshots of chart internals — updated after every doUpdate() call
 const chartXRange = ref({ min: 0, max: 1 })
 const chartPlotArea = ref({ left: 0, right: 1, top: 0, bottom: 1 })
-let cursorDragging = false
+const nearCursor = ref(false)      // mouse is within grab distance of the time cursor
+const cursorDragging = ref(false)  // time cursor drag in progress
+
+const canvasWrapCursor = computed(() => {
+  if (props.showCursor && nearCursor.value) return cursorDragging.value ? 'grabbing' : 'grab'
+  return 'crosshair'
+})
+
+function onWrapMouseMove(e) {
+  if (!props.showCursor || cursorPx.value === null || !canvasWrapEl.value) {
+    nearCursor.value = false
+    return
+  }
+  const rect = canvasWrapEl.value.getBoundingClientRect()
+  nearCursor.value = Math.abs(e.clientX - rect.left - cursorPx.value) <= 8
+}
 
 // ── Zoom state ────────────────────────────────────────────────────────────────
 const zoomRect = ref(null)       // { x1, y1, x2, y2 } px in overlay
@@ -375,11 +393,13 @@ function onCanvasDown(e) {
 
   if (isNearCursor) {
     // ── Cursor-drag mode (only when cursor visible) ─────────────────────────
-    cursorDragging = true
+    cursorDragging.value = true
+    document.documentElement.style.cursor = 'grabbing'
     _placeCursorAt(e.clientX)
-    function onMoveCursor(e) { if (cursorDragging) _placeCursorAt(e.clientX) }
+    function onMoveCursor(e) { if (cursorDragging.value) _placeCursorAt(e.clientX) }
     function onUpCursor() {
-      cursorDragging = false
+      cursorDragging.value = false
+      document.documentElement.style.cursor = ''
       document.removeEventListener('mousemove', onMoveCursor)
       document.removeEventListener('mouseup', onUpCursor)
     }
@@ -824,8 +844,8 @@ watch(() => props.cursorTime, v => {
 .schart-cursor-overlay {
   position: absolute;
   inset: 0;
-  cursor: crosshair;
   z-index: 10;
+  pointer-events: none;  /* canvas-wrap handles all pointer events */
 }
 
 .schart-cursor-line {
