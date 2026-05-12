@@ -24,7 +24,7 @@ use mdf4_rs::{DataType as MdfDataType, DecodedValue, FlushPolicy, MdfWriter};
 use mf4_parse::writer::builder::Mf4Metadata;
 #[cfg(feature = "mf4-native")]
 use mf4_parse::writer::stream_writer::{
-    ChannelGroupDefBuilder, Mf4StreamWriter, StreamingDataGroup,
+    ChannelDef, ChannelGroupDefBuilder, Mf4StreamWriter, StreamingDataGroup,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -1866,7 +1866,23 @@ impl DaqManager {
                         for entry in entries {
                             if seen.insert(&entry.name) {
                                 let unit = entry.unit.as_deref().unwrap_or("");
-                                cg_builder = cg_builder.add_f64_channel(&entry.name, unit);
+                                if let CompuMethod::CompuVtab { entries: vtab_entries, .. } =
+                                    &entry.compu_method
+                                {
+                                    // Enum channel: FLOAT64 raw data + Value2Text CC block
+                                    let (keys, texts): (Vec<f64>, Vec<String>) = vtab_entries
+                                        .iter()
+                                        .map(|e| (e.raw_value as f64, e.text_value.clone()))
+                                        .unzip();
+                                    let ch = ChannelDef::new(&entry.name)
+                                        .data_type(4)
+                                        .bit_count(64)
+                                        .unit(unit)
+                                        .vtab(keys, texts, String::new());
+                                    cg_builder = cg_builder.channel(ch);
+                                } else {
+                                    cg_builder = cg_builder.add_f64_channel(&entry.name, unit);
+                                }
                                 channel_names.push(entry.name.clone());
                             }
                         }
@@ -2861,5 +2877,106 @@ mod tests {
         assert_eq!(config.resolve_absolute_odt(5), Some((2, 2)));
         // Absolute ODT 6 → out of range
         assert_eq!(config.resolve_absolute_odt(6), None);
+    }
+
+    /// Verify that enum measurements produce MF4 channels with Value2Text CC blocks.
+    ///
+    /// Simulates the channel-building logic from `start_recording()` using a mix of
+    /// numeric and enum `OdtEntryConfig` entries, writes a small MF4 file, then reads
+    /// it back and checks CC types.
+    #[cfg(feature = "mf4-native")]
+    #[test]
+    fn test_mf4_enum_channel_has_value2text_cc() {
+        use crate::CompuVtabEntry;
+        use mf4_parse::{
+            Mf4Wrapper,
+            components::cc::conversion::CcType,
+        };
+        use mf4_parse::writer::builder::Mf4Metadata;
+        use mf4_parse::writer::stream_writer::{
+            ChannelDef, ChannelGroupDefBuilder, Mf4StreamWriter, StreamingDataGroup,
+        };
+        use std::path::PathBuf;
+
+        let path = PathBuf::from("test_enum_channel_mf4.mf4");
+        let _ = std::fs::remove_file(&path);
+
+        // Build the same channel group that start_recording() would create:
+        // - "speed"  : numeric (Identical), stored as f64
+        // - "status" : enum (CompuVtab), stored as f64 + Value2Text CC block
+        let vtab_entries = vec![
+            CompuVtabEntry { raw_value: 0, text_value: "OFF".to_string() },
+            CompuVtabEntry { raw_value: 1, text_value: "ACTIVE".to_string() },
+            CompuVtabEntry { raw_value: 2, text_value: "ERROR".to_string() },
+        ];
+        let (keys, texts): (Vec<f64>, Vec<String>) = vtab_entries
+            .iter()
+            .map(|e| (e.raw_value as f64, e.text_value.clone()))
+            .unzip();
+
+        let cg = ChannelGroupDefBuilder::new()
+            .name("test_group")
+            .with_time_channel("time_s")
+            .add_f64_channel("speed", "km/h")
+            .channel(
+                ChannelDef::new("status")
+                    .data_type(4)
+                    .bit_count(64)
+                    .vtab(keys, texts, String::new()),
+            )
+            .build()
+            .unwrap();
+
+        let mut writer =
+            Mf4StreamWriter::new(path.clone(), Mf4Metadata::default()).unwrap();
+        writer.add_data_group(StreamingDataGroup::new(cg).unwrap()).unwrap();
+        writer.finalize_structure().unwrap();
+
+        // Write two sample records
+        for i in 0..2u8 {
+            writer.start_record(0, 0).unwrap();
+            writer.set_channel_value("time_s", i as f64 * 0.01).unwrap();
+            writer.set_channel_value("speed", 50.0 + i as f64).unwrap();
+            writer.set_channel_value("status", i as f64).unwrap();
+            writer.flush_record().unwrap();
+        }
+        writer.finalize().unwrap();
+
+        // Read back and verify CC types
+        let mf4 = Mf4Wrapper::new::<fn(f64)>(path.clone(), None).unwrap();
+        let names = mf4.get_channel_names();
+        assert!(names.contains(&"speed".to_string()), "speed channel missing");
+        assert!(names.contains(&"status".to_string()), "status channel missing");
+
+        // "speed" must have no conversion (OneToOne)
+        let speed_link = mf4.get_channel_link("speed").expect("speed link");
+        assert!(
+            matches!(speed_link.0.get_conversion().get_cc_type(), CcType::OneToOne),
+            "speed should have OneToOne CC, got {:?}",
+            speed_link.0.get_conversion().get_cc_type()
+        );
+
+        // "status" must have Value2Text CC with keys 0,1,2 → OFF,ACTIVE,ERROR
+        let status_link = mf4.get_channel_link("status").expect("status link");
+        let cc_type = status_link.0.get_conversion().get_cc_type();
+        if let CcType::Value2Text((got_keys, got_texts)) = cc_type {
+            assert_eq!(got_keys.len(), 3, "expected 3 vtab keys");
+            assert!((got_keys[0] - 0.0).abs() < f64::EPSILON);
+            assert!((got_keys[1] - 1.0).abs() < f64::EPSILON);
+            assert!((got_keys[2] - 2.0).abs() < f64::EPSILON);
+            use mf4_parse::components::cc::conversion::TextOrScale;
+            let expected = ["OFF", "ACTIVE", "ERROR"];
+            for (i, exp) in expected.iter().enumerate() {
+                if let TextOrScale::Text(t) = &got_texts[i] {
+                    assert_eq!(t.as_str(), *exp, "text[{}] mismatch", i);
+                } else {
+                    panic!("expected TextOrScale::Text at index {}", i);
+                }
+            }
+        } else {
+            panic!("expected CcType::Value2Text for status, got {:?}", cc_type);
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 }

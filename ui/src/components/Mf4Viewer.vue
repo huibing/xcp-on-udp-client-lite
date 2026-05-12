@@ -76,7 +76,10 @@
             class="channel-row"
             @dblclick="addSignal(channel)"
           >
-            <span class="channel-name">{{ channel }}</span>
+            <span class="channel-name">
+              {{ channel }}
+              <span v-if="activeVtabMaps[channel]" class="enum-badge" title="Enum channel (Value-to-Text)">ENUM</span>
+            </span>
             <button
               class="sm"
               :disabled="loadingSignal === signalKey(activeFile.path, channel) || loadedSignalKeys.has(signalKey(activeFile.path, channel))"
@@ -123,6 +126,7 @@
             :startEpoch="null"
             :gridColor="chartGridColor"
             :tickColor="chartTickColor"
+            :vtabMaps="signalVtabMaps"
             @close="clearSignals"
           />
 
@@ -175,6 +179,7 @@ const recordDirectory = ref('')
 const directoryExists = ref(true)
 const activeFile = ref(null)
 const activeChannels = ref([])
+const activeVtabMaps = ref({})   // { channelName: Array<{key, text}> }
 const channelSearch = ref('')
 const loadingList = ref(false)
 const openingFile = ref('')
@@ -185,6 +190,17 @@ const loadedSignals = ref([])
 const historyStore = new Map()
 
 const loadedSignalKeys = computed(() => new Set(loadedSignals.value.map(signal => signal.key)))
+
+/** vtabMaps keyed by signal key for SignalChart — { [signalKey]: Array<{key, text}> } */
+const signalVtabMaps = computed(() => {
+  const result = {}
+  for (const sig of loadedSignals.value) {
+    if (sig.vtab_map && sig.vtab_map.length > 0) {
+      result[sig.key] = sig.vtab_map
+    }
+  }
+  return result
+})
 
 const filteredChannels = computed(() => {
   const search = channelSearch.value.trim().toLowerCase()
@@ -216,14 +232,25 @@ const loadedSignalRows = computed(() => loadedSignals.value.map(signal => {
     if (value > max) max = value
   }
 
+  const vtab = signal.vtab_map
+  const vtabText = (raw) => {
+    if (!vtab || vtab.length === 0) return null
+    const entry = vtab.find(e => Math.abs(e.key - raw) < 0.5)
+    return entry ? entry.text : null
+  }
+  const fmtEnum = (raw) => {
+    const text = vtabText(raw)
+    return text != null ? `${text} (${raw.toFixed(0)})` : formatValue(raw)
+  }
+
   return {
     key: signal.key,
     name: signal.name,
     file: signal.device_name,
     samples: count.toLocaleString(),
-    min: formatValue(min),
-    max: formatValue(max),
-    latest: formatValue(values[values.length - 1]),
+    min: vtab ? fmtEnum(min) : formatValue(min),
+    max: vtab ? fmtEnum(max) : formatValue(max),
+    latest: vtab ? fmtEnum(values[values.length - 1]) : formatValue(values[values.length - 1]),
   }
 }))
 
@@ -343,6 +370,7 @@ async function openMf4File(filePath) {
     const response = await invoke('mf4_open_file', { mf4Path: filePath })
     activeFile.value = response.file
     activeChannels.value = response.channels || []
+    activeVtabMaps.value = response.vtab_maps || {}
     channelSearch.value = ''
     upsertRecordFile(response.file)
     setMsg(`Loaded ${response.channel_count ?? activeChannels.value.length} channel(s) from ${response.file?.name || fileNameFromPath(filePath)}`)
@@ -389,6 +417,7 @@ async function addSignal(channelName) {
     }
 
     historyStore.set(key, { times, values })
+    const vtabEntries = activeVtabMaps.value[channelName] || null
     loadedSignals.value = [
       ...loadedSignals.value,
       {
@@ -397,6 +426,7 @@ async function addSignal(channelName) {
         device_name: activeFile.value.name,
         color: pickColor(loadedSignals.value.length),
         path: activeFile.value.path,
+        vtab_map: vtabEntries,
       },
     ]
   } catch (error) {
@@ -595,6 +625,20 @@ onMounted(() => {
 .channel-name {
   color: var(--exp-fg, #00cc44);
   word-break: break-word;
+}
+
+.enum-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  border-radius: 3px;
+  background: rgba(255, 204, 0, 0.12);
+  color: #ffcc00;
+  border: 1px solid rgba(255, 204, 0, 0.3);
+  vertical-align: middle;
+  letter-spacing: 0.5px;
 }
 
 .chart-panel {

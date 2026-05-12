@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use mf4_parse::components::cc::conversion::{CcType, TextOrScale};
 use mf4_parse::{DataValue, Mf4Wrapper};
 use serde::Serialize;
 use serde_json::json;
@@ -29,6 +30,34 @@ impl Mf4FileCache {
     fn get_channel_names(&self, path: &str) -> Option<Vec<String>> {
         let cache = self.inner.lock().unwrap();
         cache.get(path).map(|mf4| mf4.get_channel_names())
+    }
+
+    /// Returns vtab (key→text) pairs for all Value2Text channels in the file.
+    fn get_vtab_maps(&self, path: &str) -> HashMap<String, Vec<(f64, String)>> {
+        let cache = self.inner.lock().unwrap();
+        let Some(mf4) = cache.get(path) else { return HashMap::new() };
+        let mut result = HashMap::new();
+        for name in mf4.get_channel_names() {
+            let Some(link) = mf4.get_channel_link(&name) else { continue };
+            let cc_type = link.0.get_conversion().get_cc_type();
+            if let CcType::Value2Text((keys, texts)) = cc_type {
+                let pairs: Vec<(f64, String)> = keys
+                    .iter()
+                    .zip(texts.iter())
+                    .filter_map(|(&k, t)| {
+                        if let TextOrScale::Text(s) = t {
+                            Some((k, s.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !pairs.is_empty() {
+                    result.insert(name, pairs);
+                }
+            }
+        }
+        result
     }
 
     fn insert(&self, path: String, mf4: Mf4Wrapper) {
@@ -143,6 +172,18 @@ pub async fn mf4_open_file(
     };
     sort_channel_names(&mut channels);
 
+    let vtab_maps = cache.get_vtab_maps(&mf4_path);
+    let vtab_json: HashMap<String, Vec<serde_json::Value>> = vtab_maps
+        .iter()
+        .map(|(name, pairs)| {
+            let entries = pairs
+                .iter()
+                .map(|(k, t)| json!({"key": k, "text": t}))
+                .collect();
+            (name.clone(), entries)
+        })
+        .collect();
+
     Ok(json!({
         "success": true,
         "file": {
@@ -152,6 +193,7 @@ pub async fn mf4_open_file(
         },
         "channel_count": channels.len(),
         "channels": channels,
+        "vtab_maps": vtab_json,
     }))
 }
 
@@ -168,6 +210,16 @@ pub fn mf4_get_channel_data(
     let data = mf4
         .get_channel_data(&channel_name)
         .ok_or_else(|| format!("Channel '{}' was not found", channel_name))?;
+
+    // For Value2Text (enum) channels, get_channel_data() returns String data.
+    // Fall back to raw data (the stored f64 values) so the chart can still plot them.
+    let data = if data.is_num() {
+        data
+    } else {
+        mf4.get_channel_raw_data(&channel_name)
+            .ok_or_else(|| format!("Channel '{}' has no raw numeric data", channel_name))?
+    };
+
     if !data.is_num() {
         return Err(format!("Channel '{}' is not numeric", channel_name));
     }

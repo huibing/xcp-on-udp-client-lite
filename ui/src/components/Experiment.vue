@@ -1030,6 +1030,11 @@ function checkIsMapCurve(v) {
 function getLiveValue(v) {
   const val = liveValues[`${v.device_id}:${v.name}`]
   if (val === undefined || val === null) return '—'
+  if (v.is_enum && Array.isArray(v.enum_options) && v.enum_options.length > 0) {
+    const rawInt = Math.round(val)
+    const entry = v.enum_options.find(o => o.raw === rawInt)
+    if (entry) return entry.text
+  }
   if (typeof val === 'number') {
     return Number.isInteger(val) ? String(val) : val.toFixed(4).replace(/\.?0+$/, '')
   }

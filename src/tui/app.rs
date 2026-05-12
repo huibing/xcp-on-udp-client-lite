@@ -2584,6 +2584,7 @@ impl App {
                     frame,
                     chunks[1],
                     &selected_names,
+                    &all_measurements,
                     daq_running_count,
                     cycle_ms,
                 );
@@ -2709,9 +2710,23 @@ impl App {
         frame: &mut Frame,
         area: Rect,
         selected_names: &[String],
+        all_measurements: &[xcp_client::Measurement],
         selected_count: usize,
         cycle_ms: f64,
     ) {
+        // Build name→CompuMethod map for fast lookup
+        let compu_map: std::collections::HashMap<&str, &xcp_client::CompuMethod> =
+            all_measurements.iter().map(|m| (m.name.as_str(), &m.compu_method)).collect();
+
+        let format_value = |name: &str, v: f64| -> String {
+            if let Some(cm) = compu_map.get(name).copied() {
+                if cm.is_enum() {
+                    return cm.to_display(v as i64);
+                }
+            }
+            v.to_string()
+        };
+
         let mut data_lines: Vec<Line> = vec![];
 
         // Show latest values for each selected measurement
@@ -2719,7 +2734,7 @@ impl App {
             for name in selected_names {
                 let value = last_sample
                     .get(name)
-                    .map(|v| v.to_string())
+                    .map(|v| format_value(name, v))
                     .unwrap_or_else(|| "N/A".to_string());
                 data_lines.push(Line::from(vec![
                     Span::styled(
@@ -2753,7 +2768,7 @@ impl App {
                         values.push(format!(
                             "{}: {}",
                             name.split('_').next_back().unwrap_or(name),
-                            v
+                            format_value(name, v)
                         ));
                     }
                 }

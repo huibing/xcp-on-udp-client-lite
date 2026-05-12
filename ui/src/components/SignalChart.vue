@@ -66,6 +66,12 @@ const props = defineProps({
   gridColor: { type: String, default: 'rgba(0,200,100,0.1)' },
   /** Chart tick label color */
   tickColor: { type: String, default: '#00aa33' },
+  /**
+   * Optional Value-to-Text maps keyed by signal key.
+   * Shape: { [signalKey]: Array<{ key: number, text: string }> }
+   * When present, tooltip shows text label alongside raw value for enum signals.
+   */
+  vtabMaps: { type: Object, default: () => ({}) },
 })
 
 const emit = defineEmits(['close'])
@@ -200,6 +206,14 @@ function doUpdate() {
   chart.update('none')
 }
 
+/** Resolve a raw numeric value to vtab text for a given signal key */
+function vtabLookup(signalKey, rawValue) {
+  const entries = props.vtabMaps[signalKey]
+  if (!entries || entries.length === 0) return null
+  const entry = entries.find(e => Math.abs(e.key - rawValue) < 0.5)
+  return entry ? entry.text : null
+}
+
 /** Rebuild Chart.js datasets to match current signals list */
 function buildDatasets() {
   if (!chart) return
@@ -259,7 +273,13 @@ function createChart() {
           borderWidth: 1,
           callbacks: {
             title: items => items.length ? `t = ${Number(items[0].parsed.x).toFixed(2)} s` : '',
-            label: item => ` ${item.dataset.label}: ${Number(item.parsed.y).toFixed(4)}`,
+            label: item => {
+              const raw = Number(item.parsed.y)
+              const sig = props.signals[item.datasetIndex]
+              const text = sig ? vtabLookup(sig.key, raw) : null
+              if (text != null) return ` ${item.dataset.label}: ${text} (${raw.toFixed(0)})`
+              return ` ${item.dataset.label}: ${raw.toFixed(4)}`
+            },
           },
         },
       },
