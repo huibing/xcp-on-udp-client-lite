@@ -161,30 +161,34 @@
             </span>
           </div>
 
-          <SignalChart
+          <div
             v-for="group in chartGroups"
             :key="group.id"
-            :signals="group.signals"
-            :historyStore="historyStore"
-            :running="false"
-            :startEpoch="null"
-            :gridColor="chartGridColor"
-            :tickColor="chartTickColor"
-            :vtabMaps="signalVtabMaps"
-            :xMin="viewStart"
-            :xMax="viewEnd"
-            :showWindowSlider="false"
-            :showCursor="mf4CursorVisible"
-            :cursorTime="sharedCursorTime"
+            class="chart-group-wrap"
             :class="{ 'chart-drag-over': dragOverGroupId === group.id }"
-            @cursor-move="sharedCursorTime = $event"
-            @color-change="onSignalColorChange"
-            @zoom-x="applyChartZoom"
-            @close="removeGroup(group.id)"
             @dragover.prevent="dragOverGroupId = group.id"
-            @dragleave="dragOverGroupId = null"
+            @dragleave="onGroupDragLeave(group.id, $event)"
             @drop.prevent="onDropOnGroup(group.id, $event)"
-          />
+          >
+            <SignalChart
+              :signals="group.signals"
+              :historyStore="historyStore"
+              :running="false"
+              :startEpoch="null"
+              :gridColor="chartGridColor"
+              :tickColor="chartTickColor"
+              :vtabMaps="signalVtabMaps"
+              :xMin="viewStart"
+              :xMax="viewEnd"
+              :showWindowSlider="false"
+              :showCursor="mf4CursorVisible"
+              :cursorTime="sharedCursorTime"
+              @cursor-move="sharedCursorTime = $event"
+              @color-change="onSignalColorChange"
+              @zoom-x="applyChartZoom"
+              @close="removeGroup(group.id)"
+            />
+          </div>
 
           <!-- Two-cursor time range selector -->
           <div class="trange-panel">
@@ -809,6 +813,12 @@ function onChannelDragEnd() {
   dragOverGroupId.value = null
 }
 
+function onGroupDragLeave(groupId, e) {
+  // Only clear when the pointer truly leaves the wrapper (not entering a child inside it)
+  if (e.currentTarget.contains(e.relatedTarget)) return
+  if (dragOverGroupId.value === groupId) dragOverGroupId.value = null
+}
+
 async function onDropOnGroup(groupId, e) {
   e.preventDefault()
   dragOverGroupId.value = null
@@ -1155,6 +1165,11 @@ onMounted(() => {
 
 .channel-row:active {
   cursor: grabbing;
+}
+
+/* Wrapper for each chart group — enables native drag events */
+.chart-group-wrap {
+  position: relative;
 }
 
 /* Highlight when a dragged channel is hovering over a chart */
