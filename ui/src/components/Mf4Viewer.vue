@@ -771,6 +771,14 @@ watch(loadedSignals, () => {
   recomputeTimeBounds()
 })
 
+// When cursor is toggled ON for the first time, place it at the midpoint of the view
+watch(mf4CursorVisible, (visible) => {
+  if (visible && sharedCursorTime.value === null) {
+    const mid = ((viewStart.value ?? 0) + (viewEnd.value ?? 1)) / 2
+    sharedCursorTime.value = mid
+  }
+})
+
 onMounted(() => {
   refreshRecordFiles()
 })
