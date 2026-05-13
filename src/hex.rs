@@ -43,6 +43,88 @@ pub struct HexImage {
 }
 
 impl HexImage {
+    /// Create an empty HexImage (for building from uploaded data)
+    pub fn new() -> Self {
+        Self { data: BTreeMap::new() }
+    }
+
+    /// Insert raw bytes at `base_address`.
+    /// Any existing bytes at those addresses are overwritten.
+    pub fn add_data(&mut self, base_address: u32, data: &[u8]) {
+        for (i, &byte) in data.iter().enumerate() {
+            self.data.insert(base_address + i as u32, byte);
+        }
+    }
+
+    /// Serialize the memory image to Intel HEX format.
+    ///
+    /// Uses 32-byte data records and extended linear address records (type 0x04)
+    /// whenever the upper 16 bits of the address change.
+    pub fn to_intel_hex(&self) -> String {
+        const BYTES_PER_LINE: usize = 32;
+        let mut output = String::with_capacity(self.data.len() * 7 + 16);
+
+        if self.data.is_empty() {
+            output.push_str(":00000001FF\n");
+            return output;
+        }
+
+        // Build contiguous blocks from the sparse map
+        let mut blocks: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut current_start: Option<u32> = None;
+        let mut current_bytes: Vec<u8> = Vec::new();
+
+        for (&addr, &byte) in &self.data {
+            match current_start {
+                None => {
+                    current_start = Some(addr);
+                    current_bytes.push(byte);
+                }
+                Some(start) if addr == start + current_bytes.len() as u32 => {
+                    current_bytes.push(byte);
+                }
+                Some(start) => {
+                    blocks.push((start, std::mem::take(&mut current_bytes)));
+                    current_start = Some(addr);
+                    current_bytes.push(byte);
+                }
+            }
+        }
+        if let Some(start) = current_start {
+            if !current_bytes.is_empty() {
+                blocks.push((start, current_bytes));
+            }
+        }
+
+        let mut last_upper: Option<u16> = None;
+
+        for (block_start, block_data) in &blocks {
+            let mut offset = 0usize;
+
+            while offset < block_data.len() {
+                let addr = block_start + offset as u32;
+                let upper = (addr >> 16) as u16;
+                let lower = (addr & 0xFFFF) as u16;
+
+                if last_upper != Some(upper) {
+                    intel_hex_write_ela(&mut output, upper);
+                    last_upper = Some(upper);
+                }
+
+                // Cap at BYTES_PER_LINE and at the 64 KB boundary
+                let remaining_in_block = block_data.len() - offset;
+                let remaining_in_64k = (0x10000usize).saturating_sub(lower as usize);
+                let line_len = remaining_in_block.min(BYTES_PER_LINE).min(remaining_in_64k);
+
+                intel_hex_write_data(&mut output, lower, &block_data[offset..offset + line_len]);
+                offset += line_len;
+            }
+        }
+
+        output.push_str(":00000001FF\n");
+        output
+    }
+
     /// Parse an Intel HEX file from a file path
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, HexError> {
         let content = std::fs::read_to_string(path)?;
@@ -142,6 +224,38 @@ impl HexImage {
         let last = self.data.keys().next_back()?;
         Some((*first, *last))
     }
+}
+
+/// Write an Intel HEX Extended Linear Address record (type 0x04).
+fn intel_hex_write_ela(output: &mut String, upper: u16) {
+    let h = (upper >> 8) as u8;
+    let l = upper as u8;
+    // sum = len(2) + addr_H(0) + addr_L(0) + type(4) + data_H + data_L
+    let sum: u8 = 0x02u8
+        .wrapping_add(0x04)
+        .wrapping_add(h)
+        .wrapping_add(l);
+    let cs = (!sum).wrapping_add(1);
+    output.push_str(&format!(":02000004{:02X}{:02X}{:02X}\n", h, l, cs));
+}
+
+/// Write a single Intel HEX data record (type 0x00) with a 16-bit address offset.
+fn intel_hex_write_data(output: &mut String, addr16: u16, data: &[u8]) {
+    let len = data.len() as u8;
+    let ah = (addr16 >> 8) as u8;
+    let al = addr16 as u8;
+    let mut sum: u8 = len.wrapping_add(ah).wrapping_add(al); // type 0x00 adds nothing
+    for &b in data {
+        sum = sum.wrapping_add(b);
+    }
+    let cs = (!sum).wrapping_add(1);
+
+    output.push(':');
+    output.push_str(&format!("{:02X}{:04X}00", len, addr16));
+    for &b in data {
+        output.push_str(&format!("{:02X}", b));
+    }
+    output.push_str(&format!("{:02X}\n", cs));
 }
 
 /// A single record from an Intel HEX file
@@ -449,5 +563,67 @@ mod tests {
         let data = image.extract_range(0x0000, 256, 0xFF);
         assert_eq!(data[0], 0x00);
         assert_eq!(data[255], 0xFF);
+    }
+
+    // ── Writer tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_new_and_add_data() {
+        let mut img = HexImage::new();
+        assert_eq!(img.total_bytes(), 0);
+        img.add_data(0x1000, &[0xAA, 0xBB, 0xCC]);
+        assert_eq!(img.total_bytes(), 3);
+        let data = img.extract_range(0x1000, 3, 0xFF);
+        assert_eq!(data, vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn test_to_intel_hex_empty() {
+        let img = HexImage::new();
+        assert_eq!(img.to_intel_hex(), ":00000001FF\n");
+    }
+
+    #[test]
+    fn test_to_intel_hex_roundtrip_simple() {
+        let mut img = HexImage::new();
+        img.add_data(0x0000, &[0x01, 0x02, 0x03, 0x04]);
+        let hex_str = img.to_intel_hex();
+        let parsed = HexImage::from_str(&hex_str).unwrap();
+        assert_eq!(parsed.total_bytes(), 4);
+        assert_eq!(parsed.extract_range(0x0000, 4, 0xFF), vec![0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn test_to_intel_hex_roundtrip_high_address() {
+        let mut img = HexImage::new();
+        img.add_data(0xA038_0000, &[0xDE, 0xAD, 0xBE, 0xEF]);
+        let hex_str = img.to_intel_hex();
+        assert!(hex_str.contains(":02000004A038"));
+        let parsed = HexImage::from_str(&hex_str).unwrap();
+        assert_eq!(parsed.extract_range(0xA038_0000, 4, 0xFF), vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn test_to_intel_hex_roundtrip_large() {
+        let payload: Vec<u8> = (0u16..512).map(|i| (i & 0xFF) as u8).collect();
+        let mut img = HexImage::new();
+        img.add_data(0x8000_0000, &payload);
+        let hex_str = img.to_intel_hex();
+        let parsed = HexImage::from_str(&hex_str).unwrap();
+        assert_eq!(parsed.total_bytes(), 512);
+        let recovered = parsed.extract_range(0x8000_0000, 512, 0xFF);
+        assert_eq!(recovered, payload);
+    }
+
+    #[test]
+    fn test_to_intel_hex_multiple_gaps() {
+        let mut img = HexImage::new();
+        img.add_data(0x0000, &[0xAA, 0xBB]);
+        img.add_data(0x1000, &[0xCC, 0xDD]);
+        let hex_str = img.to_intel_hex();
+        let parsed = HexImage::from_str(&hex_str).unwrap();
+        assert_eq!(parsed.extract_range(0x0000, 2, 0xFF), vec![0xAA, 0xBB]);
+        assert_eq!(parsed.extract_range(0x1000, 2, 0xFF), vec![0xCC, 0xDD]);
+        assert!(!parsed.has_data_in_range(0x0002, 0x0FFE));
     }
 }

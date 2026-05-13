@@ -115,6 +115,9 @@ pub fn run() {
             commands::experiment::write_text_file,
             commands::experiment::read_text_file,
             commands::experiment::open_folder,
+            // Upload
+            commands::upload::upload_get_segments,
+            commands::upload::upload_memory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running xcp-client-desktop");
