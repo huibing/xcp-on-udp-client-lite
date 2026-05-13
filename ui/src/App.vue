@@ -1,13 +1,29 @@
 <template>
   <div id="xcp-app" :class="`theme-${theme}`" :style="customThemeStyle">
-    <nav class="sidebar">
-      <div class="brand">XCP Client</div>
-      <router-link to="/">Dashboard</router-link>
-      <router-link to="/devices">Devices</router-link>
-      <router-link to="/experiment">Experiment</router-link>
-      <router-link to="/compare">Compare</router-link>
-      <router-link to="/mf4">MF4 Viewer</router-link>
-      <router-link to="/settings" class="settings-link">⚙ Settings</router-link>
+    <nav class="sidebar" :class="{ collapsed: sidebarCollapsed }">
+      <button class="sidebar-toggle" @click="toggleSidebar" :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'">
+        {{ sidebarCollapsed ? '»' : '«' }}
+      </button>
+      <div v-if="!sidebarCollapsed" class="brand">XCP Client</div>
+
+      <router-link to="/"         :title="sidebarCollapsed ? 'Dashboard'  : ''">
+        <span class="nav-icon">⊞</span><span class="nav-label">Dashboard</span>
+      </router-link>
+      <router-link to="/devices"  :title="sidebarCollapsed ? 'Devices'    : ''">
+        <span class="nav-icon">⊙</span><span class="nav-label">Devices</span>
+      </router-link>
+      <router-link to="/experiment" :title="sidebarCollapsed ? 'Experiment' : ''">
+        <span class="nav-icon">⚗</span><span class="nav-label">Experiment</span>
+      </router-link>
+      <router-link to="/compare"  :title="sidebarCollapsed ? 'Compare'    : ''">
+        <span class="nav-icon">⇄</span><span class="nav-label">Compare</span>
+      </router-link>
+      <router-link to="/mf4"      :title="sidebarCollapsed ? 'MF4 Viewer' : ''">
+        <span class="nav-icon">▶</span><span class="nav-label">MF4 Viewer</span>
+      </router-link>
+      <router-link to="/settings" class="settings-link" :title="sidebarCollapsed ? 'Settings' : ''">
+        <span class="nav-icon">⚙</span><span class="nav-label">Settings</span>
+      </router-link>
     </nav>
     <main class="content" :class="{ 'content-flush': $route.path === '/experiment' }">
       <router-view />
@@ -16,8 +32,18 @@
 </template>
 
 <script setup>
+import { ref } from 'vue'
 import { useTheme } from './composables/useTheme.js'
+
 const { theme, customThemeStyle } = useTheme()
+
+const STORAGE_KEY = 'xcp-sidebar-collapsed'
+const sidebarCollapsed = ref(localStorage.getItem(STORAGE_KEY) === 'true')
+
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  localStorage.setItem(STORAGE_KEY, sidebarCollapsed.value)
+}
 </script>
 
 <style>
@@ -55,32 +81,80 @@ body { font-family: 'Consolas', 'Courier New', monospace; }
 /* ── Sidebar ─────────────────────────────────────────────────────────────── */
 .sidebar {
   width: 160px;
+  min-width: 160px;
   background: var(--exp-bg2, #0d0d0d);
   border-right: 1px solid var(--exp-border, #00cc44);
-  padding: 16px 0;
-  display: flex; flex-direction: column; gap: 4px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: width 0.2s ease, min-width 0.2s ease;
+  overflow: hidden;
+}
+.sidebar.collapsed {
+  width: 44px;
+  min-width: 44px;
+}
+.sidebar-toggle {
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--exp-border, #003311);
+  color: var(--exp-fg-mid, #00aa33);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 10px 0;
+  text-align: center;
+  width: 100%;
+  font-family: Consolas, monospace;
+  flex-shrink: 0;
+}
+.sidebar-toggle:hover {
+  background: var(--exp-border3, #001a09);
+  color: var(--exp-fg-bright, #00ff66);
 }
 .brand {
   color: var(--exp-fg-bright, #00ff66);
   font-weight: bold;
-  padding: 8px 16px 16px;
+  padding: 8px 16px 12px;
   border-bottom: 1px solid var(--exp-border, #003311);
-  margin-bottom: 8px;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 .sidebar a {
   color: var(--exp-fg-mid, #00aa33);
   text-decoration: none;
-  padding: 8px 16px;
-  display: block;
+  padding: 8px 0 8px 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
 }
-.sidebar a:hover, .sidebar a.router-link-active {
+.sidebar a:hover,
+.sidebar a.router-link-active {
   background: var(--exp-border3, #001a09);
   color: var(--exp-fg-bright, #00ff66);
+}
+.nav-icon {
+  flex-shrink: 0;
+  width: 24px;
+  text-align: center;
+  font-size: 1rem;
+}
+.nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity 0.15s ease;
+}
+.sidebar.collapsed .nav-label {
+  opacity: 0;
+  pointer-events: none;
 }
 .settings-link {
   margin-top: auto;
   border-top: 1px solid var(--exp-border, #003311);
-  padding-top: 12px !important;
+  padding-top: 8px !important;
 }
 
 /* ── Content area ────────────────────────────────────────────────────────── */
