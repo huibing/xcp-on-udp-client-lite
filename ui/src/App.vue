@@ -34,8 +34,10 @@
 <script setup>
 import { ref } from 'vue'
 import { useTheme } from './composables/useTheme.js'
+import { useFont } from './composables/useFont.js'
 
 const { theme, customThemeStyle } = useTheme()
+useFont() // initializes watchEffect that sets --exp-font / --exp-font-size on :root
 
 const STORAGE_KEY = 'xcp-sidebar-collapsed'
 const sidebarCollapsed = ref(localStorage.getItem(STORAGE_KEY) === 'true')
@@ -48,7 +50,7 @@ function toggleSidebar() {
 
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'Consolas', 'Courier New', monospace; }
+body { font-family: var(--exp-font, 'Consolas', 'Courier New', monospace); font-size: var(--exp-font-size, 13px); }
 #xcp-app { display: flex; height: 100vh; background: var(--exp-bg, #0a0a0a); color: var(--exp-fg, #00cc44); }
 
 /* ── Global theme CSS variables (consumed by all pages) ──────────────────── */

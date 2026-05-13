@@ -36,6 +36,46 @@
       </div>
     </div>
 
+    <!-- Typography settings -->
+    <div class="settings-card">
+      <div class="settings-section-title">📝 Typography</div>
+      <p class="settings-hint">Font family and base size applied throughout the application.</p>
+
+      <div class="form-group">
+        <label class="form-label">Font Family</label>
+        <div class="font-picker">
+          <button
+            v-for="f in fontOptions" :key="f.id"
+            class="font-btn" :class="{ active: fontId === f.id }"
+            :style="f.id !== 'custom' ? { fontFamily: f.value } : {}"
+            @click="fontId = f.id">
+            {{ f.label }}
+          </button>
+        </div>
+        <div v-if="fontId === 'custom'" style="margin-top: 8px">
+          <input class="form-input" v-model="customFont" placeholder='"Monaspace Neon", monospace' />
+          <div class="form-hint">Any valid CSS font-family value. Falls back to monospace if not installed.</div>
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px">
+        <label class="form-label">Font Size</label>
+        <div class="size-picker">
+          <button
+            v-for="s in fontSizeOptions" :key="s.value"
+            class="size-btn" :class="{ active: fontSize === s.value }"
+            @click="fontSize = s.value">
+            {{ s.label }}
+          </button>
+        </div>
+      </div>
+
+      <div class="font-preview">
+        <span class="preview-label">Preview</span>
+        <span class="preview-text">0x1A2B3C4D  →  87.5 °C  |  ECU_Speed = 120 km/h</span>
+      </div>
+    </div>
+
     <!-- Recording settings -->
     <div class="settings-card">
       <div class="settings-section-title">📁 Recording</div>
@@ -59,9 +99,11 @@
 <script setup>
 import { useTheme } from '../composables/useTheme.js'
 import { useMf4Settings } from '../composables/useMf4Settings.js'
+import { useFont } from '../composables/useFont.js'
 
 const { theme, customFg, customBg, themeOptions } = useTheme()
 const { mf4Dir, mf4Pattern } = useMf4Settings()
+const { fontId, customFont, fontSize, fontOptions, fontSizeOptions } = useFont()
 </script>
 
 <style scoped>
@@ -69,7 +111,6 @@ const { mf4Dir, mf4Pattern } = useMf4Settings()
   max-width: 680px;
   margin: 0 auto;
   padding: 32px 24px;
-  font-family: 'Consolas', 'Courier New', monospace;
   color: var(--exp-fg);
 }
 
@@ -100,7 +141,61 @@ const { mf4Dir, mf4Pattern } = useMf4Settings()
   display: block;
 }
 
-/* ── Theme Picker ────────────────────────────────────────────────────────── */
+/* ── Font Picker ─────────────────────────────────────────────────────────── */
+.font-picker { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.font-btn {
+  padding: 6px 14px;
+  border-radius: 5px;
+  cursor: pointer;
+  border: 2px solid var(--exp-border2, #002211);
+  background: var(--exp-bg3, #0d0d0d);
+  color: var(--exp-fg, #00cc44);
+  font-size: 12px;
+  transition: border-color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+.font-btn:hover { border-color: var(--exp-border, #003311); }
+.font-btn.active {
+  border-color: var(--exp-fg-bright, #00ff66);
+  color: var(--exp-fg-bright, #00ff66);
+}
+
+/* ── Size Picker ─────────────────────────────────────────────────────────── */
+.size-picker { display: flex; gap: 6px; flex-wrap: wrap; }
+.size-btn {
+  padding: 4px 12px;
+  border-radius: 5px;
+  cursor: pointer;
+  border: 2px solid var(--exp-border2, #002211);
+  background: var(--exp-bg3, #0d0d0d);
+  color: var(--exp-fg, #00cc44);
+  font-family: var(--exp-font, monospace);
+  transition: border-color 0.15s;
+}
+.size-btn:hover { border-color: var(--exp-border, #003311); }
+.size-btn.active {
+  border-color: var(--exp-fg-bright, #00ff66);
+  color: var(--exp-fg-bright, #00ff66);
+}
+
+/* ── Font Preview ────────────────────────────────────────────────────────── */
+.font-preview {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--exp-bg, #090909);
+  border: 1px dashed var(--exp-border2, #002211);
+  border-radius: 5px;
+}
+.preview-text {
+  font-family: var(--exp-font, monospace);
+  font-size: var(--exp-font-size, 13px);
+  color: var(--exp-fg, #00cc44);
+}
+
+
 .theme-picker { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
 .theme-btn {
   display: flex; flex-direction: column; align-items: center; gap: 5px;
@@ -166,7 +261,7 @@ const { mf4Dir, mf4Pattern } = useMf4Settings()
   border-radius: 4px;
   padding: 6px 10px;
   font-size: 13px;
-  font-family: 'Consolas', 'Courier New', monospace;
+  font-family: var(--exp-font, 'Consolas', 'Courier New', monospace);
   outline: none;
   transition: border-color 0.15s;
 }
