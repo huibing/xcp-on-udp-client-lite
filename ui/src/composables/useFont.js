@@ -13,6 +13,7 @@ export const fontOptions = [
   { id: 'jetbrains',  label: 'JetBrains Mono',     value: '"JetBrains Mono", Consolas, monospace' },
   { id: 'fira',       label: 'Fira Code',          value: '"Fira Code", Consolas, monospace' },
   { id: 'sourcecodepro', label: 'Source Code Pro', value: '"Source Code Pro", Consolas, monospace' },
+  { id: 'yahei',      label: 'Microsoft YaHei UI', value: '"Microsoft YaHei UI", "Microsoft YaHei", Consolas, monospace' },
   { id: 'courier',    label: 'Courier New',        value: '"Courier New", Courier, monospace' },
   { id: 'custom',     label: 'Custom…',            value: '' },
 ]
