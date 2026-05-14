@@ -120,7 +120,7 @@ const props = defineProps({
   cursorTime: { type: Number, default: null },
 })
 
-const emit = defineEmits(['close', 'cursor-move', 'color-change', 'zoom-x'])
+const emit = defineEmits(['close', 'cursor-move', 'color-change', 'zoom-x', 'zoom-y'])
 const canvasEl = ref(null)
 
 const windowIdx = ref((() => {
@@ -381,11 +381,11 @@ function _pixelToTime(px, ca, xMin, xMax) {
 /** Re-derive cursor pixel position from stored localCursorTime after a range change */
 function _refreshCursorPx() {
   if (localCursorTime.value === null) { cursorPx.value = null; return }
-  const ca = chartPlotArea.value
-  const { min, max } = chartXRange.value
-  const span = max - min
+  // Use live chart area so synced cursors use the real plot dimensions, not stale cache
+  const { ca, xMin, xMax } = _liveChartArea()
+  const span = xMax - xMin
   if (span <= 0) { cursorPx.value = null; return }
-  const pct = (localCursorTime.value - min) / span
+  const pct = (localCursorTime.value - xMin) / span
   cursorPx.value = (pct >= 0 && pct <= 1) ? ca.left + pct * (ca.right - ca.left) : null
 }
 
@@ -479,9 +479,12 @@ function onCanvasDown(e) {
         const vBottom = chart.scales.y.getValueForPixel(y2px)
         const vTop = chart.scales.y.getValueForPixel(y1px)
         if (vBottom !== undefined && vTop !== undefined && Math.abs(vTop - vBottom) > 1e-10) {
+          const prevMin = yOverrideMin.value
+          const prevMax = yOverrideMax.value
           yOverrideMin.value = Math.min(vBottom, vTop)
           yOverrideMax.value = Math.max(vBottom, vTop)
           doUpdate()
+          emit('zoom-y', { prevMin, prevMax, nextMin: yOverrideMin.value, nextMax: yOverrideMax.value })
         }
       }
     }
@@ -689,6 +692,15 @@ watch(() => props.showCursor, v => {
     _refreshCursorPx()
   }
 })
+
+// ── Exposed API for parent undo support ──────────────────────────────────────
+function setYZoom(min, max) {
+  yOverrideMin.value = min
+  yOverrideMax.value = max
+  doUpdate()
+}
+
+defineExpose({ setYZoom })
 
 // Sync cursor from parent when in multi-chart synchronized mode
 watch(() => props.cursorTime, v => {

@@ -6,6 +6,12 @@
         <p class="page-sub">Offline MF4 signal viewer. This page only reads recorded files and does not depend on any live device connection.</p>
       </div>
       <div class="page-actions">
+        <button
+          v-if="undoCount > 0"
+          class="secondary undo-btn"
+          @click="undoLast"
+          :title="`Undo last action (${undoCount} step${undoCount !== 1 ? 's' : ''} available) · Ctrl+Z`"
+        >↩ {{ undoCount }}</button>
         <button class="secondary" @click="refreshRecordFiles" :disabled="loadingList">
           {{ loadingList ? 'Refreshing...' : '↻ Refresh List' }}
         </button>
@@ -160,6 +166,7 @@
           >
             <SignalChart
               :signals="group.signals"
+              :ref="el => registerChartRef(group.id, el)"
               :historyStore="historyStore"
               :running="false"
               :startEpoch="null"
@@ -174,6 +181,7 @@
               @cursor-move="sharedCursorTime = $event"
               @color-change="onSignalColorChange"
               @zoom-x="applyChartZoom"
+              @zoom-y="onChartZoomY(group.id, $event)"
               @close="removeGroup(group.id)"
             />
           </div>
@@ -293,7 +301,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 
@@ -328,6 +336,56 @@ const mf4CursorVisible = ref(false)
 // ── Drag-and-drop state ───────────────────────────────────────────────────────
 const draggingChannel = ref(null)   // { channel, file } | null
 const dragOverGroupId = ref(null)   // group.id being hovered | null
+
+// ── Undo queue (up to 10 user actions) ───────────────────────────────────────
+// Action shapes:
+//   { type: 'zoom-x',        prevStart, prevEnd }
+//   { type: 'zoom-y',        groupId, prevMin, prevMax }
+//   { type: 'add-signal',    key, groupId }
+//   { type: 'remove-signal', key, sigObj, groupId, insertIndex }
+//   { type: 'remove-group',  group, groupIndex }
+//   { type: 'clear-all',     groups }   — groups is a snapshot; historyStore data retained
+//
+// remove-signal, remove-group, and clear-all preserve historyStore data for undo.
+// Data is cleaned up when the entry is evicted from the 10-slot queue.
+const undoQueue = []   // plain array — not reactive, mutations trigger no re-render
+const undoCount = ref(0)   // reactive mirror of undoQueue.length for UI
+
+function pushUndo(action) {
+  if (undoQueue.length >= 10) {
+    const evicted = undoQueue.shift()
+    // Free historyStore data retained for remove/clear actions once they leave the queue
+    if (evicted.type === 'remove-signal') {
+      if (!chartGroups.value.some(g => g.signals.some(s => s.key === evicted.key))) {
+        historyStore.delete(evicted.key)
+      }
+    } else if (evicted.type === 'remove-group') {
+      for (const sig of evicted.group.signals) {
+        if (!chartGroups.value.some(g => g.signals.some(s => s.key === sig.key))) {
+          historyStore.delete(sig.key)
+        }
+      }
+    } else if (evicted.type === 'clear-all') {
+      for (const group of evicted.groups) {
+        for (const sig of group.signals) {
+          if (!chartGroups.value.some(g => g.signals.some(s => s.key === sig.key))) {
+            historyStore.delete(sig.key)
+          }
+        }
+      }
+    }
+  }
+  undoQueue.push(action)
+  undoCount.value = undoQueue.length
+}
+
+// ── Chart component refs (keyed by group.id) for Y-zoom undo ─────────────────
+const chartRefs = new Map()
+
+function registerChartRef(groupId, el) {
+  if (el) chartRefs.set(groupId, el)
+  else chartRefs.delete(groupId)
+}
 
 // ── Panel collapse state ──────────────────────────────────────────────────────
 const filesPanelOpen = ref(true)
@@ -437,7 +495,12 @@ function startDrag(side, event) {
   const track = tRangeTrackEl.value
   if (!track) return
 
+  const prevStart = viewStart.value
+  const prevEnd = viewEnd.value
+  let hasMoved = false
+
   function onMove(e) {
+    hasMoved = true
     const rect = track.getBoundingClientRect()
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
     const t = pctToTime(pct)
@@ -453,6 +516,7 @@ function startDrag(side, event) {
   function onUp() {
     document.removeEventListener('mousemove', onMove)
     document.removeEventListener('mouseup', onUp)
+    if (hasMoved) pushUndo({ type: 'zoom-x', prevStart, prevEnd })
   }
 
   document.addEventListener('mousemove', onMove)
@@ -469,13 +533,17 @@ function startPan(event) {
   isDraggingPan.value = true
   document.body.style.cursor = 'grabbing'
 
+  const prevStart = viewStart.value
+  const prevEnd = viewEnd.value
   const startX = event.clientX
   const startViewStart = viewStart.value
   const startViewEnd = viewEnd.value
   const dataSpan = dataTimeMax.value - dataTimeMin.value
   const viewSpan = startViewEnd - startViewStart
+  let hasMoved = false
 
   function onMove(e) {
+    hasMoved = true
     const rect = track.getBoundingClientRect()
     const dt = (e.clientX - startX) / rect.width * dataSpan
 
@@ -503,6 +571,7 @@ function startPan(event) {
     document.body.style.cursor = ''
     document.removeEventListener('mousemove', onMove)
     document.removeEventListener('mouseup', onUp)
+    if (hasMoved) pushUndo({ type: 'zoom-x', prevStart, prevEnd })
   }
 
   document.addEventListener('mousemove', onMove)
@@ -765,11 +834,14 @@ async function addSignal(channelName, targetGroupId = null) {
       const group = chartGroups.value.find(g => g.id === targetGroupId)
       if (group) {
         group.signals = [...group.signals, sigObj]
+        pushUndo({ type: 'add-signal', key, groupId: targetGroupId })
         return
       }
     }
     // No target group → create a new chart
-    chartGroups.value = [...chartGroups.value, { id: crypto.randomUUID(), signals: [sigObj] }]
+    const newGroupId = crypto.randomUUID()
+    chartGroups.value = [...chartGroups.value, { id: newGroupId, signals: [sigObj] }]
+    pushUndo({ type: 'add-signal', key, groupId: newGroupId })
   } catch (error) {
     setMsg(String(error), true)
   } finally {
@@ -778,18 +850,41 @@ async function addSignal(channelName, targetGroupId = null) {
 }
 
 function removeSignal(key) {
-  historyStore.delete(key)
+  // Capture position before removal so it can be restored by undo
+  let groupId = null
+  let insertIndex = 0
+  let sigObj = null
+  for (const group of chartGroups.value) {
+    const idx = group.signals.findIndex(s => s.key === key)
+    if (idx !== -1) {
+      groupId = group.id
+      insertIndex = idx
+      sigObj = group.signals[idx]
+      break
+    }
+  }
+  // Remove from groups; keep historyStore data alive for undo
   chartGroups.value = chartGroups.value
     .map(g => ({ ...g, signals: g.signals.filter(s => s.key !== key) }))
     .filter(g => g.signals.length > 0)
+  if (sigObj) pushUndo({ type: 'remove-signal', key, sigObj, groupId, insertIndex })
 }
 
 function removeGroup(groupId) {
-  const group = chartGroups.value.find(g => g.id === groupId)
-  if (group) {
-    for (const sig of group.signals) historyStore.delete(sig.key)
-  }
+  const groupIndex = chartGroups.value.findIndex(g => g.id === groupId)
+  const group = groupIndex !== -1 ? chartGroups.value[groupIndex] : null
+  // Remove from view; keep historyStore data alive for undo
   chartGroups.value = chartGroups.value.filter(g => g.id !== groupId)
+  // Prune stale zoom-y undo entries for the deleted chart
+  for (let i = undoQueue.length - 1; i >= 0; i--) {
+    if (undoQueue[i].type === 'zoom-y' && undoQueue[i].groupId === groupId) {
+      undoQueue.splice(i, 1)
+    }
+  }
+  if (group) {
+    pushUndo({ type: 'remove-group', group: { id: group.id, signals: [...group.signals] }, groupIndex })
+  }
+  undoCount.value = undoQueue.length
 }
 
 function onSignalColorChange({ key, color }) {
@@ -797,16 +892,62 @@ function onSignalColorChange({ key, color }) {
   if (sig) sig.color = color
 }
 
+function onChartZoomY(groupId, { prevMin, prevMax }) {
+  pushUndo({ type: 'zoom-y', groupId, prevMin, prevMax })
+}
+
+function undoLast() {
+  const action = undoQueue.pop()
+  undoCount.value = undoQueue.length
+  if (!action) return
+  if (action.type === 'zoom-x') {
+    viewStart.value = action.prevStart
+    viewEnd.value = action.prevEnd
+    viewStartInput.value = Number(action.prevStart.toFixed(4))
+    viewEndInput.value = Number(action.prevEnd.toFixed(4))
+  } else if (action.type === 'zoom-y') {
+    const chart = chartRefs.get(action.groupId)
+    if (chart) chart.setYZoom(action.prevMin, action.prevMax)
+  } else if (action.type === 'add-signal') {
+    historyStore.delete(action.key)
+    chartGroups.value = chartGroups.value
+      .map(g => ({ ...g, signals: g.signals.filter(s => s.key !== action.key) }))
+      .filter(g => g.signals.length > 0)
+  } else if (action.type === 'remove-signal') {
+    const group = chartGroups.value.find(g => g.id === action.groupId)
+    if (group) {
+      const signals = [...group.signals]
+      signals.splice(action.insertIndex, 0, action.sigObj)
+      group.signals = signals
+    } else {
+      // Original group was auto-removed when it became empty — recreate it
+      chartGroups.value = [...chartGroups.value, { id: action.groupId, signals: [action.sigObj] }]
+    }
+  } else if (action.type === 'remove-group') {
+    const groups = [...chartGroups.value]
+    groups.splice(action.groupIndex, 0, action.group)
+    chartGroups.value = groups
+  } else if (action.type === 'clear-all') {
+    chartGroups.value = action.groups
+  }
+}
+
 function applyChartZoom({ xMin, xMax }) {
+  const prevStart = viewStart.value
+  const prevEnd = viewEnd.value
   viewStart.value = Math.max(dataTimeMin.value ?? xMin, xMin)
   viewEnd.value = Math.min(dataTimeMax.value ?? xMax, xMax)
   viewStartInput.value = Number(viewStart.value.toFixed(4))
   viewEndInput.value = Number(viewEnd.value.toFixed(4))
+  pushUndo({ type: 'zoom-x', prevStart, prevEnd })
 }
 
 function clearSignals() {
-  historyStore.clear()
+  if (chartGroups.value.length === 0) return
+  // Snapshot all groups before clearing; keep historyStore data alive for undo
+  const snapshot = chartGroups.value.map(g => ({ id: g.id, signals: [...g.signals] }))
   chartGroups.value = []
+  pushUndo({ type: 'clear-all', groups: snapshot })
 }
 
 // ── Mouse-based drag handlers (replaces unreliable HTML5 drag API in Tauri) ───
@@ -893,6 +1034,7 @@ async function onDropOnGroup(groupId, drag) {
     const group = chartGroups.value.find(g => g.id === groupId)
     if (group) {
       group.signals = [...group.signals, sigObj]
+      pushUndo({ type: 'add-signal', key, groupId })
     }
   } catch (error) {
     setMsg(String(error), true)
@@ -919,7 +1061,19 @@ watch(mf4CursorVisible, (visible) => {
 
 onMounted(() => {
   refreshRecordFiles()
+  window.addEventListener('keydown', onUndoKey)
 })
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onUndoKey)
+})
+
+function onUndoKey(e) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+    e.preventDefault()
+    undoLast()
+  }
+}
 </script>
 
 <style scoped>
@@ -952,6 +1106,12 @@ onMounted(() => {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+.undo-btn {
+  font-variant-numeric: tabular-nums;
+  min-width: 52px;
 }
 
 .layout {
