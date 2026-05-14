@@ -66,6 +66,16 @@ pub async fn list_devices(state: State<'_, SharedState>) -> Result<Value, String
 
     for device in &app.devices {
         let hex_filename = device.hex_filename.read().await.clone();
+        let working_hex_name = if device.working_hex_path.is_empty() {
+            None
+        } else {
+            Some(
+                std::path::Path::new(&device.working_hex_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| device.working_hex_path.clone()),
+            )
+        };
         let checksum_report = device.checksum_report.read().await;
         let checksum_status = if let Some(report) = checksum_report.as_ref() {
             if report.all_passed() {
@@ -89,6 +99,7 @@ pub async fn list_devices(state: State<'_, SharedState>) -> Result<Value, String
             "a2l_name": device.original_filename,
             "hex_loaded": hex_filename.is_some(),
             "hex_name": hex_filename,
+            "working_hex_name": working_hex_name,
             "connected": device.connected,
             "checksum_status": checksum_status,
             "cal_count": cal_count,

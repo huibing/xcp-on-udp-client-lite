@@ -80,6 +80,7 @@ pub fn run() {
             commands::daq::daq_download_csv,
             // Checksum
             commands::checksum::hex_load,
+            commands::checksum::working_hex_load,
             commands::checksum::checksum_verify,
             // Compare
             commands::compare::compare_sessions,

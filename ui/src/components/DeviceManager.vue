@@ -77,6 +77,22 @@
             </button>
           </div>
 
+          <div class="panel" v-if="device.hex_loaded">
+            <div class="panel-title">Working Page HEX</div>
+            <div class="panel-value" :class="{ ok: !!device.working_hex_name }">
+              {{ device.working_hex_name || '(auto-derived from reference)' }}
+            </div>
+            <button
+              type="button"
+              class="secondary"
+              :disabled="isBusy(`${device.id}:working_hex`)"
+              @click="pickWorkingHex(device)"
+              title="Upload a dedicated HEX file as the working page instead of the auto-derived copy"
+            >
+              {{ isBusy(`${device.id}:working_hex`) ? 'Loading...' : '↻ Set Working HEX' }}
+            </button>
+          </div>
+
           <div class="panel">
             <div class="panel-title">Checksum</div>
             <div class="panel-value">
@@ -549,6 +565,35 @@ async function pickHex(device) {
     }
     await refresh()
     showToast(result.message || 'HEX loaded', 'success')
+  } catch (error) {
+    showToast(String(error), 'error')
+  } finally {
+    clearBusy(key)
+  }
+}
+
+async function pickWorkingHex(device) {
+  const key = `${device.id}:working_hex`
+  setBusy(key)
+  try {
+    const filePath = singlePath(await open({
+      multiple: false,
+      directory: false,
+      title: 'Load Working Page HEX File',
+      filters: [{ name: 'HEX Files', extensions: ['hex', 'ihex', 'h86', 'HEX'] }]
+    }))
+    if (!filePath) return
+
+    const result = await invoke('working_hex_load', {
+      deviceId: device.id,
+      filePath
+    })
+    if (!result.success) {
+      showToast(result.error || 'Working HEX load failed', 'error')
+      return
+    }
+    await refresh()
+    showToast(result.message || 'Working page HEX loaded', 'success')
   } catch (error) {
     showToast(String(error), 'error')
   } finally {

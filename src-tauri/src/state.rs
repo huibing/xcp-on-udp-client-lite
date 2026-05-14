@@ -62,8 +62,12 @@ pub struct DeviceState {
     pub daq_running: Arc<RwLock<bool>>,
     pub page_mode: Arc<RwLock<PageMode>>,
     pub custom_name: Arc<RwLock<Option<String>>>,
-    /// HEX image loaded for checksum verification
+    /// Reference HEX image (user-uploaded; never modified)
     pub hex_image: Arc<RwLock<Option<HexImage>>>,
+    /// Working page HEX image (copy of reference, patched on every calibration write)
+    pub working_hex_image: Arc<RwLock<Option<HexImage>>>,
+    /// On-disk path for the working page HEX (derived from hex_path; persisted after writes)
+    pub working_hex_path: String,
     /// Filename of the loaded HEX file (display only)
     pub hex_filename: Arc<RwLock<Option<String>>>,
     /// Last checksum verification report
@@ -92,6 +96,8 @@ impl DeviceState {
             page_mode: Arc::new(RwLock::new(PageMode::Reference)),
             custom_name: Arc::new(RwLock::new(None)),
             hex_image: Arc::new(RwLock::new(None)),
+            working_hex_image: Arc::new(RwLock::new(None)),
+            working_hex_path: String::new(),
             hex_filename: Arc::new(RwLock::new(None)),
             checksum_report: Arc::new(RwLock::new(None)),
             cal_original_values: Arc::new(RwLock::new(HashMap::new())),
@@ -328,9 +334,20 @@ impl TauriAppState {
             .map_err(|e| format!("HEX parse error '{}': {}", file_path, e))?;
         let file_name = file_name_or_path(file_path);
 
+        // Derive working page HEX path (e.g. firmware.hex → firmware_working.hex)
+        let working_path = derive_working_hex_path(file_path);
+
+        // Try to load an existing working page HEX from disk; fall back to cloning reference
+        let working_hex = std::fs::read_to_string(&working_path)
+            .ok()
+            .and_then(|s| HexImage::from_str(&s).ok())
+            .unwrap_or_else(|| hex_image.clone());
+
         device.hex_path = file_path.to_string();
+        device.working_hex_path = working_path;
         futures::executor::block_on(async {
             *device.hex_image.write().await = Some(hex_image);
+            *device.working_hex_image.write().await = Some(working_hex);
             *device.hex_filename.write().await = Some(file_name);
             *device.checksum_report.write().await = None;
         });
@@ -372,6 +389,18 @@ fn file_name_or_path(path: &str) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or(path)
         .to_string()
+}
+
+/// Derive the working page HEX path from the reference HEX path.
+/// E.g. `/path/to/firmware.hex` → `/path/to/firmware_working.hex`
+pub fn derive_working_hex_path(hex_path: &str) -> String {
+    let p = Path::new(hex_path);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("firmware");
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("hex");
+    let new_name = format!("{}_{}.{}", stem, "working", ext);
+    p.with_file_name(new_name)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn convert_characteristic(

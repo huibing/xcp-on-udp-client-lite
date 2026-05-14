@@ -7,7 +7,7 @@ use tauri::{AppHandle, State};
 use xcp_client::slave::PageMode;
 
 use crate::commands::daq_live::spawn_live_daq_event_pump;
-use crate::commands::helpers::read_calibration_from_slave;
+use crate::commands::helpers::bytes_to_calibration_value;
 use crate::state::SharedState;
 
 /// Return all measurements and calibration params across all devices.
@@ -915,8 +915,8 @@ pub async fn experiment_cal_original(
     device_id: String,
     idx: usize,
 ) -> Result<Value, String> {
-    // Check if already stored
-    let (already_stored, cal_original_arc, slave_arc, param) = {
+    // Return cached value if already stored
+    let (cal_original_arc, hex_image_arc, param) = {
         let app = state.read().await;
         let dev = find_device(&app, &device_id)
             .ok_or_else(|| format!("Device '{}' not found", device_id))?;
@@ -927,17 +927,7 @@ pub async fn experiment_cal_original(
         }
         drop(originals);
 
-        if !dev.connected {
-            return Ok(json!({ "success": false, "error": "Device not connected" }));
-        }
-
-        let sid = dev
-            .slave_id
-            .ok_or_else(|| "No slave ID".to_string())?;
-        let slave_arc = app
-            .client
-            .get_slave(sid)
-            .ok_or_else(|| "Slave not found".to_string())?;
+        let page_mode = *dev.page_mode.read().await;
 
         let param = dev
             .cal_manager
@@ -948,18 +938,27 @@ pub async fn experiment_cal_original(
             .cloned()
             .ok_or_else(|| "Parameter not found".to_string())?;
 
-        (false, dev.cal_original_values.clone(), slave_arc, param)
+        let cal_original_arc = dev.cal_original_values.clone();
+
+        // Both pages read from hex: Working → working hex, Reference → reference hex
+        let hex_image_arc = match page_mode {
+            PageMode::Working => dev.working_hex_image.clone(),
+            PageMode::Reference => dev.hex_image.clone(),
+        };
+
+        (cal_original_arc, hex_image_arc, param)
     };
-    let _ = already_stored;
 
-    // Read from XCP slave (no state lock held)
-    let slave_guard = slave_arc.lock().await;
-    let value = read_calibration_from_slave(&slave_guard, &param)
-        .await
-        .map_err(|e| format!("Read failed: {}", e))?;
-    drop(slave_guard);
-
+    let hex_guard = hex_image_arc.read().await;
+    let hex = hex_guard
+        .as_ref()
+        .ok_or_else(|| "No HEX file loaded for this device".to_string())?;
+    let size = param.data_type.size() as u32;
+    let bytes = hex.extract_range(param.address, size, 0xFF);
+    let value = bytes_to_calibration_value(&bytes, &param.data_type)?;
     let formatted = value.format_scalar_str();
+    drop(hex_guard);
+
     cal_original_arc.write().await.insert(idx, formatted.clone());
 
     Ok(json!({ "success": true, "value": formatted }))

@@ -362,12 +362,14 @@ pub async fn read_calibration_from_slave(
 
 // ─── XCP slave write ──────────────────────────────────────────────────────────
 
-pub async fn write_calibration_to_slave(
-    slave: &XcpSlave,
-    param: &CalibrationParam,
+/// Convert a `CalibrationValue` to raw little-endian bytes matching `param.data_type`.
+///
+/// Used both by `write_calibration_to_slave` (for XCP DOWNLOAD) and by the
+/// working-page HEX patching code (to keep both in sync after a write).
+pub fn calibration_value_to_bytes(
     value: &CalibrationValue,
-) -> Result<(), String> {
-    let mta = Mta::new(param.address, param.address_ext);
+    param: &CalibrationParam,
+) -> Result<Vec<u8>, String> {
     let data: Vec<u8> = match (value, &param.data_type) {
         (CalibrationValue::U8(v), CalibrationType::U8) => vec![*v],
         (CalibrationValue::U16(v), CalibrationType::U16) => v.to_le_bytes().to_vec(),
@@ -465,6 +467,16 @@ pub async fn write_calibration_to_slave(
         }
         _ => return Err(format!("Value/type mismatch for '{}'", param.name)),
     };
+    Ok(data)
+}
+
+pub async fn write_calibration_to_slave(
+    slave: &XcpSlave,
+    param: &CalibrationParam,
+    value: &CalibrationValue,
+) -> Result<(), String> {
+    let mta = Mta::new(param.address, param.address_ext);
+    let data = calibration_value_to_bytes(value, param)?;
 
     if data.len() <= 255 {
         slave

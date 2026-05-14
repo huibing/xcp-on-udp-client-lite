@@ -9,9 +9,9 @@ use xcp_client::slave::PageMode;
 use xcp_client::CharacteristicType;
 
 use crate::commands::helpers::{
-    bytes_to_calibration_value, cal_value_display_string, calibration_value_to_display_json,
-    calibration_value_to_json, read_axis_values_from_hex, read_axis_values_from_slave,
-    read_calibration_from_slave, write_calibration_to_slave,
+    bytes_to_calibration_value, cal_value_display_string, calibration_value_to_bytes,
+    calibration_value_to_display_json, calibration_value_to_json, read_axis_values_from_hex,
+    read_axis_values_from_slave, write_calibration_to_slave,
 };
 use crate::state::SharedState;
 
@@ -48,7 +48,7 @@ pub async fn cal_read(
 ) -> Result<Value, String> {
     // Extract handles from state without cloning heavy data.
     // Arc clones are just refcount bumps; HexImage is NOT cloned here.
-    let (slave_arc_opt, param, hex_image_arc_opt, cal_values_arc, _dev_id) = {
+    let (param, hex_image_arc, cal_values_arc, _dev_id, source) = {
         let app = state.read().await;
         let dev = app
             .get_device(&device_id)
@@ -60,68 +60,20 @@ pub async fn cal_read(
             .ok_or_else(|| format!("Parameter index {} out of range", idx))?
             .clone();
         let cal_values_arc = dev.cal_values.clone();
+        let page_mode = *dev.page_mode.read().await;
 
-        if dev.connected {
-            let sid = dev.slave_id.ok_or_else(|| "No slave ID".to_string())?;
-            let slave_arc = app
-                .client
-                .get_slave(sid)
-                .ok_or_else(|| "Slave not found".to_string())?;
-            (Some(slave_arc), param, None, cal_values_arc, dev.id.clone())
+        // Working page → read from working hex image; Reference page → reference hex image.
+        let (hex_image_arc, source) = if matches!(page_mode, PageMode::Working) {
+            (dev.working_hex_image.clone(), "hex_working")
         } else {
-            // Offline: clone the Arc (cheap) — the HexImage data is not copied
-            (None, param, Some(dev.hex_image.clone()), cal_values_arc, dev.id.clone())
-        }
+            (dev.hex_image.clone(), "hex_reference")
+        };
+
+        (param, hex_image_arc, cal_values_arc, dev.id.clone(), source)
     };
 
-    // Online path: read via XCP
-    if let Some(slave_arc) = slave_arc_opt {
-        let xcp_guard = slave_arc.lock().await;
-        let value = read_calibration_from_slave(&*xcp_guard, &param).await?;
-        drop(xcp_guard);
-
-        cal_values_arc.write().await.insert(param.name.clone(), value.clone());
-
-        let is_enum = param.is_enum();
-        // Apply COMPU_METHOD for all scalar integer types (enum, LINEAR, IDENTICAL, …).
-        // For F32/F64 and array/matrix types, cal_value_to_raw_i64 returns None and
-        // the raw value.format() is already the physical value.
-        let raw_i64 = cal_value_to_raw_i64(&value);
-        let display_value: Option<String> =
-            raw_i64.map(|raw| param.format_value(raw));
-        tracing::debug!(
-            "cal_read [xcp] '{}': data_type={:?} is_enum={} raw_i64={:?} value_format={:?} display_value={:?}",
-            param.name,
-            param.data_type,
-            is_enum,
-            raw_i64,
-            value.format(),
-            display_value,
-        );
-        let is_1d = param.characteristic_type == CharacteristicType::Curve;
-        let display_value_arr = cal_value_display_string(&value, &param);
-        let display_value_data = calibration_value_to_display_json(&value, is_1d, &param);
-        let effective_display = display_value.or(display_value_arr);
-        tracing::debug!(
-            "cal_read [xcp] '{}': compu_method={} effective_display={:?}",
-            param.name,
-            param.compu_method.variant_name(),
-            effective_display,
-        );
-        return Ok(json!({
-            "success": true,
-            "name": param.name,
-            "value": value.format(),
-            "value_data": calibration_value_to_json(&value, is_1d),
-            "is_enum": is_enum,
-            "display_value": effective_display,
-            "display_value_data": display_value_data,
-            "source": "xcp",
-        }));
-    }
-
-    // Offline path: read from HEX image via read lock (no clone of the map)
-    if let Some(hex_image_arc) = hex_image_arc_opt {
+    // Read from the appropriate HEX image (no state lock held)
+    {
         let hex_guard = hex_image_arc.read().await;
         if let Some(hex_image) = hex_guard.as_ref() {
             let size = param.data_type.size() as u32;
@@ -169,7 +121,7 @@ pub async fn cal_read(
                 "is_enum": is_enum,
                 "display_value": effective_display,
                 "display_value_data": display_value_data,
-                "source": "hex",
+                "source": source,
             }));
         }
     }
@@ -209,7 +161,7 @@ pub async fn cal_read_all(
 
     for (device_id, positions) in &by_device {
         // Snapshot params and Arc handles. No HexImage data is cloned.
-        let (slave_arc_opt, params, hex_image_arc_opt, cache_arc) = {
+        let (params, hex_image_arc, cache_arc) = {
             let app = state.read().await;
             let dev = match app.get_device(device_id) {
                 Some(d) => d,
@@ -221,43 +173,41 @@ pub async fn cal_read_all(
                 .map(|(_, pi)| mgr.params().get(*pi).cloned())
                 .collect();
             let cache_arc = dev.cal_values.clone();
+            let page_mode = *dev.page_mode.read().await;
 
-            if dev.connected {
-                let sid = match dev.slave_id {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let slave_arc = match app.client.get_slave(sid) {
-                    Some(a) => a,
-                    None => continue,
-                };
-                (Some(slave_arc), params, None, cache_arc)
+            // Working page → working hex image; Reference page → reference hex image.
+            let hex_image_arc = if matches!(page_mode, PageMode::Working) {
+                dev.working_hex_image.clone()
             } else {
-                // Clone Arc only (cheap refcount bump; HexImage data stays in place)
-                (None, params, Some(dev.hex_image.clone()), cache_arc)
-            }
+                dev.hex_image.clone()
+            };
+
+            (params, hex_image_arc, cache_arc)
         }; // state read lock released here
 
-        if let Some(slave_arc) = slave_arc_opt {
-            // Acquire slave mutex ONCE for all reads on this device
-            let xcp_guard = slave_arc.lock().await;
-            let read_results: Vec<Result<_, String>> = {
-                let mut v = Vec::with_capacity(params.len());
-                for p in &params {
-                    match p {
-                        Some(param) => v.push(read_calibration_from_slave(&*xcp_guard, param).await),
-                        None => v.push(Err("Parameter index out of range".to_string())),
+        // Acquire a single read lock on the HexImage for all reads — no clone of the map data
+        let hex_guard = hex_image_arc.read().await;
+        if let Some(hex_image) = hex_guard.as_ref() {
+            for ((pos, _), param_opt) in positions.iter().zip(params.iter()) {
+                let param = match param_opt {
+                    Some(p) => p,
+                    None => {
+                        results[*pos] = json!({ "success": false, "error": "Parameter index out of range" });
+                        continue;
                     }
+                };
+                let size = param.data_type.size() as u32;
+                if size == 0 {
+                    results[*pos] = json!({ "success": false, "name": param.name, "error": "Unknown parameter size" });
+                    continue;
                 }
-                v
-            };
-            drop(xcp_guard); // release slave lock before touching cache
-
-            for ((pos, _), (param_opt, read_res)) in
-                positions.iter().zip(params.iter().zip(read_results.into_iter()))
-            {
-                match (param_opt, read_res) {
-                    (Some(param), Ok(value)) => {
+                let bytes = hex_image.extract_range(param.address, size, 0xFF);
+                if bytes.iter().all(|&b| b == 0xFF) && !hex_image.has_data_in_range(param.address, size) {
+                    results[*pos] = json!({ "success": false, "name": param.name, "error": "Address not found in HEX file" });
+                    continue;
+                }
+                match bytes_to_calibration_value(&bytes, &param.data_type) {
+                    Ok(value) => {
                         cache_arc.write().await.insert(param.name.clone(), value.clone());
                         results[*pos] = json!({
                             "success": true,
@@ -265,48 +215,8 @@ pub async fn cal_read_all(
                             "value": value.format(),
                         });
                     }
-                    (Some(param), Err(e)) => {
+                    Err(e) => {
                         results[*pos] = json!({ "success": false, "name": param.name, "error": e });
-                    }
-                    (None, _) => {
-                        results[*pos] = json!({ "success": false, "error": "Parameter index out of range" });
-                    }
-                }
-            }
-        } else if let Some(hex_image_arc) = hex_image_arc_opt {
-            // Acquire a single read lock on the HexImage for all reads — no clone of the map data
-            let hex_guard = hex_image_arc.read().await;
-            if let Some(hex_image) = hex_guard.as_ref() {
-                for ((pos, _), param_opt) in positions.iter().zip(params.iter()) {
-                    let param = match param_opt {
-                        Some(p) => p,
-                        None => {
-                            results[*pos] = json!({ "success": false, "error": "Parameter index out of range" });
-                            continue;
-                        }
-                    };
-                    let size = param.data_type.size() as u32;
-                    if size == 0 {
-                        results[*pos] = json!({ "success": false, "name": param.name, "error": "Unknown parameter size" });
-                        continue;
-                    }
-                    let bytes = hex_image.extract_range(param.address, size, 0xFF);
-                    if bytes.iter().all(|&b| b == 0xFF) && !hex_image.has_data_in_range(param.address, size) {
-                        results[*pos] = json!({ "success": false, "name": param.name, "error": "Address not found in HEX file" });
-                        continue;
-                    }
-                    match bytes_to_calibration_value(&bytes, &param.data_type) {
-                        Ok(value) => {
-                            cache_arc.write().await.insert(param.name.clone(), value.clone());
-                            results[*pos] = json!({
-                                "success": true,
-                                "name": param.name,
-                                "value": value.format(),
-                            });
-                        }
-                        Err(e) => {
-                            results[*pos] = json!({ "success": false, "name": param.name, "error": e });
-                        }
                     }
                 }
             }
@@ -325,7 +235,7 @@ pub async fn cal_write(
     idx: usize,
     value: Value,
 ) -> Result<Value, String> {
-    let (slave_arc, param) = {
+    let (slave_arc, param, working_hex_arc, working_hex_path) = {
         let app = state.read().await;
         let dev = app
             .get_device(&device_id)
@@ -344,7 +254,9 @@ pub async fn cal_write(
             .get(idx)
             .ok_or_else(|| format!("Parameter index {} out of range", idx))?
             .clone();
-        (slave_arc, param)
+        let working_hex_arc = dev.working_hex_image.clone();
+        let working_hex_path = dev.working_hex_path.clone();
+        (slave_arc, param, working_hex_arc, working_hex_path)
     };
 
     let cal_value = if param.is_enum() {
@@ -365,8 +277,42 @@ pub async fn cal_write(
     } else {
         parse_json_value_to_cal(&param.data_type, &value)?
     };
+
+    // Convert value to bytes once (used for both XCP write and working-hex patch)
+    let bytes = calibration_value_to_bytes(&cal_value, &param)?;
+
     let xcp_guard = slave_arc.lock().await;
     write_calibration_to_slave(&*xcp_guard, &param, &cal_value).await?;
+    drop(xcp_guard);
+
+    // Patch the working-page HEX image and persist to disk
+    let hex_str_to_save = {
+        let mut working_hex_guard = working_hex_arc.write().await;
+        if let Some(ref mut hex) = *working_hex_guard {
+            hex.add_data(param.address, &bytes);
+            tracing::debug!(
+                "cal_write: patched working hex at 0x{:08X} ({} bytes) for '{}'",
+                param.address, bytes.len(), param.name
+            );
+            if !working_hex_path.is_empty() {
+                Some(hex.to_intel_hex())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(hex_str) = hex_str_to_save {
+        let path = working_hex_path.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = std::fs::write(&path, hex_str) {
+                tracing::warn!("Failed to save working hex to '{}': {}", path, e);
+            } else {
+                tracing::debug!("Saved working hex to '{}'", path);
+            }
+        });
+    }
 
     Ok(json!({ "success": true }))
 }
@@ -381,7 +327,7 @@ pub async fn cal_write_element(
     col: usize,
     value: String,
 ) -> Result<Value, String> {
-    let (slave_arc, param) = {
+    let (slave_arc, param, working_hex_arc, working_hex_path) = {
         let app = state.read().await;
         let dev = app
             .get_device(&device_id)
@@ -400,7 +346,9 @@ pub async fn cal_write_element(
             .get(idx)
             .ok_or_else(|| format!("Parameter index {} out of range", idx))?
             .clone();
-        (slave_arc, param)
+        let working_hex_arc = dev.working_hex_image.clone();
+        let working_hex_path = dev.working_hex_path.clone();
+        (slave_arc, param, working_hex_arc, working_hex_path)
     };
 
     // Convert user string to the element's raw value, then use compu_method reverse
@@ -409,9 +357,40 @@ pub async fn cal_write_element(
     // Build an element-sized CalibrationValue pointing to element address
     let element_param = element_write_param(&param, row, col)?;
     let element_value = scalar_from_raw(raw, &element_param.data_type)?;
+    let bytes = calibration_value_to_bytes(&element_value, &element_param)?;
 
     let xcp_guard = slave_arc.lock().await;
     write_calibration_to_slave(&*xcp_guard, &element_param, &element_value).await?;
+    drop(xcp_guard);
+
+    // Patch the working-page HEX image at the element's address and persist to disk
+    let hex_str_to_save = {
+        let mut working_hex_guard = working_hex_arc.write().await;
+        if let Some(ref mut hex) = *working_hex_guard {
+            hex.add_data(element_param.address, &bytes);
+            tracing::debug!(
+                "cal_write_element: patched working hex at 0x{:08X} ({} bytes) for '{}[{},{}]'",
+                element_param.address, bytes.len(), param.name, row, col
+            );
+            if !working_hex_path.is_empty() {
+                Some(hex.to_intel_hex())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(hex_str) = hex_str_to_save {
+        let path = working_hex_path.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = std::fs::write(&path, hex_str) {
+                tracing::warn!("Failed to save working hex to '{}': {}", path, e);
+            } else {
+                tracing::debug!("Saved working hex to '{}'", path);
+            }
+        });
+    }
 
     Ok(json!({ "success": true }))
 }
@@ -542,6 +521,10 @@ pub async fn get_page_mode(state: State<'_, SharedState>) -> Result<Value, Strin
 }
 
 /// Switch working/reference page mode for a device.
+///
+/// When switching to the Working page, first verifies the working-page HEX
+/// checksum against the ECU.  If any segment fails, the switch is blocked and
+/// the caller receives `{ success: false, blocked: true, reason: "checksum_mismatch" }`.
 #[tauri::command]
 pub async fn switch_page_mode(
     state: State<'_, SharedState>,
@@ -554,7 +537,7 @@ pub async fn switch_page_mode(
         other => return Err(format!("Unknown page mode: '{}'", other)),
     };
 
-    let (slave_arc, page_mode_arc) = {
+    let (slave_arc, page_mode_arc, working_hex_arc, cal_manager_arc) = {
         let app = state.read().await;
         let dev = app
             .get_device(&device_id)
@@ -567,8 +550,69 @@ pub async fn switch_page_mode(
             .client
             .get_slave(sid)
             .ok_or_else(|| "Slave not found".to_string())?;
-        (slave_arc, dev.page_mode.clone())
-    };
+        (
+            slave_arc,
+            dev.page_mode.clone(),
+            dev.working_hex_image.clone(),
+            dev.cal_manager.clone(),
+        )
+    }; // state lock released
+
+    // Before switching to working page, verify ECU memory against working-page HEX.
+    // If the checksums don't match the switch is blocked.
+    if matches!(target, PageMode::Working) {
+        let working_hex_guard = working_hex_arc.read().await;
+        if let Some(working_hex) = working_hex_guard.as_ref() {
+            let segments = cal_manager_arc.read().await.get_memory_segments().to_vec();
+            if !segments.is_empty() {
+                let mut slave_guard = slave_arc.lock().await;
+                let report = xcp_client::checksum::verify_segments(
+                    &mut slave_guard,
+                    working_hex,
+                    &segments,
+                    None,
+                )
+                .await
+                .map_err(|e| format!("Checksum verification error: {}", e))?;
+                drop(slave_guard);
+
+                if !report.all_passed() {
+                    let segment_results: Vec<Value> = report
+                        .results
+                        .iter()
+                        .map(|s| {
+                            json!({
+                                "name": s.name,
+                                "address": format!("0x{:08X}", s.address),
+                                "size": s.size,
+                                "master_checksum": format!("0x{:08X}", s.master_checksum),
+                                "slave_checksum": format!("0x{:08X}", s.slave_checksum),
+                                "match": s.passed,
+                                "status": format!("{}", s.status),
+                            })
+                        })
+                        .collect();
+
+                    tracing::warn!(
+                        "switch_page_mode: blocked switch to Working — checksum mismatch for device '{}': {}",
+                        device_id, report.summary()
+                    );
+                    return Ok(json!({
+                        "success": false,
+                        "blocked": true,
+                        "reason": "checksum_mismatch",
+                        "error": format!(
+                            "Cannot switch to working page: working-page checksum does not match ECU memory. {}",
+                            report.summary()
+                        ),
+                        "summary": report.summary(),
+                        "segments": segment_results,
+                    }));
+                }
+            }
+        }
+        // No working hex or no segments → allow switch without verification
+    }
 
     // Use switch_all_pages which handles all segments atomically (&mut self)
     let mut slave_guard = slave_arc.lock().await;
@@ -576,6 +620,7 @@ pub async fn switch_page_mode(
         .switch_all_pages(target)
         .await
         .map_err(|e| e.to_string())?;
+    drop(slave_guard);
 
     *page_mode_arc.write().await = target;
 
