@@ -40,6 +40,9 @@
         <div class="sb-sep"></div>
         <button class="sb-btn" title="Save experiment setup to JSON" @click="saveExpSetup">🖫</button>
         <button class="sb-btn" title="Load experiment setup from JSON" @click="loadExpSetup">📂</button>
+        <button class="sb-btn" :class="{ 'sb-active': showCalHistory }"
+          :title="`Calibration History (${calHistory.length} action${calHistory.length !== 1 ? 's' : ''})`"
+          @click="showCalHistory = !showCalHistory">🕐</button>
         <div class="sb-flex"></div>
         <button class="sb-btn sb-help" title="Help & user guide" @click="showHelpModal = true">❓</button>
       </div>
@@ -189,6 +192,56 @@
               :tickColor="chartTickColor"
               @close="closeAllGraphs"
             />
+        </div>
+
+        <!-- Calibration History panel -->
+        <div class="cal-hist-panel" :class="{ expanded: showCalHistory, resizing: histResizing }"
+             :style="showCalHistory ? { height: histPanelHeight + 'px' } : {}">
+          <div class="cal-hist-resize" v-if="showCalHistory" @mousedown="startHistResize" title="Drag to resize"></div>
+          <div class="cal-hist-hdr" @click="showCalHistory = !showCalHistory">
+            <span class="cal-hist-chevron">{{ showCalHistory ? '▼' : '▲' }}</span>
+            <span class="cal-hist-title">🕐 Calibration History</span>
+            <span v-if="calHistory.length > 0" class="cal-hist-count">{{ calHistory.length }}</span>
+            <span class="cal-hist-spacer"></span>
+            <button v-if="calHistory.length > 0" class="cal-hist-clear" @click.stop="calHistory = []" title="Clear all history">✕ Clear</button>
+          </div>
+          <div v-if="showCalHistory" class="cal-hist-body">
+            <div v-if="calHistory.length === 0" class="cal-hist-empty">No calibration changes recorded yet</div>
+            <div v-for="(entry, i) in [...calHistory].reverse()" :key="i" class="hist-entry" :class="{ undone: entry.undone }">
+              <span class="hist-time">{{ formatTime(entry.ts) }}</span>
+              <span class="hist-device" :title="entry.device_name">{{ entry.device_name }}</span>
+              <span class="hist-varname" :title="entry.var_name">{{ entry.var_name }}</span>
+              <span class="hist-caltype">{{ entry.calType }}</span>
+              <template v-if="entry.kind === 'scalar'">
+                <span class="hist-change">
+                  <span class="hist-old">{{ entry.original }}</span>
+                  <span class="hist-arrow">→</span>
+                  <span class="hist-new">{{ entry.newVal }}</span>
+                </span>
+              </template>
+              <template v-else-if="entry.kind === 'element'">
+                <span class="hist-coords">
+                  <template v-if="entry.element?.is2D">
+                    [{{ entry.element.xAxisName }}={{ entry.element.xAxisVal }},
+                    {{ entry.element.yAxisName }}={{ entry.element.yAxisVal }}]
+                  </template>
+                  <template v-else>
+                    [{{ entry.element?.xAxisName || 'idx' }}={{ entry.element?.xAxisVal }}]
+                  </template>
+                </span>
+                <span class="hist-change">
+                  <span class="hist-old">{{ entry.original }}</span>
+                  <span class="hist-arrow">→</span>
+                  <span class="hist-new">{{ entry.newVal }}</span>
+                </span>
+              </template>
+              <span v-if="entry.undone" class="hist-reverted">↩ reverted</span>
+              <button v-else class="hist-undo-btn" :disabled="entry.undoLoading"
+                      @click="undoHistoryEntry(entry)" title="Revert this change">
+                {{ entry.undoLoading ? '…' : '↩ Undo' }}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -444,6 +497,7 @@
                     <input class="matrix-cell"
                       v-model="matrixData[ri][ci]"
                       :disabled="pageMode !== 'working'"
+                      @focus="captureCellFocus(ri, ci)"
                       @change="e => writeCell(ri, ci, e.target.value)" />
                   </td>
                 </tr>
@@ -902,6 +956,15 @@ const dcmTotalCount = ref(0)
 // Track which cal params were modified this session: key = "device_id:name" → {original_value, current_value}
 const changedParams = reactive({})
 
+// ── Calibration action history ─────────────────────────────────────────────
+// Each entry: {ts, device_name, var_name, calType, kind:'scalar'|'element', original, newVal, element?}
+const calHistory = ref([])
+const showCalHistory = ref(false)
+const histPanelHeight = ref(240)  // user-adjustable height in px
+const histResizing = ref(false)
+// Snapshot of cell values before user starts editing (cleared when matrix modal closes)
+const matrixCellOldValues = reactive({})
+
 // ── Save/Load state ───────────────────────────────────────────────────────────
 const showDeviceMapModal = ref(false)
 const deviceMapRows = ref([])           // [{savedId, savedName, currentDevices: []}]
@@ -1131,6 +1194,86 @@ function toast(msg, err = false) {
   toastErr.value = err
   clearTimeout(toastTimer)
   toastTimer = setTimeout(() => { toastMsg.value = '' }, 4000)
+}
+
+function formatTime(ts) {
+  return new Date(ts).toTimeString().slice(0, 8)  // HH:MM:SS
+}
+
+function captureCellFocus(ri, ci) {
+  const key = `${ri}:${ci}`
+  // Only snapshot the first time the cell is focused (before any edit in this session)
+  if (!(key in matrixCellOldValues)) {
+    matrixCellOldValues[key] = String(matrixData.value[ri]?.[ci] ?? '')
+  }
+}
+
+async function undoHistoryEntry(entry) {
+  if (entry.undoLoading || entry.undone) return
+  entry.undoLoading = true
+  try {
+    let res
+    if (entry.kind === 'scalar') {
+      res = await invoke('cal_write', {
+        deviceId: entry.deviceId,
+        idx: entry.idx,
+        value: entry.original,
+      })
+    } else {
+      res = await invoke('cal_write_element', {
+        deviceId: entry.deviceId,
+        idx: entry.idx,
+        row: entry.element.ecuRow,
+        col: entry.element.ecuCol,
+        value: entry.original,
+      })
+    }
+    if (res.success) {
+      entry.undone = true
+      // Re-read from ECU and refresh the cached display value
+      try {
+        const rr = await invoke('cal_read', { deviceId: entry.deviceId, idx: entry.idx })
+        if (rr.success) {
+          const cKey = `${entry.rawDeviceId}:${entry.idx}`
+          calValues[cKey] = rr.display_value ?? rr.value
+          // If the matrix modal is open on this parameter, update the cell too
+          if (
+            entry.kind === 'element' &&
+            matrixTarget.value?.idx === entry.idx &&
+            matrixTarget.value?.device_id === entry.rawDeviceId
+          ) {
+            const { displayRow: ri, displayCol: ci } = entry.element
+            if (matrixData.value[ri]) matrixData.value[ri][ci] = entry.original
+          }
+        }
+      } catch (_) { /* refresh failure is non-critical */ }
+    } else {
+      toast(res.error || 'Undo failed', true)
+    }
+  } catch (e) {
+    toast(String(e), true)
+  } finally {
+    entry.undoLoading = false
+  }
+}
+
+function startHistResize(e) {
+  e.preventDefault()
+  histResizing.value = true
+  const startY = e.clientY
+  const startH = histPanelHeight.value
+  function onMove(ev) {
+    // dragging up (negative delta) → increase height
+    const delta = ev.clientY - startY
+    histPanelHeight.value = Math.min(600, Math.max(80, startH - delta))
+  }
+  function onUp() {
+    histResizing.value = false
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
 }
 
 // cal device_id for commands that need config dev.id (cal_read / cal_write etc.)
@@ -1373,6 +1516,22 @@ async function saveCal() {
         original_value: originalVal != null ? String(originalVal) : '',
         current_value: calEditValue.value,
       }
+      // Append to calibration history
+      calHistory.value.push({
+        ts: Date.now(),
+        device_name: v.device_name,
+        var_name: v.name,
+        calType: v.calType || v.characteristic_type || 'VALUE',
+        kind: 'scalar',
+        original: originalVal != null ? String(originalVal) : '—',
+        newVal: calEditValue.value,
+        element: null,
+        deviceId: configId(v),
+        rawDeviceId: v.device_id,
+        idx: v.idx,
+        undoLoading: false,
+        undone: false,
+      })
       calEditMsg.value = '✓ Written successfully'
       calEditErr.value = false
       setTimeout(() => { calEditTarget.value = null }, 700)
@@ -1495,6 +1654,37 @@ async function writeCell(ri, ci, val) {
       // Mark as modified (map/curve: no simple original→new, just flag it)
       const cpKey = `${configId(v)}:${v.name}`
       changedParams[cpKey] = changedParams[cpKey] || { original_value: '', current_value: '' }
+      // Append to calibration history with coordinate and axis context
+      const cellKey = `${ri}:${ci}`
+      const oldVal = matrixCellOldValues[cellKey] ?? '?'
+      calHistory.value.push({
+        ts: Date.now(),
+        device_name: v.device_name,
+        var_name: v.name,
+        calType: v.calType || v.characteristic_type || 'VALUE',
+        kind: 'element',
+        original: oldVal,
+        newVal: val,
+        element: {
+          displayRow: ri,
+          displayCol: ci,
+          ecuRow,
+          ecuCol,
+          xAxisVal: matrixXAxisValues.value[ci] != null ? String(matrixXAxisValues.value[ci]) : String(ci),
+          yAxisVal: matrixTransposed.value && matrixYAxisValues.value[ri] != null
+            ? String(matrixYAxisValues.value[ri]) : String(ri),
+          xAxisName: matrixXAxisName.value || (matrixTransposed.value ? 'X' : 'idx'),
+          yAxisName: matrixYAxisName.value || 'Y',
+          is2D: matrixTransposed.value,
+        },
+        deviceId: configId(v),
+        rawDeviceId: v.device_id,
+        idx: v.idx,
+        undoLoading: false,
+        undone: false,
+      })
+      // Update snapshot so next edit of this cell has the correct "before" value
+      matrixCellOldValues[cellKey] = val
     } else {
       matrixMsg.value = res.error || 'Write failed'
       matrixErr.value = true
@@ -1987,6 +2177,13 @@ function loadState() {
 
 watch(tabs, saveState, { deep: true })
 watch(expTitle, saveState)
+
+// Clear per-cell old-value snapshots when the matrix modal closes
+watch(matrixTarget, (newVal) => {
+  if (!newVal) {
+    for (const key in matrixCellOldValues) delete matrixCellOldValues[key]
+  }
+})
 
 // ── Experiment JSON Save / Load ────────────────────────────────────────────────
 
@@ -2564,6 +2761,12 @@ onUnmounted(() => {
   opacity: 0.35 !important;
   cursor: not-allowed !important;
 }
+/* Active/highlighted state for sidebar toggle buttons */
+.sb-btn.sb-active {
+  background: var(--exp-hover);
+  border-color: var(--exp-border);
+  color: var(--exp-fg-bright);
+}
 
 .card-name {
   font-size: 13px;
@@ -3057,5 +3260,186 @@ onUnmounted(() => {
 .removed-tab { color: var(--exp-fg-dim4); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .removed-dev { color: #ff9944; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .removed-name { color: var(--exp-fg-bright); font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Calibration History panel ───────────────────────────────────────────── */
+.cal-hist-panel {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--exp-border);
+  max-height: 30px;
+  overflow: hidden;
+  transition: max-height 0.22s ease, height 0.22s ease;
+}
+.cal-hist-panel.expanded {
+  max-height: none;      /* let inline height: Xpx control the size */
+  overflow: hidden;
+}
+.cal-hist-panel.resizing { transition: none; }
+.cal-hist-resize {
+  flex-shrink: 0;
+  height: 5px;
+  background: transparent;
+  cursor: ns-resize;
+  border-bottom: 1px solid var(--exp-border);
+  transition: background 0.15s;
+}
+.cal-hist-resize:hover { background: var(--exp-border2); }
+
+.cal-hist-hdr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  min-height: 28px;
+  cursor: pointer;
+  user-select: none;
+  background: var(--exp-bg2);
+  flex-shrink: 0;
+  font-size: 12px;
+}
+.cal-hist-hdr:hover { background: var(--exp-hover); }
+.cal-hist-chevron { color: var(--exp-fg-dim); font-size: 9px; }
+.cal-hist-title { color: var(--exp-fg-dim2); font-weight: 600; letter-spacing: 0.5px; }
+.cal-hist-count {
+  background: var(--exp-working-bg, #1a2200);
+  color: var(--exp-fg-bright);
+  border-radius: 10px;
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+}
+.cal-hist-spacer { flex: 1; }
+.cal-hist-clear {
+  background: transparent;
+  border: 1px solid var(--exp-border);
+  color: var(--exp-fg-dim2);
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 1px 8px;
+  transition: all 0.12s;
+}
+.cal-hist-clear:hover { color: #ff4466; border-color: #ff4466; background: #1a0000; }
+
+.cal-hist-body {
+  overflow-y: auto;
+  flex: 1;
+  background: var(--exp-bg);
+}
+.cal-hist-empty {
+  color: var(--exp-fg-dim4);
+  font-size: 12px;
+  text-align: center;
+  padding: 14px;
+}
+
+.hist-entry {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: nowrap;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--exp-border);
+  overflow: hidden;
+}
+.hist-entry:hover { background: var(--exp-hover); }
+.hist-time {
+  color: var(--exp-fg-dim3);
+  font-size: 11px;
+  min-width: 60px;
+  flex-shrink: 0;
+  font-family: monospace;
+}
+.hist-device {
+  color: var(--exp-fg-dim2);
+  font-size: 11px;
+  max-width: 90px;
+  min-width: 50px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+.hist-varname {
+  color: var(--exp-fg);
+  font-weight: 600;
+  flex: 1;
+  min-width: 80px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hist-caltype {
+  color: #ffcc00;
+  font-size: 10px;
+  min-width: 44px;
+  flex-shrink: 0;
+  text-align: right;
+}
+.hist-coords {
+  color: var(--exp-fg-dim2);
+  font-size: 11px;
+  font-family: monospace;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.hist-change {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.hist-old {
+  color: #cc6644;
+  text-decoration: line-through;
+  font-family: monospace;
+  font-size: 12px;
+}
+.hist-arrow { color: var(--exp-fg-dim3); }
+.hist-new {
+  color: #55dd88;
+  font-weight: 700;
+  font-family: monospace;
+  font-size: 12px;
+}
+.hist-undo-btn {
+  margin-left: auto;
+  padding: 1px 7px;
+  font-size: 10px;
+  border: 1px solid var(--exp-border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--exp-fg-dim2);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.hist-undo-btn:hover:not(:disabled) {
+  color: #ffcc44;
+  border-color: #ffcc44;
+  background: #1a1200;
+}
+.hist-undo-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.hist-reverted {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--exp-fg-dim3);
+  font-style: italic;
+  flex-shrink: 0;
+}
+.hist-entry.undone {
+  opacity: 0.5;
+}
+.hist-entry.undone .hist-new {
+  color: var(--exp-fg-dim2);
+  font-weight: 400;
+}
 </style>
 
