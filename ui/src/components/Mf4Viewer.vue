@@ -167,13 +167,13 @@
                 class="cursor-toggle-btn"
                 :class="{ active: mf4CursorVisible }"
                 @click="toggleSingleCursor"
-                title="Single time cursor — drag to read values at a point in time"
+                title="Single time cursor — drag to read values at a point in time  [c]"
               >🕹 Cursor</button>
               <button
                 class="cursor-toggle-btn diff-cursor-btn"
                 :class="{ active: diffCursorActive }"
                 @click="toggleDiffCursor"
-                title="Difference cursor — place two cursors (A/B) to measure Δt and Δvalue"
+                title="Difference cursor — place two cursors (A/B) to measure Δt and Δvalue  [d]"
               >↔ Δ Cursor</button>
             </div>
             <button v-if="loadedSignals.length > 0" class="secondary sm" @click="clearSignals">Clear All</button>
@@ -1401,7 +1401,13 @@ function onUndoKey(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
     e.preventDefault()
     undoLast()
+    return
   }
+  // Cursor mode shortcuts — skip when typing in inputs
+  const tag = e.target?.tagName?.toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || e.ctrlKey || e.metaKey || e.altKey) return
+  if (e.key === 'c') toggleSingleCursor()
+  else if (e.key === 'd') toggleDiffCursor()
 }
 </script>
 
