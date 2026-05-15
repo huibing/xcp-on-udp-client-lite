@@ -6,8 +6,7 @@
       <div class="schart-legend">
         <span v-for="s in signals" :key="s.key" class="schart-leg-item"
               @mousedown.stop.prevent="emit('legend-drag-start', { signalKey: s.key, originalEvent: $event })"
-              title="Drag to move signal to another graph"
-              style="cursor: grab">
+              title="Drag to move signal to another graph">
           <label class="schart-leg-color-lbl" :title="`Click to change color of ${s.name}`">
             <span class="schart-leg-line" :style="{ background: s.color }"></span>
             <input
@@ -1013,6 +1012,15 @@ watch(() => props.cursorTime, v => {
   align-items: center;
   gap: 6px;
   font-size: 11px;
+  border-radius: 3px;
+  padding: 1px 3px;
+  border: 1px solid transparent;
+  transition: border-color 0.15s;
+}
+
+.schart-leg-item:hover {
+  border: 1px dashed rgba(255, 255, 255, 0.45);
+  cursor: grab;
 }
 
 .schart-leg-line {
