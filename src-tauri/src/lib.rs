@@ -97,6 +97,8 @@ pub fn run() {
             commands::mf4_viewer::mf4_open_file,
             commands::mf4_viewer::mf4_get_channel_data,
             commands::mf4_viewer::mf4_get_channel_time,
+            commands::mf4_viewer::mf4_save_config,
+            commands::mf4_viewer::mf4_load_config,
             // Experiment
             commands::experiment::experiment_variables,
             commands::experiment::experiment_events,

@@ -118,6 +118,8 @@ const props = defineProps({
   showCursor: { type: Boolean, default: false },
   /** External cursor time (seconds) for synchronized multi-chart mode. When provided, cursor syncs from parent. */
   cursorTime: { type: Number, default: null },
+  /** Per-file time offsets { [filePath]: offsetSeconds }. Added to x-axis values at render time. */
+  fileTimeOffsets: { type: Object, default: () => ({}) },
 })
 
 const emit = defineEmits(['close', 'cursor-move', 'color-change', 'zoom-x', 'zoom-y'])
@@ -222,7 +224,8 @@ function getXBounds() {
   for (const sig of props.signals) {
     const h = props.historyStore.get(sig.key)
     if (h && h.times.length > 0) {
-      const last = h.times[h.times.length - 1]
+      const offset = props.fileTimeOffsets[sig.path] ?? 0
+      const last = h.times[h.times.length - 1] + offset
       if (last > maxT) maxT = last
     }
   }
@@ -269,18 +272,22 @@ function doUpdate() {
     const h = props.historyStore.get(sig.key)
     if (!h || h.times.length === 0) { ds.data = []; return }
 
+    const offset = props.fileTimeOffsets[sig.path] ?? 0
+
     // Find slice of data in [xMin-1 … xMax+1] (1s buffer for smooth edges)
-    const startI = bsearchLeft(h.times, xMin - 1)
+    // Query in raw time space (subtract offset) then shift x values at render
+    const startI = bsearchLeft(h.times, xMin - 1 - offset)
     let endI = h.times.length
     for (let j = startI; j < h.times.length; j++) {
-      if (h.times[j] > xMax + 1) { endI = j + 1; break }
+      if (h.times[j] > xMax + 1 - offset) { endI = j + 1; break }
     }
 
-    ds.data = downsample(h.times, h.values, startI, endI, MAX_RENDER_PTS)
+    const pts = downsample(h.times, h.values, startI, endI, MAX_RENDER_PTS)
+    ds.data = offset === 0 ? pts : pts.map(p => ({ x: p.x + offset, y: p.y }))
 
     // Compute y min/max from points strictly within the visible window
     for (let j = startI; j < endI; j++) {
-      const t = h.times[j]
+      const t = h.times[j] + offset
       if (t < xMin || t > xMax) continue
       const v = h.values[j]
       if (v < yMin) yMin = v
@@ -522,14 +529,17 @@ const zoomRectStyle = computed(() => {
 function getValueAtTime(key, time) {
   const h = props.historyStore.get(key)
   if (!h || h.times.length === 0) return null
-  if (time < h.times[0] || time > h.times[h.times.length - 1]) return null
+  const sig = props.signals.find(s => s.key === key)
+  const offset = sig ? (props.fileTimeOffsets[sig.path] ?? 0) : 0
+  const rawTime = time - offset
+  if (rawTime < h.times[0] || rawTime > h.times[h.times.length - 1]) return null
   let lo = 0, hi = h.times.length - 1
   while (lo < hi) {
     const mid = (lo + hi) >> 1
-    if (h.times[mid] < time) lo = mid + 1
+    if (h.times[mid] < rawTime) lo = mid + 1
     else hi = mid
   }
-  if (lo > 0 && Math.abs(h.times[lo - 1] - time) < Math.abs(h.times[lo] - time)) lo--
+  if (lo > 0 && Math.abs(h.times[lo - 1] - rawTime) < Math.abs(h.times[lo] - rawTime)) lo--
   return h.values[lo]
 }
 
@@ -700,7 +710,12 @@ function setYZoom(min, max) {
   doUpdate()
 }
 
-defineExpose({ setYZoom })
+function getYZoom() {
+  if (yOverrideMin.value === null || yOverrideMax.value === null) return null
+  return { min: yOverrideMin.value, max: yOverrideMax.value }
+}
+
+defineExpose({ setYZoom, getYZoom })
 
 // Sync cursor from parent when in multi-chart synchronized mode
 watch(() => props.cursorTime, v => {

@@ -15,6 +15,12 @@
         <button class="secondary" @click="refreshRecordFiles" :disabled="loadingList">
           {{ loadingList ? 'Refreshing...' : '↻ Refresh List' }}
         </button>
+        <button class="secondary" @click="loadConfig" :disabled="loadingConfig" title="Load a previously saved viewer config (TOML)">
+          {{ loadingConfig ? 'Loading…' : '↑ Load Config' }}
+        </button>
+        <button class="secondary" @click="saveConfig" :disabled="savingConfig || loadedSignals.length === 0" title="Save current signals, view and zoom to a TOML file">
+          {{ savingConfig ? 'Saving…' : '↓ Save Config' }}
+        </button>
         <button @click="browseMf4File" :disabled="openingFile !== '' || loadingSignal !== ''">Open MF4…</button>
       </div>
     </div>
@@ -22,6 +28,8 @@
     <div v-if="msg" class="msg" :class="msgErr ? 'err' : ''">{{ msg }}</div>
 
     <div class="layout" :style="layoutGridStyle">
+      <!-- ── Side panels wrapper ────────────────────────────────────────── -->
+      <div class="side-panels">
       <!-- ── File list panel ─────────────────────────────────────────────── -->
       <section class="panel file-panel" :class="{ 'panel-collapsed': !filesPanelOpen }">
         <template v-if="filesPanelOpen">
@@ -61,13 +69,27 @@
                 </span>
               </span>
               <span class="file-path">{{ file.path }}</span>
+              <span class="file-offset-row" @click.stop>
+                <label class="file-offset-label" :title="`Time offset for ${file.name}: shifts all channels from this file along X axis`">
+                  <span class="file-offset-lbl-text">⏱ Offset</span>
+                  <input
+                    type="number"
+                    class="file-offset-input"
+                    :value="fileTimeOffsets[file.path] ?? 0"
+                    step="0.001"
+                    placeholder="0.000"
+                    @change="setFileOffset(file.path, $event.target.value)"
+                    @keydown.enter="setFileOffset(file.path, $event.target.value)"
+                  />
+                  <span class="file-offset-unit">s</span>
+                </label>
+              </span>
             </div>
           </div>
         </template>
 
-        <div v-else class="panel-strip" @click="filesPanelOpen = true" title="Expand Files panel">
-          <span class="panel-strip-icon">▶</span>
-          <span class="panel-strip-label">Recorded Files</span>
+        <div v-else class="panel-strip" @click="openFilesPanel()" title="Recorded Files — click to expand">
+          <span class="panel-strip-icon">▤</span>
         </div>
       </section>
 
@@ -127,11 +149,11 @@
           </div>
         </template>
 
-        <div v-else class="panel-strip" @click="channelsPanelOpen = true" title="Expand Channels panel">
-          <span class="panel-strip-icon">▶</span>
-          <span class="panel-strip-label">Channels</span>
+        <div v-else class="panel-strip" @click="openChannelsPanel()" title="Channels — click to expand">
+          <span class="panel-strip-icon">≋</span>
         </div>
       </section>
+      </div><!-- /.side-panels -->
 
       <section class="panel chart-panel">
         <div class="panel-header">
@@ -178,6 +200,7 @@
               :showWindowSlider="false"
               :showCursor="mf4CursorVisible"
               :cursorTime="sharedCursorTime"
+              :fileTimeOffsets="fileTimeOffsets"
               @cursor-move="sharedCursorTime = $event"
               @color-change="onSignalColorChange"
               @zoom-x="applyChartZoom"
@@ -288,6 +311,23 @@
     </div>
   </div>
 
+  <!-- ── Leave warning dialog ────────────────────────────────────────────── -->
+  <Teleport to="body">
+    <div v-if="showLeaveWarning" class="confirm-overlay" @click.self="cancelLeave">
+      <div class="confirm-dialog">
+        <div class="confirm-title">⚠ Unsaved State</div>
+        <div class="confirm-body">
+          You have <strong>{{ loadedSignals.length }} signal(s)</strong> loaded.
+          Navigating away will clear them — they won't be restored when you return to MF4 Viewer.
+        </div>
+        <div class="confirm-actions">
+          <button class="secondary" @click="cancelLeave">Stay</button>
+          <button class="danger" @click="confirmLeave">Leave anyway</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
   <!-- Drag ghost: floating label following the cursor during channel drag -->
   <Teleport to="body">
     <div
@@ -302,8 +342,9 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
-import { open } from '@tauri-apps/plugin-dialog'
+import { open, save as dialogSave } from '@tauri-apps/plugin-dialog'
 
 import SignalChart from './SignalChart.vue'
 import { useMf4Settings } from '../composables/useMf4Settings.js'
@@ -392,12 +433,222 @@ const filesPanelOpen = ref(true)
 const channelsPanelOpen = ref(true)
 
 const layoutGridStyle = computed(() => {
-  const col1 = filesPanelOpen.value ? 'minmax(240px, 280px)' : '36px'
-  const col2 = channelsPanelOpen.value ? 'minmax(260px, 340px)' : '36px'
-  return { gridTemplateColumns: `${col1} ${col2} minmax(420px, 1fr)` }
+  if (filesPanelOpen.value) {
+    return { gridTemplateColumns: `minmax(240px, 280px) minmax(420px, 1fr)` }
+  } else if (channelsPanelOpen.value) {
+    return { gridTemplateColumns: `minmax(260px, 340px) minmax(420px, 1fr)` }
+  } else {
+    return { gridTemplateColumns: `52px minmax(420px, 1fr)` }
+  }
 })
 
-// ── Time range selector state ─────────────────────────────────────────────────
+function openFilesPanel() {
+  channelsPanelOpen.value = false
+  filesPanelOpen.value = true
+}
+
+function openChannelsPanel() {
+  filesPanelOpen.value = false
+  channelsPanelOpen.value = true
+}
+
+// ── Navigation leave guard ────────────────────────────────────────────────────
+const router = useRouter()
+const showLeaveWarning = ref(false)
+const pendingNavigateTo = ref(null)
+const leaveConfirmed = ref(false)
+
+onBeforeRouteLeave((to) => {
+  if (loadedSignals.value.length > 0 && !leaveConfirmed.value) {
+    showLeaveWarning.value = true
+    pendingNavigateTo.value = to.fullPath
+    return false
+  }
+  leaveConfirmed.value = false
+})
+
+function confirmLeave() {
+  showLeaveWarning.value = false
+  leaveConfirmed.value = true
+  router.push(pendingNavigateTo.value)
+}
+
+function cancelLeave() {
+  showLeaveWarning.value = false
+  pendingNavigateTo.value = null
+}
+
+// ── Config save / load ────────────────────────────────────────────────────────
+const savingConfig = ref(false)
+const loadingConfig = ref(false)
+
+async function saveConfig() {
+  if (loadedSignals.value.length === 0) {
+    setMsg('Nothing to save — add some signals first.', true)
+    return
+  }
+  const filePath = await dialogSave({
+    title: 'Save MF4 Viewer Config',
+    defaultPath: 'mf4_viewer.toml',
+    filters: [{ name: 'TOML Config', extensions: ['toml'] }],
+  })
+  if (!filePath) return
+
+  savingConfig.value = true
+  try {
+    const groups = chartGroups.value.map(g => {
+      const chartRef = chartRefs.get(g.id)
+      const yZoom = chartRef?.getYZoom() ?? null
+      return {
+        id: g.id,
+        signals: g.signals.map(s => ({
+          file_path: s.path,
+          channel: s.name,
+          color: s.color,
+        })),
+        y_zoom: yZoom,  // { min, max } or null
+      }
+    })
+    const config = {
+      view: {
+        start: viewStart.value,
+        end: viewEnd.value,
+        cursor_visible: mf4CursorVisible.value,
+        cursor_time: sharedCursorTime.value ?? null,
+        active_file_path: activeFile.value?.path ?? null,
+        files_panel_open: filesPanelOpen.value,
+        channels_panel_open: channelsPanelOpen.value,
+      },
+      groups,
+      file_offsets: { ...fileTimeOffsets },
+    }
+    await invoke('mf4_save_config', { path: filePath, config })
+    setMsg(`Config saved to ${filePath}`)
+  } catch (e) {
+    setMsg(String(e), true)
+  } finally {
+    savingConfig.value = false
+  }
+}
+
+async function loadConfig() {
+  const filePath = await open({
+    title: 'Load MF4 Viewer Config',
+    filters: [{ name: 'TOML Config', extensions: ['toml'] }],
+    multiple: false,
+    directory: false,
+  })
+  if (!filePath) return
+
+  loadingConfig.value = true
+  try {
+    const config = await invoke('mf4_load_config', { path: filePath })
+
+    // Open all unique MF4 files first — register them in the files panel
+    const uniquePaths = [...new Set(config.groups.flatMap(g => g.signals.map(s => s.file_path)))]
+    const openedFileMap = new Map()  // path → mf4_open_file response
+    for (const p of uniquePaths) {
+      try {
+        const response = await invoke('mf4_open_file', { mf4Path: p })
+        upsertRecordFile(response.file)
+        openedFileMap.set(p, response)
+      } catch {
+        // File may be missing — we'll skip those signals below
+      }
+    }
+
+    // Restore active file / channels panel
+    const savedActivePath = config.view.active_file_path ?? null
+    const activeResponse = savedActivePath
+      ? (openedFileMap.get(savedActivePath) ?? openedFileMap.values().next().value ?? null)
+      : (openedFileMap.values().next().value ?? null)
+    if (activeResponse) {
+      activeFile.value = activeResponse.file
+      activeChannels.value = activeResponse.channels || []
+      activeVtabMaps.value = activeResponse.vtab_maps || {}
+      channelSearch.value = ''
+    }
+
+    // Restore panel open state
+    filesPanelOpen.value = config.view.files_panel_open ?? true
+    channelsPanelOpen.value = config.view.channels_panel_open ?? false
+    // Mutual-exclusion: only one can be open at a time
+    if (filesPanelOpen.value && channelsPanelOpen.value) {
+      channelsPanelOpen.value = false
+    }
+
+    // Rebuild chart groups from config
+    chartGroups.value = []
+    for (const g of config.groups) {
+      const signals = []
+      for (const s of g.signals) {
+        const key = signalKey(s.file_path, s.channel)
+        try {
+          const [dataBytes, timeBytes] = await Promise.all([
+            invoke('mf4_get_channel_data', { mf4Path: s.file_path, channelName: s.channel }),
+            invoke('mf4_get_channel_time', { mf4Path: s.file_path, channelName: s.channel }),
+          ])
+          const values = toFloat64Array(dataBytes)
+          const times = toFloat64Array(timeBytes)
+          if (times.length !== values.length) continue
+          historyStore.set(key, { times, values })
+          const fileName = s.file_path.split(/[\\/]/).pop() || s.file_path
+          signals.push({
+            key,
+            name: s.channel,
+            device_name: fileName,
+            color: s.color,
+            path: s.file_path,
+            vtab_map: null,
+          })
+        } catch {
+          // Signal unavailable (file missing or channel gone) — skip silently
+        }
+      }
+      if (signals.length > 0) {
+        chartGroups.value = [...chartGroups.value, { id: g.id, signals }]
+      }
+    }
+
+    // Restore view range
+    // Restore file time offsets before recomputing bounds
+    Object.keys(fileTimeOffsets).forEach(k => delete fileTimeOffsets[k])
+    if (config.file_offsets) {
+      Object.assign(fileTimeOffsets, config.file_offsets)
+    }
+
+    viewStart.value = config.view.start
+    viewEnd.value = config.view.end
+    viewStartInput.value = Number(config.view.start.toFixed(3))
+    viewEndInput.value = Number(config.view.end.toFixed(3))
+    mf4CursorVisible.value = config.view.cursor_visible
+    sharedCursorTime.value = config.view.cursor_time ?? null
+
+    // Restore Y zoom after chart refs are mounted (next tick)
+    const yZoomPending = config.groups
+      .filter(g => g.y_zoom)
+      .map(g => ({ id: g.id, min: g.y_zoom.min, max: g.y_zoom.max }))
+    if (yZoomPending.length > 0) {
+      setTimeout(() => {
+        for (const { id, min, max } of yZoomPending) {
+          const ref = chartRefs.get(id)
+          if (ref) ref.setYZoom(min, max)
+        }
+      }, 100)
+    }
+
+    const total = config.groups.reduce((n, g) => n + g.signals.length, 0)
+    const loaded = loadedSignals.value.length
+    setMsg(`Config loaded: ${loaded} of ${total} signal(s) restored.`)
+  } catch (e) {
+    setMsg(String(e), true)
+  } finally {
+    loadingConfig.value = false
+  }
+}
+
+// ── Per-file time offsets ─────────────────────────────────────────────────────
+const fileTimeOffsets = reactive({})  // { [filePath]: offsetSeconds }
 const dataTimeMin = ref(0)
 const dataTimeMax = ref(1)
 const viewStart = ref(0)
@@ -451,9 +702,11 @@ function recomputeTimeBounds() {
   for (const sig of loadedSignals.value) {
     const h = historyStore.get(sig.key)
     if (h && h.times.length > 0) {
-      if (h.times[0] < min) min = h.times[0]
-      const last = h.times[h.times.length - 1]
-      if (last > max) max = last
+      const offset = fileTimeOffsets[sig.path] ?? 0
+      const tFirst = h.times[0] + offset
+      const tLast = h.times[h.times.length - 1] + offset
+      if (tFirst < min) min = tFirst
+      if (tLast > max) max = tLast
     }
   }
   const newMin = Number.isFinite(min) ? min : 0
@@ -664,6 +917,30 @@ const chartTickColor = computed(() => {
   if (theme.value === 'blue') return '#8fadc8'
   return '#00aa33'
 })
+
+function setFileOffset(filePath, rawValue) {
+  const offset = parseFloat(rawValue)
+  if (!Number.isFinite(offset)) return
+  // Find the max raw time for this file across all loaded signals from it
+  let maxRawTime = 0
+  for (const sig of loadedSignals.value) {
+    if (sig.path !== filePath) continue
+    const h = historyStore.get(sig.key)
+    if (h && h.times.length > 0) {
+      const last = h.times[h.times.length - 1]
+      if (last > maxRawTime) maxRawTime = last
+    }
+  }
+  // Negative offset must not push the last sample below t=0
+  const clamped = maxRawTime > 0 ? Math.max(-maxRawTime, offset) : offset
+  if (clamped === 0) {
+    delete fileTimeOffsets[filePath]
+  } else {
+    fileTimeOffsets[filePath] = clamped
+  }
+  recomputeTimeBounds()
+}
+
 
 function setMsg(text, err = false) {
   msg.value = text
@@ -1120,6 +1397,54 @@ function onUndoKey(e) {
   align-items: start;
 }
 
+/* ── Side panels wrapper ─────────────────────────────────────────── */
+.side-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Override global panel min-height for panels inside the side wrapper */
+.side-panels .panel {
+  min-height: 0;
+}
+
+/* An expanded side panel gets the full tall height */
+.side-panels .file-panel:not(.panel-collapsed),
+.side-panels .channel-panel:not(.panel-collapsed) {
+  flex: 1 1 auto;
+  min-height: 620px;
+}
+
+/* Collapsed panel inside side-panels: compact horizontal bar */
+.side-panels .panel-collapsed {
+  flex: 0 0 auto;
+  min-height: 0;
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+/* Strip inside side-panels: horizontal bar, icon centred, no rotated text */
+.side-panels .panel-strip {
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  gap: 0;
+}
+
+.side-panels .panel-strip-icon {
+  font-size: 1.25rem;
+  color: var(--exp-fg-dim, #556644);
+}
+
+.side-panels .panel-strip:hover .panel-strip-icon {
+  color: var(--exp-fg-bright, #00ff66);
+}
+
 .panel,
 .stats-card {
   background: var(--exp-bg3, #0d0d0d);
@@ -1132,7 +1457,7 @@ function onUndoKey(e) {
   min-height: 620px;
 }
 
-/* Collapsed sidebar strip */
+/* Collapsed sidebar strip — global defaults (overridden inside .side-panels) */
 .panel-collapsed {
   padding: 0;
   min-height: 200px;
@@ -1326,6 +1651,48 @@ function onUndoKey(e) {
 
 .file-path {
   word-break: break-all;
+}
+
+.file-offset-row {
+  display: flex;
+  align-items: center;
+  padding: 3px 0 1px;
+  border-top: 1px solid var(--exp-border, #003311);
+  margin-top: 3px;
+}
+
+.file-offset-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  color: var(--exp-fg-dim, #556644);
+  width: 100%;
+}
+
+.file-offset-lbl-text {
+  flex-shrink: 0;
+}
+
+.file-offset-input {
+  width: 80px;
+  background: var(--exp-bg2, #060606);
+  color: var(--exp-fg, #00cc44);
+  border: 1px solid var(--exp-border, #003311);
+  border-radius: 3px;
+  padding: 2px 5px;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 0.78rem;
+  outline: none;
+}
+
+.file-offset-input:focus {
+  border-color: var(--exp-fg-bright, #00ff66);
+}
+
+.file-offset-unit {
+  flex-shrink: 0;
+  color: var(--exp-fg-dim, #556644);
 }
 
 .channel-search,
@@ -1679,11 +2046,82 @@ button.sm {
 
 @media (max-width: 1400px) {
   .layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr !important;
+  }
+
+  .side-panels {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .side-panels .file-panel:not(.panel-collapsed),
+  .side-panels .channel-panel:not(.panel-collapsed) {
+    min-height: auto;
   }
 
   .panel {
     min-height: auto;
   }
+}
+
+/* ── Leave warning dialog ────────────────────────────────────────────────── */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.confirm-dialog {
+  background: var(--exp-bg3, #0d0d0d);
+  border: 1px solid var(--exp-border, #003311);
+  border-radius: 6px;
+  padding: 24px;
+  max-width: 440px;
+  width: 90vw;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.confirm-title {
+  color: #ffcc00;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.confirm-body {
+  color: var(--exp-fg, #00cc44);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.confirm-body strong {
+  color: var(--exp-fg-bright, #00ff66);
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+button.danger {
+  background: #3a0011;
+  border: 1px solid #880033;
+  color: #ff4466;
+  padding: 5px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+button.danger:hover {
+  background: #550022;
+  border-color: #cc0044;
+  color: #ff6688;
 }
 </style>

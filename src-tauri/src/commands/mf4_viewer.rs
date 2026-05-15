@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use mf4_parse::components::cc::conversion::{CcType, TextOrScale};
 use mf4_parse::{DataValue, Mf4Wrapper};
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use tauri::ipc::Response;
@@ -252,6 +253,74 @@ pub fn mf4_get_channel_time(
         }
     };
     Ok(Response::new(f64_values_to_le_bytes(&values)))
+}
+
+// ── Viewer config save / load ─────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Mf4ViewerConfig {
+    pub view: ViewConfig,
+    pub groups: Vec<ChartGroupConfig>,
+    #[serde(default)]
+    pub file_offsets: HashMap<String, f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ViewConfig {
+    pub start: f64,
+    pub end: f64,
+    pub cursor_visible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_time: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_file_path: Option<String>,
+    #[serde(default = "default_true")]
+    pub files_panel_open: bool,
+    #[serde(default)]
+    pub channels_panel_open: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChartGroupConfig {
+    pub id: String,
+    pub signals: Vec<SignalConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y_zoom: Option<YZoomConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignalConfig {
+    pub file_path: String,
+    pub channel: String,
+    pub color: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct YZoomConfig {
+    pub min: f64,
+    pub max: f64,
+}
+
+#[tauri::command]
+pub async fn mf4_save_config(path: String, config: Mf4ViewerConfig) -> Result<(), String> {
+    let toml_str = toml::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialise config: {}", e))?;
+    std::fs::write(&path, toml_str)
+        .map_err(|e| format!("Failed to write config file '{}': {}", path, e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mf4_load_config(path: String) -> Result<Mf4ViewerConfig, String> {
+    let toml_str = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read config file '{}': {}", path, e))?;
+    let config: Mf4ViewerConfig = toml::from_str(&toml_str)
+        .map_err(|e| format!("Failed to parse config file: {}", e))?;
+    Ok(config)
 }
 
 #[cfg(test)]
