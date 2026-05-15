@@ -565,14 +565,20 @@ async function loadConfig() {
     // Open all unique MF4 files first — register them in the files panel
     const uniquePaths = [...new Set(config.groups.flatMap(g => g.signals.map(s => s.file_path)))]
     const openedFileMap = new Map()  // path → mf4_open_file response
+    const missingPaths = []
     for (const p of uniquePaths) {
       try {
         const response = await invoke('mf4_open_file', { mf4Path: p })
         upsertRecordFile(response.file)
         openedFileMap.set(p, response)
       } catch {
-        // File may be missing — we'll skip those signals below
+        missingPaths.push(p)
       }
+    }
+    if (missingPaths.length > 0) {
+      const names = missingPaths.map(p => p.split(/[\\/]/).pop()).join(', ')
+      setMsg(`Warning: ${missingPaths.length} file(s) not found and skipped: ${names}`, true)
+      await new Promise(r => setTimeout(r, 2500))
     }
 
     // Restore active file / channels panel
@@ -662,7 +668,11 @@ async function loadConfig() {
 
     const total = config.groups.reduce((n, g) => n + g.signals.length, 0)
     const loaded = loadedSignals.value.length
-    setMsg(`Config loaded: ${loaded} of ${total} signal(s) restored.`)
+    if (missingPaths.length > 0) {
+      setMsg(`Config loaded: ${loaded} of ${total} signal(s) restored. (${missingPaths.length} file(s) missing)`, true)
+    } else {
+      setMsg(`Config loaded: ${loaded} of ${total} signal(s) restored.`)
+    }
   } catch (e) {
     setMsg(String(e), true)
   } finally {
