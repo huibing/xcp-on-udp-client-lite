@@ -1019,8 +1019,9 @@ watch(() => props.cursorTime, v => {
 }
 
 .schart-leg-item:hover {
-  border: 1px dashed rgba(255, 255, 255, 0.45);
+  border: 2px dashed rgb(240, 48, 15);
   cursor: grab;
+  transform: translateY(-1px) translateX(-1px);
 }
 
 .schart-leg-line {

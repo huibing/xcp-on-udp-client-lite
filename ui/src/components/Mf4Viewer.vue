@@ -134,14 +134,14 @@
               </span>
               <button
                 class="sm"
-                :disabled="loadingSignal === signalKey(activeFile.path, channel) || loadedSignalKeys.has(signalKey(activeFile.path, channel))"
+                :disabled="loadingSignal === signalKey(activeFile.path, channel)"
                 @click="addSignal(channel)"
               >
                 {{
-                  loadedSignalKeys.has(signalKey(activeFile.path, channel))
-                    ? 'Loaded'
-                    : loadingSignal === signalKey(activeFile.path, channel)
-                      ? 'Loading…'
+                  loadingSignal === signalKey(activeFile.path, channel)
+                    ? 'Loading…'
+                    : loadedSignalKeys.has(signalKey(activeFile.path, channel))
+                      ? 'Add +'
                       : 'Add'
                 }}
               </button>
@@ -159,7 +159,7 @@
         <div class="panel-header">
           <div>
             <h2>Signal Graph</h2>
-            <div class="panel-meta">{{ loadedSignals.length }} loaded signal(s)</div>
+            <div class="panel-meta">{{ loadedSignalKeys.size }} loaded signal(s)</div>
           </div>
           <div class="graph-header-right">
             <div class="cursor-btn-group">
@@ -329,7 +329,7 @@
       <div class="confirm-dialog">
         <div class="confirm-title">⚠ Unsaved State</div>
         <div class="confirm-body">
-          You have <strong>{{ loadedSignals.length }} signal(s)</strong> loaded.
+          You have <strong>{{ loadedSignalKeys.size }} signal(s)</strong> loaded.
           Navigating away will clear them — they won't be restored when you return to MF4 Viewer.
         </div>
         <div class="confirm-actions">
@@ -891,7 +891,15 @@ const filteredChannels = computed(() => {
   return activeChannels.value.filter(channel => channel.toLowerCase().includes(search))
 })
 
-const loadedSignalRows = computed(() => loadedSignals.value.map(signal => {
+const loadedSignalRows = computed(() => {
+  // Deduplicate by key — show each unique signal once in the stats table
+  const seen = new Set()
+  const unique = loadedSignals.value.filter(s => {
+    if (seen.has(s.key)) return false
+    seen.add(s.key)
+    return true
+  })
+  return unique.map(signal => {
   const history = historyStore.get(signal.key)
   const values = history?.values ?? []
   const count = values.length ?? 0
@@ -937,7 +945,8 @@ const loadedSignalRows = computed(() => loadedSignals.value.map(signal => {
     max: vtab ? fmtEnum(max) : formatValue(max),
     latest: vtab ? fmtEnum(values[values.length - 1]) : formatValue(values[values.length - 1]),
   }
-}))
+})
+})
 
 const chartGridColor = computed(() => {
   if (theme.value === 'light') return 'rgba(0,0,0,0.1)'
@@ -1108,8 +1117,23 @@ async function browseMf4File() {
 async function addSignal(channelName, targetGroupId = null) {
   if (!activeFile.value) return
   const key = signalKey(activeFile.value.path, channelName)
-  if (loadedSignalKeys.value.has(key)) {
-    setMsg(`'${channelName}' is already loaded`, false)
+
+  // If data is already in historyStore, add a copy to the chart without re-fetching
+  if (historyStore.has(key)) {
+    const existingSig = loadedSignals.value.find(s => s.key === key)
+    if (!existingSig) return
+    const sigObj = { ...existingSig }
+    if (targetGroupId !== null) {
+      const group = chartGroups.value.find(g => g.id === targetGroupId)
+      if (group) {
+        group.signals = [...group.signals, sigObj]
+        pushUndo({ type: 'add-signal', key, groupId: targetGroupId })
+      }
+    } else {
+      const newGroupId = crypto.randomUUID()
+      chartGroups.value = [...chartGroups.value, { id: newGroupId, signals: [sigObj] }]
+      pushUndo({ type: 'add-signal', key, groupId: newGroupId })
+    }
     return
   }
 
@@ -1316,8 +1340,16 @@ async function onDropOnGroup(groupId, drag) {
   const { channel, file } = drag
   if (!file) return
   const key = signalKey(file.path, channel)
-  if (loadedSignalKeys.value.has(key)) {
-    setMsg(`'${channel}' is already loaded`, false)
+
+  // If data is already in historyStore, add a copy without re-fetching
+  if (historyStore.has(key)) {
+    const existingSig = loadedSignals.value.find(s => s.key === key)
+    if (!existingSig) return
+    const group = chartGroups.value.find(g => g.id === groupId)
+    if (group) {
+      group.signals = [...group.signals, { ...existingSig }]
+      pushUndo({ type: 'add-signal', key, groupId })
+    }
     return
   }
 
@@ -1418,10 +1450,8 @@ function onMoveSignalToGroup(signalKey, fromGroupId, toGroupId) {
     chartRefs.delete(fromGroupId)
   }
 
-  // Add to target group (guard against duplicate)
-  if (!toGroup.signals.some(s => s.key === signalKey)) {
-    toGroup.signals = [...toGroup.signals, sig]
-  }
+  // Add to target group (move operation — always add)
+  toGroup.signals = [...toGroup.signals, sig]
 }
 
 watch(() => mf4Dir.value, () => {
