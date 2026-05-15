@@ -216,6 +216,7 @@
               @color-change="onSignalColorChange"
               @zoom-x="applyChartZoom"
               @zoom-y="onChartZoomY(group.id, $event)"
+              @legend-drag-start="onLegendDragStart"
               @close="removeGroup(group.id)"
             />
           </div>
@@ -1251,6 +1252,7 @@ function clearSignals() {
 
 // ── Mouse-based drag handlers (replaces unreliable HTML5 drag API in Tauri) ───
 const dragGhost = ref(null)   // { channel, x, y } | null — ghost follows cursor
+const draggingSignal = ref(null)  // { key, name, color, sourceGroupId } | null — legend move drag
 let _mouseMoveHandler = null
 let _mouseUpHandler = null
 
@@ -1339,6 +1341,76 @@ async function onDropOnGroup(groupId, drag) {
     setMsg(String(error), true)
   } finally {
     loadingSignal.value = ''
+  }
+}
+
+// ── Signal legend drag-to-move ─────────────────────────────────────────────────
+function onLegendDragStart({ signalKey, originalEvent }) {
+  if (originalEvent.button !== 0) return
+
+  const sourceGroup = chartGroups.value.find(g => g.signals.some(s => s.key === signalKey))
+  if (!sourceGroup) return
+  const sig = sourceGroup.signals.find(s => s.key === signalKey)
+
+  const startX = originalEvent.clientX
+  const startY = originalEvent.clientY
+  let isDragging = false
+
+  const onMove = (e) => {
+    const dx = e.clientX - startX
+    const dy = e.clientY - startY
+    if (!isDragging && Math.sqrt(dx * dx + dy * dy) > 6) {
+      isDragging = true
+      draggingSignal.value = { key: signalKey, name: sig.name, color: sig.color, sourceGroupId: sourceGroup.id }
+    }
+    if (!isDragging) return
+
+    dragGhost.value = { channel: sig.name, x: e.clientX + 14, y: e.clientY - 14 }
+
+    const els = document.elementsFromPoint(e.clientX, e.clientY)
+    const wrap = els.find(el => el.dataset && el.dataset.groupId)
+    dragOverGroupId.value = wrap ? wrap.dataset.groupId : null
+  }
+
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+
+    const drag = draggingSignal.value
+    const targetGroupId = dragOverGroupId.value
+    dragGhost.value = null
+    draggingSignal.value = null
+    dragOverGroupId.value = null
+
+    if (!isDragging || !drag || !targetGroupId) return
+    if (targetGroupId === drag.sourceGroupId) return  // dropped on same graph — no-op
+    onMoveSignalToGroup(drag.key, drag.sourceGroupId, targetGroupId)
+  }
+
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
+function onMoveSignalToGroup(signalKey, fromGroupId, toGroupId) {
+  const fromGroup = chartGroups.value.find(g => g.id === fromGroupId)
+  const toGroup = chartGroups.value.find(g => g.id === toGroupId)
+  if (!fromGroup || !toGroup) return
+
+  const sig = fromGroup.signals.find(s => s.key === signalKey)
+  if (!sig) return
+
+  // Remove signal from source group
+  fromGroup.signals = fromGroup.signals.filter(s => s.key !== signalKey)
+
+  // Remove source group if now empty
+  if (fromGroup.signals.length === 0) {
+    chartGroups.value = chartGroups.value.filter(g => g.id !== fromGroupId)
+    chartRefs.delete(fromGroupId)
+  }
+
+  // Add to target group (guard against duplicate)
+  if (!toGroup.signals.some(s => s.key === signalKey)) {
+    toGroup.signals = [...toGroup.signals, sig]
   }
 }
 

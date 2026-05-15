@@ -4,7 +4,10 @@
     <div class="schart-header">
       <span class="schart-title">📈 Graph</span>
       <div class="schart-legend">
-        <span v-for="s in signals" :key="s.key" class="schart-leg-item">
+        <span v-for="s in signals" :key="s.key" class="schart-leg-item"
+              @mousedown.stop.prevent="emit('legend-drag-start', { signalKey: s.key, originalEvent: $event })"
+              title="Drag to move signal to another graph"
+              style="cursor: grab">
           <label class="schart-leg-color-lbl" :title="`Click to change color of ${s.name}`">
             <span class="schart-leg-line" :style="{ background: s.color }"></span>
             <input
@@ -159,7 +162,7 @@ const props = defineProps({
   cursorBTime: { type: Number, default: null },
 })
 
-const emit = defineEmits(['close', 'cursor-move', 'cursor-a-move', 'cursor-b-move', 'color-change', 'zoom-x', 'zoom-y'])
+const emit = defineEmits(['close', 'cursor-move', 'cursor-a-move', 'cursor-b-move', 'color-change', 'zoom-x', 'zoom-y', 'legend-drag-start'])
 const canvasEl = ref(null)
 
 const windowIdx = ref((() => {
