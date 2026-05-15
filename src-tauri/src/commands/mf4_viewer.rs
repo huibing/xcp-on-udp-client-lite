@@ -278,6 +278,12 @@ pub struct ViewConfig {
     pub files_panel_open: bool,
     #[serde(default)]
     pub channels_panel_open: bool,
+    #[serde(default)]
+    pub diff_cursor_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_cursor_a_time: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_cursor_b_time: Option<f64>,
 }
 
 fn default_true() -> bool {

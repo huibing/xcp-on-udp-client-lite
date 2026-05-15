@@ -532,6 +532,9 @@ async function saveConfig() {
         active_file_path: activeFile.value?.path ?? null,
         files_panel_open: filesPanelOpen.value,
         channels_panel_open: channelsPanelOpen.value,
+        diff_cursor_active: diffCursorActive.value,
+        diff_cursor_a_time: diffCursorATime.value ?? null,
+        diff_cursor_b_time: diffCursorBTime.value ?? null,
       },
       groups,
       file_offsets: { ...fileTimeOffsets },
@@ -637,6 +640,11 @@ async function loadConfig() {
     viewEndInput.value = Number(config.view.end.toFixed(3))
     mf4CursorVisible.value = config.view.cursor_visible
     sharedCursorTime.value = config.view.cursor_time ?? null
+    diffCursorActive.value = config.view.diff_cursor_active ?? false
+    diffCursorATime.value = config.view.diff_cursor_a_time ?? null
+    diffCursorBTime.value = config.view.diff_cursor_b_time ?? null
+    // Mutual exclusion guard
+    if (diffCursorActive.value) mf4CursorVisible.value = false
 
     // Restore Y zoom after chart refs are mounted (next tick)
     const yZoomPending = config.groups
