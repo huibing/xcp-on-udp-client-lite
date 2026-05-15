@@ -37,7 +37,7 @@
         <span v-if="zoomAxis" class="schart-zoom-axis-label">{{ zoomAxis === 'x' ? '↔ X zoom' : '↕ Y zoom' }}</span>
       </div>
       <!-- Draggable time cursor (MF4 viewer mode) -->
-      <div v-if="showCursor"
+      <div v-if="showCursor && !showDiffCursor"
            class="schart-cursor-overlay"
            ref="cursorOverlayEl">
         <div class="schart-cursor-line" :style="cursorLineStyle"></div>
@@ -47,6 +47,37 @@
             <span class="schart-cursor-swatch" :style="{ background: v.color }"></span>
             <span class="schart-cursor-name">{{ v.name }}</span>
             <span class="schart-cursor-num">{{ v.display }}</span>
+          </div>
+        </div>
+      </div>
+      <!-- Diff cursor overlay (cursors A + B with Δt / Δvalue panel) -->
+      <div v-if="showDiffCursor" class="schart-cursor-overlay">
+        <!-- Cursor A line (amber) -->
+        <div class="schart-diff-cursor-line schart-diff-cursor-a" :style="cursorALineStyle">
+          <span class="schart-diff-cursor-label">A</span>
+        </div>
+        <!-- Cursor B line (cyan) -->
+        <div class="schart-diff-cursor-line schart-diff-cursor-b" :style="cursorBLineStyle">
+          <span class="schart-diff-cursor-label schart-diff-cursor-label-b">B</span>
+        </div>
+        <!-- Δ panel -->
+        <div v-if="localCursorATime !== null || localCursorBTime !== null"
+             class="schart-diff-panel"
+             :style="diffPanelStyle">
+          <div class="schart-diff-times">
+            <span class="schart-diff-label-a">A:</span>
+            <span class="schart-diff-time-a">{{ localCursorATime !== null ? localCursorATime.toFixed(4) + ' s' : '—' }}</span>
+            <span class="schart-diff-label-b">B:</span>
+            <span class="schart-diff-time-b">{{ localCursorBTime !== null ? localCursorBTime.toFixed(4) + ' s' : '—' }}</span>
+            <span v-if="deltaT !== null" class="schart-diff-dt">Δt&nbsp;{{ (deltaT >= 0 ? '+' : '') + deltaT.toFixed(4) }} s</span>
+          </div>
+          <div v-for="dv in diffValues" :key="dv.key" class="schart-diff-sig-row">
+            <span class="schart-diff-swatch" :style="{ background: dv.color }"></span>
+            <span class="schart-diff-sig-name">{{ dv.name }}</span>
+            <span class="schart-diff-val-a">{{ dv.aDisplay }}</span>
+            <span class="schart-diff-val-b">{{ dv.bDisplay }}</span>
+            <span class="schart-diff-val-delta"
+                  :class="{ positive: dv.dval > 0, negative: dv.dval < 0 }">{{ dv.deltaDisplay }}</span>
           </div>
         </div>
       </div>
@@ -120,9 +151,15 @@ const props = defineProps({
   cursorTime: { type: Number, default: null },
   /** Per-file time offsets { [filePath]: offsetSeconds }. Added to x-axis values at render time. */
   fileTimeOffsets: { type: Object, default: () => ({}) },
+  /** Show difference cursor mode (two draggable cursors A/B). Mutually exclusive with showCursor. */
+  showDiffCursor: { type: Boolean, default: false },
+  /** External cursor A time (seconds) for synchronized multi-chart diff mode. */
+  cursorATime: { type: Number, default: null },
+  /** External cursor B time (seconds) for synchronized multi-chart diff mode. */
+  cursorBTime: { type: Number, default: null },
 })
 
-const emit = defineEmits(['close', 'cursor-move', 'color-change', 'zoom-x', 'zoom-y'])
+const emit = defineEmits(['close', 'cursor-move', 'cursor-a-move', 'cursor-b-move', 'color-change', 'zoom-x', 'zoom-y'])
 const canvasEl = ref(null)
 
 const windowIdx = ref((() => {
@@ -160,19 +197,42 @@ const chartXRange = ref({ min: 0, max: 1 })
 const chartPlotArea = ref({ left: 0, right: 1, top: 0, bottom: 1 })
 const nearCursor = ref(false)      // mouse is within grab distance of the time cursor
 const cursorDragging = ref(false)  // time cursor drag in progress
+// ── Diff cursor state ─────────────────────────────────────────────────────────
+const localCursorATime = ref(null)
+const localCursorBTime = ref(null)
+const cursorAPx = ref(null)
+const cursorBPx = ref(null)
+const nearCursorA = ref(false)
+const nearCursorB = ref(false)
+const activeDiffCursor = ref(null)  // null | 'a' | 'b' — which diff cursor is being dragged
+const nextDiffClick = ref('a')      // 'a' | 'b' — which diff cursor to place on next plain click
 
 const canvasWrapCursor = computed(() => {
+  if (props.showDiffCursor) {
+    if (nearCursorA.value || nearCursorB.value) return activeDiffCursor.value ? 'grabbing' : 'grab'
+    return 'crosshair'
+  }
   if (props.showCursor && nearCursor.value) return cursorDragging.value ? 'grabbing' : 'grab'
   return 'crosshair'
 })
 
 function onWrapMouseMove(e) {
-  if (!props.showCursor || cursorPx.value === null || !canvasWrapEl.value) {
-    nearCursor.value = false
+  if (!canvasWrapEl.value) {
+    nearCursor.value = nearCursorA.value = nearCursorB.value = false
     return
   }
   const rect = canvasWrapEl.value.getBoundingClientRect()
-  nearCursor.value = Math.abs(e.clientX - rect.left - cursorPx.value) <= 8
+  const px = e.clientX - rect.left
+  if (props.showDiffCursor) {
+    nearCursorA.value = cursorAPx.value !== null && Math.abs(px - cursorAPx.value) <= 8
+    nearCursorB.value = cursorBPx.value !== null && Math.abs(px - cursorBPx.value) <= 8
+    nearCursor.value = false
+  } else if (props.showCursor && cursorPx.value !== null) {
+    nearCursor.value = Math.abs(px - cursorPx.value) <= 8
+    nearCursorA.value = nearCursorB.value = false
+  } else {
+    nearCursor.value = nearCursorA.value = nearCursorB.value = false
+  }
 }
 
 // ── Zoom state ────────────────────────────────────────────────────────────────
@@ -320,6 +380,8 @@ function doUpdate() {
   chartXRange.value = { min: chart.scales.x.min, max: chart.scales.x.max }
   chartPlotArea.value = { ...chart.chartArea }
   _refreshCursorPx()
+  _refreshCursorAPx()
+  _refreshCursorBPx()
 }
 
 /** Resolve a raw numeric value to vtab text for a given signal key */
@@ -396,6 +458,43 @@ function _refreshCursorPx() {
   cursorPx.value = (pct >= 0 && pct <= 1) ? ca.left + pct * (ca.right - ca.left) : null
 }
 
+function _refreshCursorAPx() {
+  if (localCursorATime.value === null) { cursorAPx.value = null; return }
+  const { ca, xMin, xMax } = _liveChartArea()
+  const span = xMax - xMin
+  if (span <= 0) { cursorAPx.value = null; return }
+  const pct = (localCursorATime.value - xMin) / span
+  cursorAPx.value = (pct >= 0 && pct <= 1) ? ca.left + pct * (ca.right - ca.left) : null
+}
+
+function _refreshCursorBPx() {
+  if (localCursorBTime.value === null) { cursorBPx.value = null; return }
+  const { ca, xMin, xMax } = _liveChartArea()
+  const span = xMax - xMin
+  if (span <= 0) { cursorBPx.value = null; return }
+  const pct = (localCursorBTime.value - xMin) / span
+  cursorBPx.value = (pct >= 0 && pct <= 1) ? ca.left + pct * (ca.right - ca.left) : null
+}
+
+/** Place diff cursor A or B at a client-space X coordinate */
+function _placeDiffCursorAt(clientX, which) {
+  const rect = canvasWrapEl.value?.getBoundingClientRect()
+  if (!rect || !chart) return
+  const px = clientX - rect.left
+  const { ca, xMin, xMax } = _liveChartArea()
+  const clamped = Math.max(ca.left, Math.min(ca.right, px))
+  const time = _pixelToTime(clamped, ca, xMin, xMax)
+  if (which === 'a') {
+    cursorAPx.value = clamped
+    localCursorATime.value = time
+    emit('cursor-a-move', time)
+  } else {
+    cursorBPx.value = clamped
+    localCursorBTime.value = time
+    emit('cursor-b-move', time)
+  }
+}
+
 /** Place cursor at a client-space X coordinate */
 function _placeCursorAt(clientX) {
   const rect = canvasWrapEl.value?.getBoundingClientRect()
@@ -420,10 +519,34 @@ function onCanvasDown(e) {
 
   const wrapRect = canvasWrapEl.value.getBoundingClientRect()
   const clickX = e.clientX - wrapRect.left
-  const isNearCursor = props.showCursor && cursorPx.value !== null && Math.abs(clickX - cursorPx.value) <= 8
 
+  // ── Diff cursor drag (when diff mode is active) ────────────────────────────
+  if (props.showDiffCursor) {
+    const nearA = cursorAPx.value !== null && Math.abs(clickX - cursorAPx.value) <= 8
+    const nearB = cursorBPx.value !== null && Math.abs(clickX - cursorBPx.value) <= 8
+    if (nearA || nearB) {
+      // If overlapping, prefer A
+      const which = nearA ? 'a' : 'b'
+      activeDiffCursor.value = which
+      document.documentElement.style.cursor = 'grabbing'
+      _placeDiffCursorAt(e.clientX, which)
+      function onMoveDiff(e) { if (activeDiffCursor.value) _placeDiffCursorAt(e.clientX, which) }
+      function onUpDiff() {
+        activeDiffCursor.value = null
+        document.documentElement.style.cursor = ''
+        document.removeEventListener('mousemove', onMoveDiff)
+        document.removeEventListener('mouseup', onUpDiff)
+      }
+      document.addEventListener('mousemove', onMoveDiff)
+      document.addEventListener('mouseup', onUpDiff)
+      return
+    }
+    // Not near any diff cursor line — fall through to zoom/click
+  }
+
+  // ── Single cursor drag ─────────────────────────────────────────────────────
+  const isNearCursor = props.showCursor && cursorPx.value !== null && Math.abs(clickX - cursorPx.value) <= 8
   if (isNearCursor) {
-    // ── Cursor-drag mode (only when cursor visible) ─────────────────────────
     cursorDragging.value = true
     document.documentElement.style.cursor = 'grabbing'
     _placeCursorAt(e.clientX)
@@ -440,7 +563,6 @@ function onCanvasDown(e) {
   }
 
   // ── Zoom-select / click-to-place-cursor mode ───────────────────────────────
-  // Capture bounds at drag-start so all zoom calculations are consistent
   const { ca: snapCa, xMin: snapXMin, xMax: snapXMax } = _liveChartArea()
   const startX = clickX
   const startY = e.clientY - wrapRect.top
@@ -463,8 +585,15 @@ function onCanvasDown(e) {
     document.removeEventListener('mouseup', onUpZoom)
 
     if (!zooming) {
-      // Plain click: place cursor (only if cursor is visible)
-      if (props.showCursor) _placeCursorAt(e.clientX)
+      // Plain click: place cursor or diff cursor
+      if (props.showCursor) {
+        _placeCursorAt(e.clientX)
+      } else if (props.showDiffCursor) {
+        // Alternate between A and B on successive clicks
+        const which = nextDiffClick.value
+        _placeDiffCursorAt(e.clientX, which)
+        nextDiffClick.value = which === 'a' ? 'b' : 'a'
+      }
       return
     }
 
@@ -573,6 +702,57 @@ const cursorValues = computed(() => {
   }).filter(Boolean)
 })
 
+// ── Diff cursor computeds ─────────────────────────────────────────────────────
+const cursorALineStyle = computed(() => {
+  if (cursorAPx.value === null) return { display: 'none' }
+  const ca = chartPlotArea.value
+  return { left: `${cursorAPx.value}px`, top: `${ca.top}px`, height: `${ca.bottom - ca.top}px` }
+})
+
+const cursorBLineStyle = computed(() => {
+  if (cursorBPx.value === null) return { display: 'none' }
+  const ca = chartPlotArea.value
+  return { left: `${cursorBPx.value}px`, top: `${ca.top}px`, height: `${ca.bottom - ca.top}px` }
+})
+
+const deltaT = computed(() => {
+  if (localCursorATime.value === null || localCursorBTime.value === null) return null
+  return localCursorBTime.value - localCursorATime.value
+})
+
+const diffValues = computed(() => {
+  if (localCursorATime.value === null && localCursorBTime.value === null) return []
+  return props.signals.map(sig => {
+    const vA = localCursorATime.value !== null ? getValueAtTime(sig.key, localCursorATime.value) : null
+    const vB = localCursorBTime.value !== null ? getValueAtTime(sig.key, localCursorBTime.value) : null
+    if (vA === null && vB === null) return null
+    const fmt = v => {
+      if (v === null) return '—'
+      const txt = vtabLookup(sig.key, v)
+      return txt != null ? `${txt}(${v.toFixed(0)})` : (Number.isFinite(v) ? v.toFixed(4) : '—')
+    }
+    let deltaDisplay = '—'
+    let dval = null
+    if (vA !== null && vB !== null && Number.isFinite(vA) && Number.isFinite(vB)) {
+      dval = vB - vA
+      deltaDisplay = (dval >= 0 ? '+' : '') + dval.toFixed(4)
+    }
+    return { key: sig.key, name: sig.name, color: sig.color, aDisplay: fmt(vA), bDisplay: fmt(vB), deltaDisplay, dval }
+  }).filter(Boolean)
+})
+
+const diffPanelStyle = computed(() => {
+  const ca = chartPlotArea.value
+  const pxA = cursorAPx.value
+  const pxB = cursorBPx.value
+  const midPx = pxA !== null && pxB !== null
+    ? (pxA + pxB) / 2
+    : (pxA ?? pxB ?? (ca.left + ca.right) / 2)
+  const panelWidth = 300
+  const left = Math.max(ca.left, Math.min(ca.right - panelWidth, midPx - panelWidth / 2))
+  return { top: `${ca.top + 6}px`, left: `${left}px`, width: `${panelWidth}px` }
+})
+
 function startLoop() {
   stopLoop()
   updateTimer = setInterval(doUpdate, UPDATE_MS)
@@ -597,7 +777,7 @@ function createChart() {
         tooltip: {
           mode: 'index',
           intersect: false,
-          enabled: !props.showCursor,
+          enabled: !props.showCursor && !props.showDiffCursor,
           backgroundColor: 'rgba(0,0,0,0.85)',
           titleColor: props.tickColor,
           bodyColor: '#cccccc',
@@ -690,7 +870,7 @@ watch([() => props.xMin, () => props.xMax], () => {
 
 watch(() => props.showCursor, v => {
   if (chart) {
-    chart.options.plugins.tooltip.enabled = !v
+    chart.options.plugins.tooltip.enabled = !v && !props.showDiffCursor
     chart.update('none')
   }
   if (!v) {
@@ -700,6 +880,48 @@ watch(() => props.showCursor, v => {
     // Restore cursor to last known position when re-enabling
     localCursorTime.value = props.cursorTime
     _refreshCursorPx()
+  }
+})
+
+watch(() => props.showDiffCursor, v => {
+  if (chart) {
+    chart.options.plugins.tooltip.enabled = !props.showCursor && !v
+    chart.update('none')
+  }
+  if (!v) {
+    localCursorATime.value = null
+    localCursorBTime.value = null
+    cursorAPx.value = null
+    cursorBPx.value = null
+    activeDiffCursor.value = null
+    nextDiffClick.value = 'a'
+  } else {
+    if (props.cursorATime !== null && props.cursorATime !== undefined) {
+      localCursorATime.value = props.cursorATime; _refreshCursorAPx()
+    }
+    if (props.cursorBTime !== null && props.cursorBTime !== undefined) {
+      localCursorBTime.value = props.cursorBTime; _refreshCursorBPx()
+    }
+  }
+})
+
+watch(() => props.cursorATime, v => {
+  if (v !== null && v !== undefined) {
+    localCursorATime.value = v
+    _refreshCursorAPx()
+  } else {
+    localCursorATime.value = null
+    cursorAPx.value = null
+  }
+})
+
+watch(() => props.cursorBTime, v => {
+  if (v !== null && v !== undefined) {
+    localCursorBTime.value = v
+    _refreshCursorBPx()
+  } else {
+    localCursorBTime.value = null
+    cursorBPx.value = null
   }
 })
 
@@ -972,6 +1194,117 @@ watch(() => props.cursorTime, v => {
   color: #ffffff;
   white-space: nowrap;
 }
+
+/* ── Diff cursor ──────────────────────────────────────────────────────────── */
+.schart-diff-cursor-line {
+  position: absolute;
+  width: 1px;
+  pointer-events: none;
+  z-index: 11;
+}
+
+.schart-diff-cursor-a {
+  background: rgba(255, 204, 0, 0.85);
+  box-shadow: 0 0 5px rgba(255, 204, 0, 0.35);
+}
+
+.schart-diff-cursor-b {
+  background: rgba(68, 204, 255, 0.85);
+  box-shadow: 0 0 5px rgba(68, 204, 255, 0.35);
+}
+
+.schart-diff-cursor-label {
+  position: absolute;
+  top: -1px;
+  left: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #ffcc00;
+  background: rgba(0, 0, 0, 0.75);
+  padding: 0 2px;
+  border-radius: 2px;
+  line-height: 1.4;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.schart-diff-cursor-label-b {
+  color: #44ccff;
+}
+
+.schart-diff-panel {
+  position: absolute;
+  z-index: 13;
+  background: rgba(0, 0, 0, 0.88);
+  border: 1px solid rgba(80, 80, 80, 0.5);
+  border-radius: 5px;
+  padding: 6px 10px;
+  pointer-events: none;
+  font-size: 11px;
+  font-family: monospace;
+}
+
+.schart-diff-times {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 5px;
+  border-bottom: 1px solid rgba(80, 80, 80, 0.4);
+  padding-bottom: 4px;
+}
+
+.schart-diff-label-a { color: #ffcc00; font-weight: 700; }
+.schart-diff-time-a  { color: #ffcc00; font-variant-numeric: tabular-nums; }
+.schart-diff-label-b { color: #44ccff; font-weight: 700; }
+.schart-diff-time-b  { color: #44ccff; font-variant-numeric: tabular-nums; }
+.schart-diff-dt      { color: #aaffaa; font-variant-numeric: tabular-nums; margin-left: 4px; }
+
+.schart-diff-sig-row {
+  display: grid;
+  grid-template-columns: 8px minmax(60px, 1fr) 64px 64px 70px;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+}
+
+.schart-diff-swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.schart-diff-sig-name {
+  color: var(--exp-fg-dim3, #667744);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.schart-diff-val-a {
+  color: #ffcc00;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.schart-diff-val-b {
+  color: #44ccff;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.schart-diff-val-delta {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+  color: #cccccc;
+}
+
+.schart-diff-val-delta.positive { color: #aaffaa; }
+.schart-diff-val-delta.negative { color: #ff9999; }
 
 /* ── Zoom selection rectangle ─────────────────────────────────────────────── */
 .schart-zoom-rect {

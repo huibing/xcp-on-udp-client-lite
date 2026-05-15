@@ -162,14 +162,20 @@
             <div class="panel-meta">{{ loadedSignals.length }} loaded signal(s)</div>
           </div>
           <div class="graph-header-right">
-            <button
-              class="cursor-toggle-btn"
-              :class="{ active: mf4CursorVisible }"
-              @click="mf4CursorVisible = !mf4CursorVisible"
-              title="Toggle time cursor"
-            >
-              {{ mf4CursorVisible ? '🕹 Cursor ON' : '🕹 Cursor OFF' }}
-            </button>
+            <div class="cursor-btn-group">
+              <button
+                class="cursor-toggle-btn"
+                :class="{ active: mf4CursorVisible }"
+                @click="toggleSingleCursor"
+                title="Single time cursor — drag to read values at a point in time"
+              >🕹 Cursor</button>
+              <button
+                class="cursor-toggle-btn diff-cursor-btn"
+                :class="{ active: diffCursorActive }"
+                @click="toggleDiffCursor"
+                title="Difference cursor — place two cursors (A/B) to measure Δt and Δvalue"
+              >↔ Δ Cursor</button>
+            </div>
             <button v-if="loadedSignals.length > 0" class="secondary sm" @click="clearSignals">Clear All</button>
           </div>
         </div>
@@ -200,8 +206,13 @@
               :showWindowSlider="false"
               :showCursor="mf4CursorVisible"
               :cursorTime="sharedCursorTime"
+              :showDiffCursor="diffCursorActive"
+              :cursorATime="diffCursorATime"
+              :cursorBTime="diffCursorBTime"
               :fileTimeOffsets="fileTimeOffsets"
               @cursor-move="sharedCursorTime = $event"
+              @cursor-a-move="diffCursorATime = $event"
+              @cursor-b-move="diffCursorBTime = $event"
               @color-change="onSignalColorChange"
               @zoom-x="applyChartZoom"
               @zoom-y="onChartZoomY(group.id, $event)"
@@ -373,6 +384,9 @@ const loadedSignals = computed(() => chartGroups.value.flatMap(g => g.signals))
 const historyStore = new Map()
 const sharedCursorTime = ref(null)
 const mf4CursorVisible = ref(false)
+const diffCursorActive = ref(false)
+const diffCursorATime = ref(null)
+const diffCursorBTime = ref(null)
 
 // ── Drag-and-drop state ───────────────────────────────────────────────────────
 const draggingChannel = ref(null)   // { channel, file } | null
@@ -1336,6 +1350,36 @@ watch(mf4CursorVisible, (visible) => {
   }
 })
 
+function toggleSingleCursor() {
+  if (mf4CursorVisible.value) {
+    mf4CursorVisible.value = false
+  } else {
+    mf4CursorVisible.value = true
+    // Disable diff cursor (mutually exclusive)
+    diffCursorActive.value = false
+    diffCursorATime.value = null
+    diffCursorBTime.value = null
+  }
+}
+
+function toggleDiffCursor() {
+  if (diffCursorActive.value) {
+    diffCursorActive.value = false
+    diffCursorATime.value = null
+    diffCursorBTime.value = null
+  } else {
+    diffCursorActive.value = true
+    // Disable single cursor (mutually exclusive)
+    mf4CursorVisible.value = false
+    // Auto-place A and B at 35%/65% of the current view
+    const lo = viewStart.value ?? 0
+    const hi = viewEnd.value ?? 1
+    const span = hi - lo
+    diffCursorATime.value = lo + span * 0.35
+    diffCursorBTime.value = lo + span * 0.65
+  }
+}
+
 onMounted(() => {
   refreshRecordFiles()
   window.addEventListener('keydown', onUndoKey)
@@ -1805,6 +1849,24 @@ function onUndoKey(e) {
   gap: 8px;
 }
 
+.cursor-btn-group {
+  display: flex;
+  gap: 0;
+}
+
+.cursor-btn-group .cursor-toggle-btn {
+  border-radius: 0;
+}
+
+.cursor-btn-group .cursor-toggle-btn:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.cursor-btn-group .cursor-toggle-btn:last-child {
+  border-radius: 0 4px 4px 0;
+  border-left: none;
+}
+
 .cursor-toggle-btn {
   padding: 4px 10px;
   font-size: 11px;
@@ -1822,6 +1884,13 @@ function onUndoKey(e) {
   color: #ffcc00;
   border-color: rgba(255, 204, 0, 0.5);
   background: rgba(255, 204, 0, 0.05);
+}
+
+.diff-cursor-btn:hover,
+.diff-cursor-btn.active {
+  color: #44ccff;
+  border-color: rgba(68, 204, 255, 0.5);
+  background: rgba(68, 204, 255, 0.05);
 }
 
 .stats-remove-btn {
