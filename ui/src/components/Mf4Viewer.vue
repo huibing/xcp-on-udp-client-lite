@@ -185,6 +185,12 @@
           <span class="hint-text">Tip: drag a channel from the list and drop it onto an existing chart to overlay signals.</span>
         </div>
         <template v-else>
+          <!-- Reorder insert indicator before first chart -->
+          <div
+            v-if="reorderDragging && reorderInsertIdx === 0"
+            class="chart-reorder-indicator"
+          />
+
           <!-- Drop zone before first chart -->
           <div
             v-if="draggingChannel || draggingSignal"
@@ -198,7 +204,10 @@
           <template v-for="(group, idx) in chartGroups" :key="group.id">
             <div
               class="chart-group-wrap"
-              :class="{ 'chart-drag-over': dragOverGroupId === group.id }"
+              :class="{
+                'chart-drag-over': dragOverGroupId === group.id,
+                'chart-reorder-ghost': reorderDragging?.groupId === group.id
+              }"
               :data-group-id="group.id"
             >
             <SignalChart
@@ -219,6 +228,7 @@
               :cursorATime="diffCursorATime"
               :cursorBTime="diffCursorBTime"
               :fileTimeOffsets="fileTimeOffsets"
+              :showGrabHandle="true"
               @cursor-move="sharedCursorTime = $event"
               @cursor-a-move="diffCursorATime = $event"
               @cursor-b-move="diffCursorBTime = $event"
@@ -226,9 +236,15 @@
               @zoom-x="applyChartZoom"
               @zoom-y="onChartZoomY(group.id, $event)"
               @legend-drag-start="onLegendDragStart"
+              @grab-handle-mousedown="onChartGrabHandleDown(group.id, idx, $event)"
               @close="removeGroup(group.id)"
             />
           </div>
+          <!-- Reorder insert indicator after this chart -->
+          <div
+            v-if="reorderDragging && reorderInsertIdx === idx + 1"
+            class="chart-reorder-indicator"
+          />
           <!-- Drop zone after this chart -->
           <div
             v-if="draggingChannel || draggingSignal"
@@ -372,7 +388,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { open, save as dialogSave } from '@tauri-apps/plugin-dialog'
@@ -412,6 +428,8 @@ const diffCursorBTime = ref(null)
 const draggingChannel = ref(null)   // { channel, file } | null
 const dragOverGroupId = ref(null)   // group.id being hovered | null
 const dragInsertIndex = ref(null)   // numeric insert index | null (for insert drop zones)
+const reorderDragging = ref(null)   // { groupId, fromIdx } | null — chart grab-handle drag
+const reorderInsertIdx = ref(null)  // number | null — insert position indicator during reorder
 
 // ── Undo queue (up to 10 user actions) ───────────────────────────────────────
 // Action shapes:
@@ -1390,6 +1408,108 @@ function onChannelMouseDown(channel, e) {
   document.addEventListener('mouseup', _mouseUpHandler)
 }
 
+// ── Chart grab-handle drag: reorder charts with FLIP animation ────────────────
+function onChartGrabHandleDown(groupId, groupIdx, e) {
+  if (e.button !== 0) return
+  e.preventDefault()
+  e.stopPropagation()
+
+  const startY = e.clientY
+  let isDragging = false
+
+  // Find the insertion index based on cursor Y vs chart midpoints
+  const getInsertIdx = (clientY) => {
+    const groups = chartGroups.value
+    for (let i = 0; i < groups.length; i++) {
+      const el = document.querySelector(`[data-group-id="${groups[i].id}"]`)
+      if (!el) continue
+      const rect = el.getBoundingClientRect()
+      if (clientY < rect.top + rect.height / 2) return i
+    }
+    return groups.length
+  }
+
+  const onMove = (e) => {
+    if (!isDragging && Math.abs(e.clientY - startY) > 4) {
+      isDragging = true
+      reorderDragging.value = { groupId, fromIdx: groupIdx }
+    }
+    if (!isDragging) return
+    reorderInsertIdx.value = getInsertIdx(e.clientY)
+  }
+
+  const onUp = async () => {
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+
+    if (!isDragging || !reorderDragging.value) {
+      reorderDragging.value = null
+      reorderInsertIdx.value = null
+      return
+    }
+
+    const fromIdx = chartGroups.value.findIndex(g => g.id === groupId)
+    const insertIdx = reorderInsertIdx.value
+
+    reorderDragging.value = null
+    reorderInsertIdx.value = null
+
+    if (fromIdx === -1 || insertIdx === null) return
+    // Same position: no movement needed
+    if (insertIdx === fromIdx || insertIdx === fromIdx + 1) return
+
+    // ── FLIP animation ──────────────────────────────────────────────────────
+    // 1. Record current positions before reorder
+    const oldTops = new Map()
+    for (const g of chartGroups.value) {
+      const el = document.querySelector(`[data-group-id="${g.id}"]`)
+      if (el) oldTops.set(g.id, el.getBoundingClientRect().top)
+    }
+
+    // 2. Perform the reorder
+    const groups = [...chartGroups.value]
+    const [removed] = groups.splice(fromIdx, 1)
+    const adjustedIdx = insertIdx > fromIdx ? insertIdx - 1 : insertIdx
+    groups.splice(adjustedIdx, 0, removed)
+    chartGroups.value = groups
+
+    // 3. Wait for Vue to update the DOM
+    await nextTick()
+
+    // 4. Apply inverse transforms so elements start at their old visual positions
+    const animatedEls = []
+    for (const g of chartGroups.value) {
+      const el = document.querySelector(`[data-group-id="${g.id}"]`)
+      if (!el || !oldTops.has(g.id)) continue
+      const delta = oldTops.get(g.id) - el.getBoundingClientRect().top
+      if (Math.abs(delta) > 0.5) {
+        el.style.transition = 'none'
+        el.style.transform = `translateY(${delta}px)`
+        animatedEls.push(el)
+      }
+    }
+
+    if (animatedEls.length === 0) return
+
+    // 5. Force a reflow then animate each element back to its natural position
+    animatedEls[0].getBoundingClientRect()
+    requestAnimationFrame(() => {
+      for (const el of animatedEls) {
+        el.style.transition = 'transform 0.28s cubic-bezier(0.25, 0.46, 0.45, 0.94)'
+        el.style.transform = ''
+      }
+      setTimeout(() => {
+        for (const el of animatedEls) {
+          el.style.transition = ''
+        }
+      }, 300)
+    })
+  }
+
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
 async function onDropOnGroup(groupId, drag) {
   const { channel, file } = drag
   if (!file) return
@@ -2005,6 +2125,28 @@ function onUndoKey(e) {
 /* Wrapper for each chart group — enables native drag events */
 .chart-group-wrap {
   position: relative;
+}
+
+/* Dragging source chart: faded to indicate it is being moved */
+.chart-reorder-ghost {
+  opacity: 0.42;
+  outline: 2px dashed rgba(0, 200, 100, 0.45);
+  outline-offset: 2px;
+}
+
+/* Thin bright bar shown between charts during grab-handle drag */
+.chart-reorder-indicator {
+  height: 3px;
+  margin: 2px 0;
+  background: rgba(0, 220, 100, 0.85);
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgba(0, 220, 100, 0.55);
+  animation: reorder-pulse 0.5s ease-in-out infinite alternate;
+}
+
+@keyframes reorder-pulse {
+  from { opacity: 0.65; }
+  to   { opacity: 1; }
 }
 
 /* Highlight when a dragged channel is hovering over a chart */

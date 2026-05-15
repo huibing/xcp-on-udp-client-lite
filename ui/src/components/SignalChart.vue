@@ -2,6 +2,13 @@
   <div class="schart-wrap">
     <!-- Header: title + legend + live badge -->
     <div class="schart-header">
+      <!-- Grab handle for chart reordering (MF4 Viewer only) -->
+      <div v-if="showGrabHandle"
+           class="schart-grab-handle"
+           @mousedown.stop.prevent="emit('grab-handle-mousedown', $event)"
+           title="Drag to reorder charts">
+        <span class="schart-grab-dots">⠿</span>
+      </div>
       <span class="schart-title">📈 Graph</span>
       <div class="schart-legend">
         <span v-for="s in signals" :key="s.key" class="schart-leg-item"
@@ -159,9 +166,11 @@ const props = defineProps({
   cursorATime: { type: Number, default: null },
   /** External cursor B time (seconds) for synchronized multi-chart diff mode. */
   cursorBTime: { type: Number, default: null },
+  /** Show a drag handle in the header for chart reordering. */
+  showGrabHandle: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close', 'cursor-move', 'cursor-a-move', 'cursor-b-move', 'color-change', 'zoom-x', 'zoom-y', 'legend-drag-start'])
+const emit = defineEmits(['close', 'cursor-move', 'cursor-a-move', 'cursor-b-move', 'color-change', 'zoom-x', 'zoom-y', 'legend-drag-start', 'grab-handle-mousedown'])
 const canvasEl = ref(null)
 
 const windowIdx = ref((() => {
@@ -989,6 +998,37 @@ watch(() => props.cursorTime, v => {
   border-bottom: 1px solid var(--exp-border);
   background: var(--exp-bg3);
   min-height: 34px;
+}
+
+/* Grab handle shown in MF4 Viewer for chart reordering */
+.schart-grab-handle {
+  flex-shrink: 0;
+  width: 20px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  color: rgba(0, 180, 80, 0.38);
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+  user-select: none;
+  margin-right: -6px;
+}
+
+.schart-grab-handle:hover {
+  color: rgba(0, 220, 100, 0.9);
+  background: rgba(0, 80, 30, 0.5);
+}
+
+.schart-grab-handle:active {
+  cursor: grabbing;
+}
+
+.schart-grab-dots {
+  font-size: 15px;
+  line-height: 1;
+  pointer-events: none;
 }
 
 .schart-title {
