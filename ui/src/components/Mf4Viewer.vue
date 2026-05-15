@@ -155,7 +155,7 @@
       </section>
       </div><!-- /.side-panels -->
 
-      <section class="panel chart-panel">
+      <section class="panel chart-panel" ref="chartPanelEl">
         <div class="panel-header">
           <div>
             <h2>Signal Graph</h2>
@@ -437,6 +437,7 @@ function pushUndo(action) {
 
 // ── Chart component refs (keyed by group.id) for Y-zoom undo ─────────────────
 const chartRefs = new Map()
+const chartPanelEl = ref(null)
 
 function registerChartRef(groupId, el) {
   if (el) chartRefs.set(groupId, el)
@@ -1328,8 +1329,15 @@ function onChannelMouseDown(channel, e) {
     draggingChannel.value = null
     dragOverGroupId.value = null
 
-    if (!isDragging || !drag || !targetGroupId) return
-    await onDropOnGroup(targetGroupId, drag)
+    if (!isDragging || !drag) return
+
+    if (targetGroupId) {
+      // Dropped onto an existing chart group
+      await onDropOnGroup(targetGroupId, drag)
+    } else if (chartPanelEl.value?.contains(e.target)) {
+      // Dropped on empty space within the chart panel — create a new graph
+      await addSignal(drag.channel, null)
+    }
   }
 
   document.addEventListener('mousemove', _mouseMoveHandler)
