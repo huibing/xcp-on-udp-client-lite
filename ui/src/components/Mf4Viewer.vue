@@ -185,13 +185,22 @@
           <span class="hint-text">Tip: drag a channel from the list and drop it onto an existing chart to overlay signals.</span>
         </div>
         <template v-else>
+          <!-- Drop zone before first chart -->
           <div
-            v-for="group in chartGroups"
-            :key="group.id"
-            class="chart-group-wrap"
-            :class="{ 'chart-drag-over': dragOverGroupId === group.id }"
-            :data-group-id="group.id"
+            v-if="draggingChannel"
+            class="chart-drop-zone"
+            :class="{ 'chart-drop-zone-active': dragInsertIndex === 0 }"
+            :data-insert-index="0"
           >
+            <span class="chart-drop-hint">↓ Insert chart here</span>
+          </div>
+
+          <template v-for="(group, idx) in chartGroups" :key="group.id">
+            <div
+              class="chart-group-wrap"
+              :class="{ 'chart-drag-over': dragOverGroupId === group.id }"
+              :data-group-id="group.id"
+            >
             <SignalChart
               :signals="group.signals"
               :ref="el => registerChartRef(group.id, el)"
@@ -220,6 +229,16 @@
               @close="removeGroup(group.id)"
             />
           </div>
+          <!-- Drop zone after this chart -->
+          <div
+            v-if="draggingChannel"
+            class="chart-drop-zone"
+            :class="{ 'chart-drop-zone-active': dragInsertIndex === idx + 1 }"
+            :data-insert-index="idx + 1"
+          >
+            <span class="chart-drop-hint">↓ Insert chart here</span>
+          </div>
+          </template>
 
           <!-- Two-cursor time range selector -->
           <div class="trange-panel">
@@ -392,6 +411,7 @@ const diffCursorBTime = ref(null)
 // ── Drag-and-drop state ───────────────────────────────────────────────────────
 const draggingChannel = ref(null)   // { channel, file } | null
 const dragOverGroupId = ref(null)   // group.id being hovered | null
+const dragInsertIndex = ref(null)   // numeric insert index | null (for insert drop zones)
 
 // ── Undo queue (up to 10 user actions) ───────────────────────────────────────
 // Action shapes:
@@ -1115,9 +1135,20 @@ async function browseMf4File() {
   }
 }
 
-async function addSignal(channelName, targetGroupId = null) {
+async function addSignal(channelName, targetGroupId = null, insertIndex = null) {
   if (!activeFile.value) return
   const key = signalKey(activeFile.value.path, channelName)
+
+  // Helper: place a new group at insertIndex (splice) or end (push)
+  const placeNewGroup = (newGroup) => {
+    if (insertIndex !== null) {
+      const groups = [...chartGroups.value]
+      groups.splice(insertIndex, 0, newGroup)
+      chartGroups.value = groups
+    } else {
+      chartGroups.value = [...chartGroups.value, newGroup]
+    }
+  }
 
   // If data is already in historyStore, add a copy to the chart without re-fetching
   if (historyStore.has(key)) {
@@ -1132,7 +1163,7 @@ async function addSignal(channelName, targetGroupId = null) {
       }
     } else {
       const newGroupId = crypto.randomUUID()
-      chartGroups.value = [...chartGroups.value, { id: newGroupId, signals: [sigObj] }]
+      placeNewGroup({ id: newGroupId, signals: [sigObj] })
       pushUndo({ type: 'add-signal', key, groupId: newGroupId })
     }
     return
@@ -1173,9 +1204,9 @@ async function addSignal(channelName, targetGroupId = null) {
         return
       }
     }
-    // No target group → create a new chart
+    // No target group → create a new chart at insertIndex (or end)
     const newGroupId = crypto.randomUUID()
-    chartGroups.value = [...chartGroups.value, { id: newGroupId, signals: [sigObj] }]
+    placeNewGroup({ id: newGroupId, signals: [sigObj] })
     pushUndo({ type: 'add-signal', key, groupId: newGroupId })
   } catch (error) {
     setMsg(String(error), true)
@@ -1310,11 +1341,21 @@ function onChannelMouseDown(channel, e) {
 
     dragGhost.value = { channel, x: e.clientX + 14, y: e.clientY - 14 }
 
-    // Identify which chart-group-wrap (if any) is under the cursor
+    // Identify which chart-group-wrap or insert drop zone is under the cursor
     // pointer-events:none on ghost ensures we can hit-test what's below it
     const els = document.elementsFromPoint(e.clientX, e.clientY)
+    const insertZone = els.find(el => el.dataset && el.dataset.insertIndex !== undefined && el.dataset.insertIndex !== '')
     const wrap = els.find(el => el.dataset && el.dataset.groupId)
-    dragOverGroupId.value = wrap ? wrap.dataset.groupId : null
+    if (insertZone) {
+      dragInsertIndex.value = Number(insertZone.dataset.insertIndex)
+      dragOverGroupId.value = null
+    } else if (wrap) {
+      dragInsertIndex.value = null
+      dragOverGroupId.value = wrap.dataset.groupId
+    } else {
+      dragInsertIndex.value = null
+      dragOverGroupId.value = null
+    }
   }
 
   _mouseUpHandler = async (e) => {
@@ -1325,17 +1366,22 @@ function onChannelMouseDown(channel, e) {
 
     const drag = draggingChannel.value
     const targetGroupId = dragOverGroupId.value
+    const insertIdx = dragInsertIndex.value
     dragGhost.value = null
     draggingChannel.value = null
     dragOverGroupId.value = null
+    dragInsertIndex.value = null
 
     if (!isDragging || !drag) return
 
-    if (targetGroupId) {
+    if (insertIdx !== null) {
+      // Insert new chart at specific position
+      await addSignal(drag.channel, null, insertIdx)
+    } else if (targetGroupId) {
       // Dropped onto an existing chart group
       await onDropOnGroup(targetGroupId, drag)
     } else if (chartPanelEl.value?.contains(e.target)) {
-      // Dropped on empty space within the chart panel — create a new graph
+      // Dropped on empty space within the chart panel — create a new graph at end
       await addSignal(drag.channel, null)
     }
   }
@@ -1936,6 +1982,39 @@ function onUndoKey(e) {
   outline: 2px dashed rgba(0, 220, 80, 0.6);
   outline-offset: 2px;
   background: rgba(0, 220, 80, 0.04);
+}
+
+/* Drop zone between charts (visible only while dragging a channel) */
+.chart-drop-zone {
+  height: 10px;
+  margin: 2px 0;
+  border-radius: 4px;
+  border: 2px dashed transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  transition: height 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  cursor: copy;
+  pointer-events: all;
+}
+
+.chart-drop-zone-active {
+  height: 44px;
+  background: rgba(0, 200, 100, 0.1);
+  border-color: rgba(0, 200, 100, 0.5);
+}
+
+.chart-drop-hint {
+  font-size: 11px;
+  color: rgba(0, 200, 100, 0.8);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+
+.chart-drop-zone-active .chart-drop-hint {
+  opacity: 1;
 }
 
 .channel-name {
