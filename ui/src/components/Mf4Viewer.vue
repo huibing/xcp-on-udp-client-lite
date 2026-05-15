@@ -187,7 +187,7 @@
         <template v-else>
           <!-- Drop zone before first chart -->
           <div
-            v-if="draggingChannel"
+            v-if="draggingChannel || draggingSignal"
             class="chart-drop-zone"
             :class="{ 'chart-drop-zone-active': dragInsertIndex === 0 }"
             :data-insert-index="0"
@@ -231,7 +231,7 @@
           </div>
           <!-- Drop zone after this chart -->
           <div
-            v-if="draggingChannel"
+            v-if="draggingChannel || draggingSignal"
             class="chart-drop-zone"
             :class="{ 'chart-drop-zone-active': dragInsertIndex === idx + 1 }"
             :data-insert-index="idx + 1"
@@ -1464,8 +1464,18 @@ function onLegendDragStart({ signalKey, originalEvent }) {
     dragGhost.value = { channel: sig.name, x: e.clientX + 14, y: e.clientY - 14 }
 
     const els = document.elementsFromPoint(e.clientX, e.clientY)
+    const insertZone = els.find(el => el.dataset && el.dataset.insertIndex !== undefined && el.dataset.insertIndex !== '')
     const wrap = els.find(el => el.dataset && el.dataset.groupId)
-    dragOverGroupId.value = wrap ? wrap.dataset.groupId : null
+    if (insertZone) {
+      dragInsertIndex.value = Number(insertZone.dataset.insertIndex)
+      dragOverGroupId.value = null
+    } else if (wrap) {
+      dragInsertIndex.value = null
+      dragOverGroupId.value = wrap.dataset.groupId
+    } else {
+      dragInsertIndex.value = null
+      dragOverGroupId.value = null
+    }
   }
 
   const onUp = () => {
@@ -1474,13 +1484,33 @@ function onLegendDragStart({ signalKey, originalEvent }) {
 
     const drag = draggingSignal.value
     const targetGroupId = dragOverGroupId.value
+    const insertIdx = dragInsertIndex.value
     dragGhost.value = null
     draggingSignal.value = null
     dragOverGroupId.value = null
+    dragInsertIndex.value = null
 
-    if (!isDragging || !drag || !targetGroupId) return
-    if (targetGroupId === drag.sourceGroupId) return  // dropped on same graph — no-op
-    onMoveSignalToGroup(drag.key, drag.sourceGroupId, targetGroupId)
+    if (!isDragging || !drag) return
+
+    if (insertIdx !== null) {
+      // Drop on an insert zone — split signal into a new chart at that position
+      const fromGroup = chartGroups.value.find(g => g.id === drag.sourceGroupId)
+      if (!fromGroup) return
+      const sigObj = fromGroup.signals.find(s => s.key === drag.key)
+      if (!sigObj) return
+      fromGroup.signals = fromGroup.signals.filter(s => s.key !== drag.key)
+      if (fromGroup.signals.length === 0) {
+        chartGroups.value = chartGroups.value.filter(g => g.id !== drag.sourceGroupId)
+        chartRefs.delete(drag.sourceGroupId)
+      }
+      const newGroupId = crypto.randomUUID()
+      const groups = [...chartGroups.value]
+      groups.splice(insertIdx, 0, { id: newGroupId, signals: [sigObj] })
+      chartGroups.value = groups
+    } else if (targetGroupId) {
+      if (targetGroupId === drag.sourceGroupId) return  // dropped on same graph — no-op
+      onMoveSignalToGroup(drag.key, drag.sourceGroupId, targetGroupId)
+    }
   }
 
   document.addEventListener('mousemove', onMove)
