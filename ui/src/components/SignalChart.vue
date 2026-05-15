@@ -1059,9 +1059,14 @@ watch(() => props.cursorTime, v => {
 }
 
 .schart-leg-item:hover {
-  border: 2px dashed rgb(240, 48, 15);
+  border: 2px solid rgb(240, 48, 15);
   cursor: grab;
   transform: translateY(-1px) translateX(-1px);
+  box-shadow: inset 0 0 0 1px var(--exp-bg2);
+}
+
+.schart-leg-item:hover::before {
+  content: "|||";
 }
 
 .schart-leg-line {
