@@ -1058,14 +1058,20 @@ watch(() => props.cursorTime, v => {
   transition: border-color 0.15s;
 }
 
+.schart-leg-item::before {
+  content: "⠿";
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
 .schart-leg-item:hover {
   cursor: grab;
   transform: translateY(-1px) translateX(-1px);
-  box-shadow: inset 0 0 0 1px var(--exp-bg2);
+  box-shadow: inset 0 0 0 2px var(--exp-bg2);
 }
 
 .schart-leg-item:hover::before {
-  content: "|||";
+  opacity: 1;
 }
 
 .schart-leg-line {

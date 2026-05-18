@@ -105,6 +105,12 @@
             </div>
             <div class="panel-header-actions">
               <span v-if="openingFile" class="badge loading">Loading…</span>
+              <button
+                class="icon-btn"
+                :disabled="availableSignalsForDerived.length === 0"
+                title="Create derived (calculated) signal"
+                @click="openNewDerivedDialog()"
+              >ƒ</button>
               <button class="icon-btn" @click="channelsPanelOpen = false" title="Collapse panel">◀</button>
             </div>
           </div>
@@ -147,6 +153,26 @@
               </button>
             </div>
           </div>
+
+          <!-- ── Derived signals mini-list ─────────────────────────────── -->
+          <template v-if="loadedSignals.some(s => s.isDerived)">
+            <div class="panel-header" style="margin-top: 8px;">
+              <h2 style="font-size: 0.85rem; margin: 0;">Derived Signals</h2>
+            </div>
+            <div class="channel-list">
+              <div
+                v-for="sig in loadedSignals.filter(s => s.isDerived)"
+                :key="sig.key + '-mini'"
+                class="channel-row"
+              >
+                <span class="channel-name">{{ sig.name }}</span>
+                <div style="display:flex; gap:4px;">
+                  <button class="sm" @click="openEditDerivedDialog(sig)" title="Edit expression">✎</button>
+                  <button class="sm" @click="addDerivedToNewChart(sig)">Add +</button>
+                </div>
+              </div>
+            </div>
+          </template>
         </template>
 
         <div v-else class="panel-strip" @click="openChannelsPanel()" title="Channels — click to expand">
@@ -375,6 +401,19 @@
     </div>
   </Teleport>
 
+  <!-- Derived signal dialog -->
+  <DerivedSignalDialog
+    v-if="showDerivedDialog"
+    :available-signals="availableSignalsForDerived"
+    :history-store="historyStore"
+    :load-signal-data="loadSignalDataForDerived"
+    :initial-name="editingDerivedSig?.name ?? ''"
+    :initial-expression="editingDerivedSig?.derivedExpression ?? ''"
+    :initial-vars="editingDerivedSig?.derivedVars ?? []"
+    @close="showDerivedDialog = false; editingDerivedSig = null"
+    @add="addDerivedSignalFromDialog"
+  />
+
   <!-- Drag ghost: floating label following the cursor during channel drag -->
   <Teleport to="body">
     <div
@@ -394,8 +433,10 @@ import { invoke } from '@tauri-apps/api/core'
 import { open, save as dialogSave } from '@tauri-apps/plugin-dialog'
 
 import SignalChart from './SignalChart.vue'
+import DerivedSignalDialog from './DerivedSignalDialog.vue'
 import { useMf4Settings } from '../composables/useMf4Settings.js'
 import { useTheme } from '../composables/useTheme.js'
+import { computeDerivedSignal } from '../utils/expressionEvaluator.js'
 
 const SIGNAL_COLORS = ['#00ff66', '#4dd2ff', '#ffcc00', '#ff6688', '#b388ff', '#ff9966', '#66e0a3']
 
@@ -423,6 +464,95 @@ const mf4CursorVisible = ref(false)
 const diffCursorActive = ref(false)
 const diffCursorATime = ref(null)
 const diffCursorBTime = ref(null)
+
+const fileChannelsMap = reactive(new Map())  // filePath → { fileName, channels: string[] }
+
+// ── Derived signal dialog ─────────────────────────────────────────────────────
+const showDerivedDialog = ref(false)
+const editingDerivedSig = ref(null)   // sigObj being edited, or null for new-signal mode
+
+function openNewDerivedDialog() {
+  editingDerivedSig.value = null
+  showDerivedDialog.value = true
+}
+
+function openEditDerivedDialog(sig) {
+  editingDerivedSig.value = sig
+  showDerivedDialog.value = true
+}
+
+/** All channels from all opened MF4 files, usable as derived signal inputs */
+const availableSignalsForDerived = computed(() => {
+  const entries = []
+  const seen = new Set()
+  for (const [filePath, { fileName, channels }] of fileChannelsMap) {
+    for (const channelName of channels) {
+      const key = signalKey(filePath, channelName)
+      if (seen.has(key)) continue
+      seen.add(key)
+      entries.push({ key, label: `${channelName}  [${fileName}]`, filePath, channelName })
+    }
+  }
+  return entries
+})
+
+/** Load a channel's time+value data into historyStore on demand (for derived signal inputs) */
+async function loadSignalDataForDerived(filePath, channelName) {
+  const key = signalKey(filePath, channelName)
+  if (historyStore.has(key)) return historyStore.get(key)
+  const [dataBytes, timeBytes] = await Promise.all([
+    invoke('mf4_get_channel_data', { mf4Path: filePath, channelName }),
+    invoke('mf4_get_channel_time', { mf4Path: filePath, channelName }),
+  ])
+  const values = toFloat64Array(dataBytes)
+  const times  = toFloat64Array(timeBytes)
+  const data   = { times, values }
+  historyStore.set(key, data)
+  return data
+}
+
+function addDerivedSignalFromDialog({ name, expression, derivedVars, times, values }) {
+  if (editingDerivedSig.value) {
+    // ── Edit mode: update the existing derived signal in place ───────────────
+    const sig = editingDerivedSig.value
+    historyStore.set(sig.key, { times, values })
+    sig.name              = name
+    sig.derivedExpression = expression
+    sig.derivedVars       = derivedVars
+    // Trigger reactivity by replacing the chartGroups array (signals are plain objects)
+    chartGroups.value = chartGroups.value.map(g => ({
+      ...g,
+      signals: g.signals.map(s => (s.key === sig.key ? { ...sig } : s)),
+    }))
+  } else {
+    // ── Create mode: add as a new chart group ─────────────────────────────────
+    const key = `derived::${crypto.randomUUID()}`
+    historyStore.set(key, { times, values })
+    const sigObj = {
+      key,
+      name,
+      device_name: '[derived]',
+      color: pickColor(loadedSignals.value.length),
+      path: '',       // no file path for derived signals
+      vtab_map: null,
+      isDerived:          true,
+      derivedExpression:  expression,
+      derivedVars,        // [{ var_name, signal_key }]
+    }
+    const newGroupId = crypto.randomUUID()
+    chartGroups.value = [...chartGroups.value, { id: newGroupId, signals: [sigObj] }]
+    pushUndo({ type: 'add-signal', key, groupId: newGroupId })
+  }
+  editingDerivedSig.value = null
+  showDerivedDialog.value = false
+}
+
+// Adds an already-computed derived signal as a new chart group (from the mini-list)
+function addDerivedToNewChart(sig) {
+  const newGroupId = crypto.randomUUID()
+  chartGroups.value = [...chartGroups.value, { id: newGroupId, signals: [sig] }]
+  pushUndo({ type: 'add-signal', key: sig.key, groupId: newGroupId })
+}
 
 // ── Drag-and-drop state ───────────────────────────────────────────────────────
 const draggingChannel = ref(null)   // { channel, file } | null
@@ -555,11 +685,20 @@ async function saveConfig() {
       const yZoom = chartRef?.getYZoom() ?? null
       return {
         id: g.id,
-        signals: g.signals.map(s => ({
-          file_path: s.path,
-          channel: s.name,
-          color: s.color,
-        })),
+        signals: g.signals.map(s => {
+          const base = {
+            file_path: s.path || '',
+            channel: s.name,
+            color: s.color,
+          }
+          if (s.isDerived) {
+            base.derived = {
+              expression: s.derivedExpression,
+              variables:  s.derivedVars,
+            }
+          }
+          return base
+        }),
         y_zoom: yZoom,  // { min, max } or null
       }
     })
@@ -602,13 +741,21 @@ async function loadConfig() {
     const config = await invoke('mf4_load_config', { path: filePath })
 
     // Open all unique MF4 files first — register them in the files panel
-    const uniquePaths = [...new Set(config.groups.flatMap(g => g.signals.map(s => s.file_path)))]
+    const uniquePaths = [
+      ...new Set(
+        config.groups.flatMap(g => g.signals.map(s => s.file_path).filter(p => p))
+      ),
+    ]
     const openedFileMap = new Map()  // path → mf4_open_file response
     const missingPaths = []
     for (const p of uniquePaths) {
       try {
         const response = await invoke('mf4_open_file', { mf4Path: p })
         upsertRecordFile(response.file)
+        fileChannelsMap.set(p, {
+          fileName: response.file?.name || fileNameFromPath(p),
+          channels: response.channels || [],
+        })
         openedFileMap.set(p, response)
       } catch {
         missingPaths.push(p)
@@ -645,27 +792,66 @@ async function loadConfig() {
     for (const g of config.groups) {
       const signals = []
       for (const s of g.signals) {
-        const key = signalKey(s.file_path, s.channel)
-        try {
-          const [dataBytes, timeBytes] = await Promise.all([
-            invoke('mf4_get_channel_data', { mf4Path: s.file_path, channelName: s.channel }),
-            invoke('mf4_get_channel_time', { mf4Path: s.file_path, channelName: s.channel }),
-          ])
-          const values = toFloat64Array(dataBytes)
-          const times = toFloat64Array(timeBytes)
-          if (times.length !== values.length) continue
-          historyStore.set(key, { times, values })
-          const fileName = s.file_path.split(/[\\/]/).pop() || s.file_path
-          signals.push({
-            key,
-            name: s.channel,
-            device_name: fileName,
-            color: s.color,
-            path: s.file_path,
-            vtab_map: null,
-          })
-        } catch {
-          // Signal unavailable (file missing or channel gone) — skip silently
+        if (s.derived) {
+          // ── Derived (calculated) signal ────────────────────────────────────
+          try {
+            const signalData = {}
+            let missingVar = false
+            for (const v of (s.derived.variables ?? [])) {
+              let data = historyStore.get(v.signal_key)
+              if (!data) {
+                // Source signal not yet in cache — try loading it on demand
+                const sepIdx = v.signal_key.indexOf('::')
+                if (sepIdx < 0) { missingVar = true; break }
+                const fp = v.signal_key.slice(0, sepIdx)
+                const ch = v.signal_key.slice(sepIdx + 2)
+                try { data = await loadSignalDataForDerived(fp, ch) }
+                catch { missingVar = true; break }
+              }
+              signalData[v.var_name] = data
+            }
+            if (missingVar) continue
+            const { times: dTimes, values: dValues } = computeDerivedSignal(s.derived.expression, signalData)
+            const dKey = `derived::${crypto.randomUUID()}`
+            historyStore.set(dKey, { times: dTimes, values: dValues })
+            signals.push({
+              key:               dKey,
+              name:              s.channel,
+              device_name:       '[derived]',
+              color:             s.color,
+              path:              '',
+              vtab_map:          null,
+              isDerived:         true,
+              derivedExpression: s.derived.expression,
+              derivedVars:       s.derived.variables ?? [],
+            })
+          } catch {
+            // Derived signal failed to reconstruct (e.g. bad expression) — skip
+          }
+        } else {
+          // ── Regular MF4 signal ─────────────────────────────────────────────
+          const key = signalKey(s.file_path, s.channel)
+          try {
+            const [dataBytes, timeBytes] = await Promise.all([
+              invoke('mf4_get_channel_data', { mf4Path: s.file_path, channelName: s.channel }),
+              invoke('mf4_get_channel_time', { mf4Path: s.file_path, channelName: s.channel }),
+            ])
+            const values = toFloat64Array(dataBytes)
+            const times = toFloat64Array(timeBytes)
+            if (times.length !== values.length) continue
+            historyStore.set(key, { times, values })
+            const fileName = s.file_path.split(/[\\/]/).pop() || s.file_path
+            signals.push({
+              key,
+              name: s.channel,
+              device_name: fileName,
+              color: s.color,
+              path: s.file_path,
+              vtab_map: null,
+            })
+          } catch {
+            // Signal unavailable (file missing or channel gone) — skip silently
+          }
         }
       }
       if (signals.length > 0) {
@@ -1130,6 +1316,10 @@ async function openMf4File(filePath) {
     activeChannels.value = response.channels || []
     activeVtabMaps.value = response.vtab_maps || {}
     channelSearch.value = ''
+    fileChannelsMap.set(filePath, {
+      fileName: response.file?.name || fileNameFromPath(filePath),
+      channels: response.channels || [],
+    })
     upsertRecordFile(response.file)
     setMsg(`Loaded ${response.channel_count ?? activeChannels.value.length} channel(s) from ${response.file?.name || fileNameFromPath(filePath)}`)
   } catch (error) {

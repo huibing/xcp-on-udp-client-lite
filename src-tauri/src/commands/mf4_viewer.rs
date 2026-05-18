@@ -299,10 +299,27 @@ pub struct ChartGroupConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct DerivedVarBinding {
+    pub var_name: String,
+    pub signal_key: String,
+}
+
+/// Metadata needed to recompute a derived (calculated) signal.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DerivedSignalMeta {
+    pub expression: String,
+    #[serde(default)]
+    pub variables: Vec<DerivedVarBinding>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SignalConfig {
     pub file_path: String,
     pub channel: String,
     pub color: String,
+    /// Present only for derived (calculated) signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived: Option<DerivedSignalMeta>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
