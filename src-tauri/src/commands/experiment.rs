@@ -48,6 +48,7 @@ pub async fn experiment_variables(state: State<'_, SharedState>) -> Result<Value
                 "address_hex": format!("{:08X}", m.address),
                 "connected": connected,
                 "unit": m.unit.as_deref().unwrap_or(""),
+                "bytes": m.size,
                 "is_enum": m.compu_method.is_enum(),
                 "enum_options": enum_options,
             }));
@@ -102,6 +103,73 @@ pub async fn experiment_events(state: State<'_, SharedState>) -> Result<Value, S
             "config_device_id": config_device_id,
             "device_name": device_name,
             "events": events,
+        }));
+    }
+
+    Ok(json!({ "success": true, "devices": devices }))
+}
+
+/// Return per-device DAQ identification type and timestamp metadata.
+///
+/// Used by the DAQ layout panel to display PID byte width and timestamp info.
+/// Works without an active slave connection — shows defaults when not connected.
+#[tauri::command]
+pub async fn experiment_daq_meta(state: State<'_, SharedState>) -> Result<Value, String> {
+    use xcp_client::daq::IdentificationFieldType;
+
+    let app = state.read().await;
+    let mut devices: Vec<Value> = Vec::new();
+
+    for dev in &app.devices {
+        let device_id = dev
+            .slave_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| dev.id.clone());
+        let config_device_id = dev.id.clone();
+        let device_name = dev.display_name();
+        let connected = dev.connected;
+
+        let daq_mgr = dev.daq_manager.read().await;
+
+        let id_type = daq_mgr.get_identification_type();
+        let (pid_bytes, id_type_str) = match id_type {
+            IdentificationFieldType::AbosulteODT => (1u8, "AbsoluteODT"),
+            IdentificationFieldType::RelatetiveODTBYTE => (2u8, "RelativeODT+Byte"),
+            IdentificationFieldType::RelatetiveODTWORD => (3u8, "RelativeODT+Word"),
+            IdentificationFieldType::RelatetiveODTWORDAlign => (4u8, "RelativeODT+WordAligned"),
+        };
+
+        let ts_size = daq_mgr.get_timestamp_size().unwrap_or(0);
+        let ts_unit_str = match daq_mgr.get_timestamp_unit() {
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT1PS) => "1 ps",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT10PS) => "10 ps",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT100PS) => "100 ps",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT1NS) => "1 ns",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT10NS) => "10 ns",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT100NS) => "100 ns",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT1US) => "1 µs",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT10US) => "10 µs",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT100US) => "100 µs",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT1MS) => "1 ms",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT10MS) => "10 ms",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT100MS) => "100 ms",
+            Some(xcp_client::daq::TimestampUnit::DAQTIMESTAMPUNIT1S) => "1 s",
+            None => "unknown",
+        };
+
+        let total_measurements = daq_mgr.all_measurements().len();
+
+        devices.push(json!({
+            "device_id": device_id,
+            "config_device_id": config_device_id,
+            "device_name": device_name,
+            "connected": connected,
+            "identification_type": id_type_str,
+            "pid_bytes": pid_bytes,
+            "has_timestamp": ts_size > 0,
+            "timestamp_bytes": ts_size,
+            "timestamp_unit": ts_unit_str,
+            "total_measurements": total_measurements,
         }));
     }
 

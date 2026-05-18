@@ -44,6 +44,9 @@
           :title="`Calibration History (${calHistory.length} action${calHistory.length !== 1 ? 's' : ''})`"
           @click="showCalHistory = !showCalHistory">🕐</button>
         <div class="sb-flex"></div>
+        <button class="sb-btn" :class="{ 'sb-active': showDaqLayout }"
+          title="DAQ List Allocation Layout — shows planned DAQ structure per device"
+          @click="openDaqLayout">🗂</button>
         <button class="sb-btn sb-help" title="Help & user guide" @click="showHelpModal = true">❓</button>
       </div>
 
@@ -787,6 +790,24 @@
         </div>
       </div>
     </div>
+
+    <!-- DAQ Layout Modal -->
+    <div v-if="showDaqLayout" class="modal-overlay" @click.self="showDaqLayout = false">
+      <div class="modal" style="width:900px; max-width:96vw;">
+        <div class="modal-hdr">
+          <span>🗂 DAQ List Allocation Layout</span>
+          <button class="modal-close" @click="showDaqLayout = false">×</button>
+        </div>
+        <div class="modal-body" style="max-height:70vh; overflow-y:auto; padding:14px 16px;">
+          <div style="margin-bottom:10px; color:var(--exp-fg-dim); font-size:0.8rem;">{{ daqLayoutNote }}</div>
+          <div v-html="daqLayoutHtml"></div>
+        </div>
+        <div class="modal-footer" style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:0.75rem; color:var(--exp-fg-dim3);">Based on current tab variables — no slave connection needed</span>
+          <button class="exp-btn" @click="refreshDaqLayout">↻ Refresh</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -980,6 +1001,11 @@ const removedVarsList = ref([])   // [{tabTitle, varName, deviceName}]
 
 // ── Help modal state ──────────────────────────────────────────────────────────
 const showHelpModal = ref(false)
+
+// ── DAQ Layout panel ──────────────────────────────────────────────────────────
+const showDaqLayout = ref(false)
+const daqLayoutNote = ref('')
+const daqLayoutHtml = ref('')
 
 // ── Event selection state ─────────────────────────────────────────────────────
 // config_device_id → [{channel, name, short_name, cycle_time_ms}]
@@ -2108,6 +2134,209 @@ function getEventName(configDeviceId, channel) {
     : evt.name
 }
 
+// ── DAQ Layout panel ──────────────────────────────────────────────────────────
+
+function escHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+async function openDaqLayout() {
+  showDaqLayout.value = true
+  await refreshDaqLayout()
+}
+
+async function refreshDaqLayout() {
+  daqLayoutNote.value = 'Loading…'
+  daqLayoutHtml.value = ''
+  try {
+    const serverData = await invoke('experiment_daq_meta')
+    const deviceMeta = {}
+    if (serverData.success && serverData.devices) {
+      serverData.devices.forEach(d => { deviceMeta[d.config_device_id] = d })
+    }
+    const devices = computeDaqLayoutFromTabs(deviceMeta)
+    if (!devices.length) {
+      daqLayoutHtml.value = '<div class="daq-empty-msg">No devices configured. Upload an A2L file first.</div>'
+      daqLayoutNote.value = ''
+      return
+    }
+    const totalSel = devices.reduce((s, d) => s + (d.selected_count || 0), 0)
+    daqLayoutNote.value = `${devices.length} device(s), ${totalSel} measurement(s) selected across all tabs`
+    daqLayoutHtml.value = devices.map(renderDaqDevice).join('')
+  } catch (e) {
+    const devices = computeDaqLayoutFromTabs({})
+    if (!devices.length) {
+      daqLayoutHtml.value = '<div class="daq-empty-msg">No devices configured.</div>'
+    } else {
+      daqLayoutHtml.value = devices.map(renderDaqDevice).join('')
+    }
+    daqLayoutNote.value = 'Server meta unavailable — showing defaults'
+  }
+}
+
+function computeDaqLayoutFromTabs(deviceMeta) {
+  // Build measurement bytes lookup from allMeasurements
+  const measLookup = {}
+  allMeasurements.value.forEach(m => { measLookup[`${m.device_id}:${m.idx}`] = m })
+
+  // Collect unique measurement variables from ALL tabs, keyed by "device_id:idx"
+  const usedPerCfgDev = {}
+  tabs.value.forEach(tab => {
+    ;(tab.variables || []).forEach(v => {
+      if (v.kind !== 'measurement') return
+      const key = `${v.device_id}:${v.idx}`
+      const cfgId = v.config_device_id || v.device_id
+      if (!usedPerCfgDev[cfgId]) usedPerCfgDev[cfgId] = {}
+      if (usedPerCfgDev[cfgId][key]) return // dedup
+      const m = measLookup[key]
+      usedPerCfgDev[cfgId][key] = {
+        idx: v.idx,
+        name: v.name,
+        bytes: (m && m.bytes) ? m.bytes : 0,
+        data_type: v.type || (m && m.type) || '?',
+        unit: v.unit || (m && m.unit) || '',
+        event_channel: v.event_channel !== undefined ? v.event_channel : 0,
+        device_id: v.device_id,
+        config_device_id: cfgId,
+      }
+    })
+  })
+
+  const allCfgIds = new Set([...Object.keys(usedPerCfgDev), ...Object.keys(deviceMeta)])
+
+  const result = []
+  allCfgIds.forEach(cfgId => {
+    const meta = deviceMeta[cfgId] || {
+      device_id: cfgId, config_device_id: cfgId, device_name: cfgId,
+      connected: false, identification_type: 'AbsoluteODT',
+      pid_bytes: 1, has_timestamp: false, timestamp_bytes: 0,
+      timestamp_unit: 'unknown', total_measurements: 0,
+    }
+
+    const vars = Object.values(usedPerCfgDev[cfgId] || {})
+
+    // Group by event channel (1 DAQ list per event)
+    const eventGroups = {}
+    vars.forEach(v => {
+      const ch = v.event_channel
+      if (!eventGroups[ch]) eventGroups[ch] = []
+      eventGroups[ch].push(v)
+    })
+    const sortedChs = Object.keys(eventGroups).map(Number).sort((a, b) => a - b)
+
+    const availEvents = availableEventsByDevice[cfgId] || []
+    let absPid = 0
+    const daqLists = sortedChs.map((ch, daqIdx) => {
+      const grpVars = eventGroups[ch]
+      const evt = availEvents.find(e => e.channel === ch) || { name: `Ch${ch}`, short_name: '', cycle_time_ms: 0 }
+      const entries = grpVars.map(v => ({ name: v.name, bytes: v.bytes, data_type: v.data_type, unit: v.unit }))
+      const dataBytes = grpVars.reduce((s, v) => s + (v.bytes || 0), 0)
+      const odt = {
+        odt_idx: 0, absolute_pid: absPid, pid_bytes: meta.pid_bytes,
+        has_timestamp: meta.has_timestamp, timestamp_bytes: meta.timestamp_bytes,
+        data_bytes: dataBytes,
+        total_bytes: meta.pid_bytes + (meta.has_timestamp ? meta.timestamp_bytes : 0) + dataBytes,
+        entries,
+      }
+      absPid++
+      return {
+        daq_list_idx: daqIdx, event_channel: ch,
+        event_name: evt.name, event_short_name: evt.short_name || '',
+        event_cycle_ms: evt.cycle_time_ms || 0, odt_count: 1, odts: [odt],
+      }
+    })
+
+    result.push({
+      device_id: meta.device_id || cfgId, config_device_id: cfgId,
+      device_name: meta.device_name || cfgId, connected: meta.connected || false,
+      identification_type: meta.identification_type || 'AbsoluteODT',
+      pid_bytes: meta.pid_bytes || 1, has_timestamp: meta.has_timestamp || false,
+      timestamp_bytes: meta.timestamp_bytes || 0, timestamp_unit: meta.timestamp_unit || 'unknown',
+      selected_count: vars.length, total_measurements: meta.total_measurements || 0,
+      daq_list_count: daqLists.length, daq_lists: daqLists,
+    })
+  })
+  return result
+}
+
+function renderDaqDevice(dev) {
+  const pidLabel = `${dev.identification_type} — ${dev.pid_bytes} byte${dev.pid_bytes !== 1 ? 's' : ''} PID`
+  const tsLabel = dev.has_timestamp
+    ? `${dev.timestamp_bytes} byte${dev.timestamp_bytes !== 1 ? 's' : ''} @ ${dev.timestamp_unit}`
+    : 'none (determined after slave connect)'
+  const connBadge = dev.connected
+    ? '<span style="color:#00ff88;font-size:0.72rem;">● connected</span>'
+    : '<span style="color:#666;font-size:0.72rem;">○ not connected</span>'
+  const selLabel = `${dev.selected_count || 0} selected`
+
+  let listsHtml = ''
+  const daqLists = dev.daq_lists || []
+  if (!daqLists.length) {
+    listsHtml = dev.selected_count
+      ? '<div class="daq-empty-msg">No DAQ lists — all selected measurements are calibration-only.</div>'
+      : '<div class="daq-empty-msg">No measurement variables added to any tab for this device. Use 📋 to add measurements.</div>'
+  } else {
+    listsHtml = daqLists.map(lst => renderDaqList(lst, dev)).join('')
+  }
+
+  return `<div class="daq-layout-device">
+    <div class="daq-layout-device-header" onclick="var b=this.nextElementSibling;b.style.display=b.style.display==='none'?'block':'none'">
+      <span style="color:#666;">▾</span>
+      <span class="daq-layout-device-title">${escHtml(dev.device_name)}</span>
+      ${connBadge}
+      <span class="daq-layout-device-meta">${escHtml(selLabel)}</span>
+    </div>
+    <div class="daq-layout-device-body">
+      <div class="daq-layout-meta-row">
+        <div class="daq-layout-meta-item">PID mode: <span>${escHtml(pidLabel)}</span></div>
+        <div class="daq-layout-meta-item">Timestamp: <span>${escHtml(tsLabel)}</span></div>
+        <div class="daq-layout-meta-item">DAQ lists: <span>${dev.daq_list_count || 0}</span></div>
+      </div>
+      ${listsHtml}
+    </div>
+  </div>`
+}
+
+function renderDaqList(lst, dev) {
+  const eventStr = `Ch${lst.event_channel}: ${escHtml(lst.event_name)}`
+  const cycleStr = lst.event_cycle_ms > 0 ? ` (${lst.event_cycle_ms.toFixed(1)} ms)` : ''
+  const header = `<div class="daq-list-header" onclick="var b=this.nextElementSibling;b.style.display=b.style.display==='none'?'block':'none'">
+    <span class="daq-list-label">DAQ${lst.daq_list_idx}</span>
+    <span class="daq-list-event">${eventStr}</span>
+    <span class="daq-list-cycle">${escHtml(cycleStr)}</span>
+  </div>`
+  const odtsHtml = (lst.odts || []).map(odt => renderDaqOdt(odt, dev)).join('')
+  return `<div class="daq-list-card">${header}<div class="daq-list-body">${odtsHtml}</div></div>`
+}
+
+function renderDaqOdt(odt, dev) {
+  const idType = dev.identification_type || 'AbsoluteODT'
+  const pidDesc = idType === 'AbsoluteODT'
+    ? `PID 0x${odt.absolute_pid.toString(16).toUpperCase().padStart(2, '0')} (${dev.pid_bytes}B absolute)`
+    : `PID (${dev.pid_bytes}B ${escHtml(idType)})`
+
+  let tsHtml = ''
+  if (odt.has_timestamp && odt.timestamp_bytes > 0) {
+    tsHtml = `<span class="daq-odt-ts">TS(${odt.timestamp_bytes}B ${escHtml(dev.timestamp_unit)})</span><span class="daq-odt-sep">|</span>`
+  }
+
+  const entriesHtml = (odt.entries || []).map(e => {
+    const unitHtml = e.unit ? ` <span class="ent-unit">${escHtml(e.unit)}</span>` : ''
+    return `<span class="daq-odt-entry">${escHtml(e.name)} <span class="ent-type">${escHtml(e.data_type)}</span> <span class="ent-bytes">${e.bytes}B</span>${unitHtml}</span>`
+  }).join(' ')
+
+  const noEntries = (!odt.entries || odt.entries.length === 0)
+    ? '<span style="color:#555;font-size:0.75rem;">(no entries)</span>'
+    : ''
+
+  return `<div class="daq-odt-row">
+    <span class="daq-odt-pid">ODT${odt.odt_idx} ${pidDesc}</span>
+    <span class="daq-odt-sep">|</span>
+    ${tsHtml}${entriesHtml}${noEntries}
+    <span style="color:#444;font-size:0.7rem;margin-left:auto;">${odt.total_bytes}B total</span>
+  </div>`
+}
+
 function openEventModal(v) {
   if (mode.value !== 'idle') {
     toast('Stop DAQ before changing the event', true)
@@ -2365,6 +2594,7 @@ function applyLoadedExp(data, deviceIdMap) {
 function handleEsc(e) {
   if (e.key !== 'Escape') return
   if (showHelpModal.value) { showHelpModal.value = false; return }
+  if (showDaqLayout.value) { showDaqLayout.value = false; return }
   if (showRemovedVarsModal.value) { showRemovedVarsModal.value = false; return }
   if (showDeviceMapModal.value) { showDeviceMapModal.value = false; return }
   if (showDcmModal.value) { showDcmModal.value = false; return }
@@ -3441,5 +3671,96 @@ onUnmounted(() => {
   color: var(--exp-fg-dim2);
   font-weight: 400;
 }
+
+/* ── DAQ Layout Panel ─────────────────────────────────────────────────────── */
+:deep(.daq-empty-msg) {
+  color: var(--exp-fg-dim3);
+  font-size: 0.82rem;
+  padding: 10px 0;
+}
+:deep(.daq-layout-device) {
+  border: 1px solid var(--exp-border);
+  border-radius: 6px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+:deep(.daq-layout-device-header) {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--exp-bg3);
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.85rem;
+}
+:deep(.daq-layout-device-header:hover) { background: var(--exp-hover); }
+:deep(.daq-layout-device-title) {
+  font-weight: 700;
+  color: var(--exp-fg-bright);
+  flex: 1;
+}
+:deep(.daq-layout-device-meta) { color: var(--exp-fg-dim); font-size: 0.76rem; }
+:deep(.daq-layout-device-body) { padding: 10px 12px; background: var(--exp-bg2); }
+:deep(.daq-layout-meta-row) {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 0.78rem;
+}
+:deep(.daq-layout-meta-item) { color: var(--exp-fg-dim); }
+:deep(.daq-layout-meta-item span) { color: var(--exp-fg); font-weight: 600; }
+:deep(.daq-list-card) {
+  border: 1px solid var(--exp-border);
+  border-radius: 4px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+:deep(.daq-list-header) {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  background: var(--exp-bg4);
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.8rem;
+}
+:deep(.daq-list-header:hover) { background: var(--exp-hover); }
+:deep(.daq-list-label) {
+  font-family: monospace;
+  font-weight: 700;
+  color: #44aaff;
+  min-width: 40px;
+}
+:deep(.daq-list-event) { color: var(--exp-fg); flex: 1; }
+:deep(.daq-list-cycle) { color: var(--exp-fg-dim3); font-size: 0.75rem; }
+:deep(.daq-list-body) { padding: 4px 8px; background: var(--exp-bg); }
+:deep(.daq-odt-row) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--exp-border);
+  font-size: 0.78rem;
+  font-family: monospace;
+}
+:deep(.daq-odt-row:last-child) { border-bottom: none; }
+:deep(.daq-odt-pid) { color: #ffcc44; font-weight: 700; min-width: 160px; }
+:deep(.daq-odt-sep) { color: #555; }
+:deep(.daq-odt-ts) { color: #88ccff; }
+:deep(.daq-odt-entry) {
+  background: var(--exp-bg3);
+  border: 1px solid var(--exp-border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--exp-fg);
+  white-space: nowrap;
+}
+:deep(.ent-type) { color: #44ffcc; font-size: 0.72rem; }
+:deep(.ent-bytes) { color: #ffaa44; font-size: 0.72rem; }
+:deep(.ent-unit) { color: var(--exp-fg-dim3); font-size: 0.7rem; }
 </style>
 

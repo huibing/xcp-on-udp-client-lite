@@ -102,6 +102,7 @@ pub fn run() {
             // Experiment
             commands::experiment::experiment_variables,
             commands::experiment::experiment_events,
+            commands::experiment::experiment_daq_meta,
             commands::experiment::experiment_set_event,
             commands::experiment::experiment_start,
             commands::experiment::experiment_stop,
