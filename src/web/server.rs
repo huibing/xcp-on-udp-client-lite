@@ -205,6 +205,10 @@ impl WebServer {
                 "/api/experiment/cal/original/:device_id/:idx",
                 get(routes::cal_original_api),
             )
+            .route(
+                "/api/experiment/daq-layout",
+                get(routes::experiment_daq_layout),
+            )
             // State and middleware
             .layer(axum::middleware::from_fn(auth_middleware))
             .layer(TraceLayer::new_for_http())

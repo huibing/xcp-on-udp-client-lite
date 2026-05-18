@@ -651,6 +651,144 @@ a.exp-sb-btn { text-decoration: none; }
     border-bottom: none;
     border-top: 6px solid #44cc66;
 }
+
+/* ===== DAQ Layout Panel ===== */
+.daq-layout-modal .exp-modal-content {
+    width: 860px;
+    max-width: 96vw;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+}
+.daq-layout-device {
+    margin-bottom: 1.25rem;
+    border: 1px solid #333;
+    border-radius: 6px;
+    overflow: hidden;
+}
+.daq-layout-device-header {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 0.75rem;
+    background: #1e1e2e;
+    border-bottom: 1px solid #333;
+    cursor: pointer;
+    user-select: none;
+}
+.daq-layout-device-header:hover { background: #252535; }
+.daq-layout-device-title {
+    font-weight: 600;
+    color: #e0e0e0;
+    font-size: 0.9rem;
+    flex: 1;
+}
+.daq-layout-device-meta {
+    font-size: 0.75rem;
+    color: #888;
+}
+.daq-layout-device-body {
+    padding: 0.6rem 0.75rem;
+    background: #12121e;
+}
+.daq-layout-meta-row {
+    display: flex;
+    gap: 1.5rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+}
+.daq-layout-meta-item {
+    font-size: 0.78rem;
+    color: #888;
+}
+.daq-layout-meta-item span {
+    color: #aaa;
+    font-weight: 500;
+}
+.daq-list-card {
+    margin-bottom: 0.75rem;
+    border: 1px solid #2a2a3a;
+    border-radius: 5px;
+    overflow: hidden;
+}
+.daq-list-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.6rem;
+    background: #1e1e30;
+    font-size: 0.82rem;
+    cursor: pointer;
+    user-select: none;
+}
+.daq-list-header:hover { background: #252540; }
+.daq-list-label {
+    font-weight: 700;
+    color: #4488ff;
+    font-family: monospace;
+}
+.daq-list-event {
+    color: #00ff88;
+    font-size: 0.78rem;
+}
+.daq-list-cycle {
+    color: #888;
+    font-size: 0.75rem;
+}
+.daq-list-body { padding: 0.4rem 0.6rem; background: #0d0d1a; }
+.daq-odt-row {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    padding: 0.25rem 0;
+    font-size: 0.78rem;
+    font-family: monospace;
+    border-bottom: 1px solid #1e1e2e;
+}
+.daq-odt-row:last-child { border-bottom: none; }
+.daq-odt-pid {
+    color: #ff8844;
+    font-weight: 700;
+    white-space: nowrap;
+}
+.daq-odt-ts {
+    color: #ffdd44;
+    white-space: nowrap;
+}
+.daq-odt-sep {
+    color: #555;
+    padding: 0 2px;
+}
+.daq-odt-entry {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    background: #1a1a2e;
+    border: 1px solid #2a2a3a;
+    border-radius: 3px;
+    padding: 1px 6px;
+    color: #e0e0e0;
+    white-space: nowrap;
+}
+.daq-odt-entry .ent-type {
+    color: #888;
+    font-size: 0.72rem;
+}
+.daq-odt-entry .ent-bytes {
+    color: #aaa;
+    font-size: 0.72rem;
+}
+.daq-odt-entry .ent-unit {
+    color: #666;
+    font-size: 0.7rem;
+}
+.daq-empty-msg {
+    color: #555;
+    font-size: 0.82rem;
+    text-align: center;
+    padding: 0.75rem;
+}
 </style>
 
 <div class="exp-container">
@@ -668,6 +806,7 @@ a.exp-sb-btn { text-decoration: none; }
         <div class="exp-sidebar">
             <button class="exp-sb-btn" onclick="expConnect()" title="Connect to devices">🔌</button>
             <button class="exp-sb-btn" id="btnAddVars" onclick="expOpenVarModal()" title="Add variables to current tab">📋</button>
+            <button class="exp-sb-btn" id="btnDaqLayout" onclick="expOpenDaqLayout()" title="Show DAQ list allocation layout">🗂</button>
             <div class="sidebar-separator"></div>
             <button class="exp-sb-btn" id="btnStart" onclick="expStart()" title="Start DAQ on all devices">▶️</button>
             <button class="exp-sb-btn" id="btnRefreshCal" onclick="expRefreshCalValues()" title="Refresh calibration values">🔄</button>
@@ -719,6 +858,24 @@ a.exp-sb-btn { text-decoration: none; }
     <!-- Status Bar -->
     <div class="exp-status-bar" id="expStatusBar">
         <span class="status-item">No devices connected</span>
+    </div>
+</div>
+
+<!-- DAQ Layout Panel -->
+<div id="expDaqLayoutModal" class="exp-modal daq-layout-modal" style="display:none;">
+    <div class="exp-modal-content">
+        <div class="exp-modal-header">
+            <h3 style="margin:0;">🗂 DAQ List Allocation Layout</h3>
+            <button class="exp-modal-close" onclick="expCloseDaqLayout()">&times;</button>
+        </div>
+        <div class="exp-modal-body" id="expDaqLayoutBody" style="flex:1; overflow-y:auto; padding:0.75rem;">
+            <div class="daq-empty-msg">Loading…</div>
+        </div>
+        <div class="exp-modal-footer">
+            <span style="flex:1; color:#666; font-size:0.78rem;" id="expDaqLayoutNote"></span>
+            <button onclick="expRefreshDaqLayout()">↻ Refresh</button>
+            <button class="secondary" onclick="expCloseDaqLayout()">Close</button>
+        </div>
     </div>
 </div>
 
@@ -3310,6 +3467,277 @@ function expToast(msg, type) {
     setTimeout(function() { toast.classList.remove('show'); }, 3000);
 }
 
+// ===== DAQ Layout Panel =====
+function expOpenDaqLayout() {
+    document.getElementById('expDaqLayoutModal').style.display = 'flex';
+    document.getElementById('btnDaqLayout').classList.add('active');
+    expRefreshDaqLayout();
+}
+
+function expCloseDaqLayout() {
+    document.getElementById('expDaqLayoutModal').style.display = 'none';
+    document.getElementById('btnDaqLayout').classList.remove('active');
+}
+
+function expRefreshDaqLayout() {
+    var body = document.getElementById('expDaqLayoutBody');
+    var note = document.getElementById('expDaqLayoutNote');
+    body.innerHTML = '<div class="daq-empty-msg">Loading…</div>';
+    note.textContent = '';
+
+    // Fetch device-level meta (PID type, timestamp) from server, then compute layout client-side
+    fetch('/api/experiment/daq-layout')
+        .then(function(r) { return r.json(); })
+        .then(function(serverData) {
+            // Build lookup: config_device_id -> server device meta
+            var deviceMeta = {};
+            if (serverData.success && serverData.devices) {
+                serverData.devices.forEach(function(d) {
+                    deviceMeta[d.config_device_id] = d;
+                });
+            }
+            var devices = expComputeDaqLayoutFromTabs(deviceMeta);
+            if (!devices.length) {
+                body.innerHTML = '<div class="daq-empty-msg">No devices configured. Upload an A2L file first.</div>';
+                return;
+            }
+            var totalSel = devices.reduce(function(s, d) { return s + (d.selected_count || 0); }, 0);
+            note.textContent = devices.length + ' device(s), ' + totalSel + ' measurement(s) selected across all tabs';
+            body.innerHTML = devices.map(expRenderDaqDevice).join('');
+        })
+        .catch(function(e) {
+            // Fallback: compute purely from client state if server is unavailable
+            var devices = expComputeDaqLayoutFromTabs({});
+            if (!devices.length) {
+                body.innerHTML = '<div class="daq-empty-msg">No devices configured.</div>';
+            } else {
+                body.innerHTML = devices.map(expRenderDaqDevice).join('');
+            }
+            note.textContent = 'Server meta unavailable — showing defaults';
+        });
+}
+
+// Compute DAQ layout from ExpState.tabs (client-side), augmented with server device meta
+function expComputeDaqLayoutFromTabs(deviceMeta) {
+    // Step 1: build measurement bytes lookup from allMeasurements
+    var measLookup = {}; // "device_id:idx" -> measurement info (incl. bytes)
+    ExpState.allMeasurements.forEach(function(m) {
+        measLookup[m.device_id + ':' + m.idx] = m;
+    });
+
+    // Step 2: collect unique measurement variables from ALL tabs, keyed by "device_id:idx"
+    var usedPerCfgDev = {}; // config_device_id -> { "device_id:idx" -> varInfo }
+    ExpState.tabs.forEach(function(tab) {
+        (tab.variables || []).forEach(function(v) {
+            if (v.kind !== 'measurement') return;
+            var key = v.device_id + ':' + v.idx;
+            var cfgId = v.config_device_id || v.device_id;
+            if (!usedPerCfgDev[cfgId]) usedPerCfgDev[cfgId] = {};
+            if (usedPerCfgDev[cfgId][key]) return; // dedup
+            var m = measLookup[key];
+            usedPerCfgDev[cfgId][key] = {
+                idx: v.idx,
+                name: v.name,
+                bytes: (m && m.bytes) ? m.bytes : 0,
+                data_type: v.type || (m && m.type) || '?',
+                unit: v.unit || (m && m.unit) || '',
+                event_channel: v.event_channel !== undefined ? v.event_channel
+                    : (expEventSelections[key] !== undefined ? expEventSelections[key] : 0),
+                device_id: v.device_id,
+                device_name: v.device_name,
+                config_device_id: cfgId,
+            };
+        });
+    });
+
+    // Step 3: for every config device known (from server or from tabs), build layout
+    var allCfgIds = new Set();
+    Object.keys(usedPerCfgDev).forEach(function(id) { allCfgIds.add(id); });
+    Object.keys(deviceMeta).forEach(function(id) { allCfgIds.add(id); });
+
+    var result = [];
+    allCfgIds.forEach(function(cfgId) {
+        var meta = deviceMeta[cfgId] || {
+            device_id: cfgId,
+            config_device_id: cfgId,
+            device_name: cfgId,
+            connected: false,
+            identification_type: 'AbsoluteODT',
+            pid_bytes: 1,
+            has_timestamp: false,
+            timestamp_bytes: 0,
+            timestamp_unit: 'unknown',
+            total_measurements: 0,
+        };
+
+        var vars = Object.values(usedPerCfgDev[cfgId] || {});
+
+        // Group by event channel (preserve ordering)
+        var eventGroups = {}; // ch -> [vars]
+        vars.forEach(function(v) {
+            var ch = v.event_channel;
+            if (!eventGroups[ch]) eventGroups[ch] = [];
+            eventGroups[ch].push(v);
+        });
+        var sortedChs = Object.keys(eventGroups).map(Number).sort(function(a, b) { return a - b; });
+
+        // Lookup available events for this device
+        var availEvents = ExpState.availableEventsByDevice[cfgId] || [];
+
+        var absPid = 0;
+        var daqLists = sortedChs.map(function(ch, daqIdx) {
+            var grpVars = eventGroups[ch];
+            var evt = availEvents.find(function(e) { return e.channel === ch; })
+                || { name: 'Ch' + ch, short_name: '', cycle_time_ms: 0 };
+
+            var entries = grpVars.map(function(v) {
+                return { name: v.name, bytes: v.bytes, data_type: v.data_type, unit: v.unit };
+            });
+            var dataBytes = grpVars.reduce(function(s, v) { return s + (v.bytes || 0); }, 0);
+            var odtTotalBytes = meta.pid_bytes
+                + (meta.has_timestamp ? meta.timestamp_bytes : 0)
+                + dataBytes;
+
+            var odt = {
+                odt_idx: 0,
+                absolute_pid: absPid,
+                pid_bytes: meta.pid_bytes,
+                has_timestamp: meta.has_timestamp,
+                timestamp_bytes: meta.timestamp_bytes,
+                data_bytes: dataBytes,
+                total_bytes: odtTotalBytes,
+                entries: entries,
+            };
+            absPid++;
+
+            return {
+                daq_list_idx: daqIdx,
+                event_channel: ch,
+                event_name: evt.name,
+                event_short_name: evt.short_name || '',
+                event_cycle_ms: evt.cycle_time_ms || 0,
+                odt_count: 1,
+                odts: [odt],
+            };
+        });
+
+        result.push({
+            device_id: meta.device_id || cfgId,
+            config_device_id: cfgId,
+            device_name: meta.device_name || cfgId,
+            connected: meta.connected || false,
+            identification_type: meta.identification_type || 'AbsoluteODT',
+            pid_bytes: meta.pid_bytes || 1,
+            has_timestamp: meta.has_timestamp || false,
+            timestamp_bytes: meta.timestamp_bytes || 0,
+            timestamp_unit: meta.timestamp_unit || 'unknown',
+            selected_count: vars.length,
+            total_measurements: meta.total_measurements || 0,
+            daq_list_count: daqLists.length,
+            daq_lists: daqLists,
+        });
+    });
+
+    return result;
+}
+
+function expRenderDaqDevice(dev) {
+    var pidLabel = dev.identification_type + ' — ' + dev.pid_bytes + ' byte' + (dev.pid_bytes !== 1 ? 's' : '') + ' PID';
+    var tsLabel = dev.has_timestamp
+        ? dev.timestamp_bytes + ' byte' + (dev.timestamp_bytes !== 1 ? 's' : '') + ' @ ' + dev.timestamp_unit
+        : 'none (determined after slave connect)';
+    var selLabel = (dev.selected_count || 0) + ' selected';
+    var connBadge = dev.connected
+        ? '<span style="color:#00ff88; font-size:0.72rem;">● connected</span>'
+        : '<span style="color:#666; font-size:0.72rem;">○ not connected</span>';
+
+    var listsHtml = '';
+    var daqLists = dev.daq_lists || [];
+    if (!daqLists.length) {
+        if (!dev.selected_count) {
+            listsHtml = '<div class="daq-empty-msg">No measurement variables added to any tab for this device. Use 📋 to add measurements.</div>';
+        } else {
+            listsHtml = '<div class="daq-empty-msg">No DAQ lists — all selected measurements are calibration-only.</div>';
+        }
+    } else {
+        listsHtml = daqLists.map(function(lst) {
+            return expRenderDaqList(lst, dev);
+        }).join('');
+    }
+
+    return '<div class="daq-layout-device">' +
+        '<div class="daq-layout-device-header" onclick="var b=this.nextElementSibling;b.style.display=b.style.display===\'none\'?\'block\':\'none\'">' +
+        '<span style="color:#666;">▾</span>' +
+        '<span class="daq-layout-device-title">' + escapeHtml(dev.device_name) + '</span>' +
+        connBadge +
+        '<span class="daq-layout-device-meta">' + escapeHtml(selLabel) + '</span>' +
+        '</div>' +
+        '<div class="daq-layout-device-body">' +
+        '<div class="daq-layout-meta-row">' +
+        '<div class="daq-layout-meta-item">PID mode: <span>' + escapeHtml(pidLabel) + '</span></div>' +
+        '<div class="daq-layout-meta-item">Timestamp: <span>' + escapeHtml(tsLabel) + '</span></div>' +
+        '<div class="daq-layout-meta-item">DAQ lists: <span>' + (dev.daq_list_count || 0) + '</span></div>' +
+        '</div>' +
+        listsHtml +
+        '</div>' +
+        '</div>';
+}
+
+function expRenderDaqList(lst, dev) {
+    var eventStr = 'Ch' + lst.event_channel + ': ' + escapeHtml(lst.event_name);
+    var cycleStr = lst.event_cycle_ms > 0 ? ' (' + lst.event_cycle_ms.toFixed(1) + ' ms)' : '';
+    var header = '<div class="daq-list-header" onclick="var b=this.nextElementSibling;b.style.display=b.style.display===\'none\'?\'block\':\'none\'">' +
+        '<span class="daq-list-label">DAQ' + lst.daq_list_idx + '</span>' +
+        '<span class="daq-list-event">' + eventStr + '</span>' +
+        '<span class="daq-list-cycle">' + escapeHtml(cycleStr) + '</span>' +
+        '</div>';
+
+    var odtsHtml = (lst.odts || []).map(function(odt) {
+        return expRenderDaqOdt(odt, dev);
+    }).join('');
+
+    return '<div class="daq-list-card">' + header + '<div class="daq-list-body">' + odtsHtml + '</div></div>';
+}
+
+function expRenderDaqOdt(odt, dev) {
+    // Build PID description
+    var pidDesc;
+    var idType = dev.identification_type || 'AbsoluteODT';
+    if (idType === 'AbsoluteODT') {
+        pidDesc = 'PID 0x' + odt.absolute_pid.toString(16).toUpperCase().padStart(2, '0') + ' (' + dev.pid_bytes + 'B absolute)';
+    } else {
+        pidDesc = 'PID (' + dev.pid_bytes + 'B ' + escapeHtml(idType) + ')';
+    }
+
+    var tsHtml = '';
+    if (odt.has_timestamp && odt.timestamp_bytes > 0) {
+        tsHtml = '<span class="daq-odt-ts">TS(' + odt.timestamp_bytes + 'B ' + escapeHtml(dev.timestamp_unit) + ')</span>' +
+            '<span class="daq-odt-sep">|</span>';
+    }
+
+    var entriesHtml = (odt.entries || []).map(function(e) {
+        var unitHtml = e.unit ? ' <span class="ent-unit">' + escapeHtml(e.unit) + '</span>' : '';
+        return '<span class="daq-odt-entry">' +
+            escapeHtml(e.name) +
+            ' <span class="ent-type">' + escapeHtml(e.data_type) + '</span>' +
+            ' <span class="ent-bytes">' + e.bytes + 'B</span>' +
+            unitHtml +
+            '</span>';
+    }).join(' ');
+
+    var noEntries = !odt.entries || odt.entries.length === 0
+        ? '<span style="color:#555; font-size:0.75rem;">(no entries)</span>'
+        : '';
+
+    return '<div class="daq-odt-row">' +
+        '<span class="daq-odt-pid">ODT' + odt.odt_idx + ' ' + pidDesc + '</span>' +
+        '<span class="daq-odt-sep">|</span>' +
+        tsHtml +
+        entriesHtml + noEntries +
+        '<span style="color:#444; font-size:0.7rem; margin-left:auto;">' + odt.total_bytes + 'B total</span>' +
+        '</div>';
+}
+
 // Global keyboard shortcuts for modals: Esc = close, Enter = save & close
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
@@ -3320,6 +3748,7 @@ document.addEventListener('keydown', function(e) {
         expCloseMatrix();
         expCancelDeviceMap();
         expCloseEventModal();
+        expCloseDaqLayout();
         document.getElementById('expChecksumModal').style.display = 'none';
     } else if (e.key === 'Enter' && !e.target.matches('input, textarea, select')) {
         var varModal = document.getElementById('expVarModal');

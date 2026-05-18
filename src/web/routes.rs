@@ -4522,6 +4522,7 @@ pub async fn experiment_variables(State(state): State<AppState>) -> impl IntoRes
                 "name": m.name,
                 "type": format!("{:?}", m.data_type),
                 "address_hex": format!("{:08X}", m.address),
+                "bytes": m.size,
                 "connected": connected,
                 "unit": m.unit.as_deref().unwrap_or(""),
                 "is_enum": m.compu_method.is_enum(),
@@ -5675,6 +5676,151 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Ve
     });
     let _ = std::fs::remove_file(&temp_path);
     content
+}
+
+/// DAQ layout preview for all devices (GET /api/experiment/daq-layout)
+///
+/// Returns the planned DAQ structure: per device → per event-group (DAQ list) → ODTs + entries.
+/// Works without an active slave connection — based on selected measurements and event assignments.
+pub async fn experiment_daq_layout(State(state): State<AppState>) -> impl IntoResponse {
+    use crate::daq::IdentificationFieldType;
+    use std::collections::BTreeMap;
+
+    let devices = state.all_devices().await;
+    let mut result: Vec<serde_json::Value> = Vec::new();
+
+    for device in &devices {
+        let device_name = device.display_name_or_custom().await;
+        let device_id = if let Some(slave_id) = device.slave_id {
+            slave_id.to_string()
+        } else {
+            device.id.clone()
+        };
+
+        let daq_mgr = device.daq_manager.read().await;
+        let all_measurements = daq_mgr.all_measurements();
+        let selected_indices = daq_mgr.selected_indices();
+
+        // PID info from identification field type
+        let id_type = daq_mgr.get_identification_type();
+        let (pid_bytes, id_type_str) = match id_type {
+            IdentificationFieldType::AbosulteODT => (1u8, "AbsoluteODT"),
+            IdentificationFieldType::RelatetiveODTBYTE => (2u8, "RelativeODT+Byte"),
+            IdentificationFieldType::RelatetiveODTWORD => (3u8, "RelativeODT+Word"),
+            IdentificationFieldType::RelatetiveODTWORDAlign => (4u8, "RelativeODT+WordAligned"),
+        };
+
+        // Timestamp info
+        let ts_size = daq_mgr.get_timestamp_size().unwrap_or(0);
+        let ts_unit_str = match daq_mgr.get_timestamp_unit() {
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT1PS) => "1 ps",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT10PS) => "10 ps",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT100PS) => "100 ps",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT1NS) => "1 ns",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT10NS) => "10 ns",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT100NS) => "100 ns",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT1US) => "1 µs",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT10US) => "10 µs",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT100US) => "100 µs",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT1MS) => "1 ms",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT10MS) => "10 ms",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT100MS) => "100 ms",
+            Some(crate::daq::TimestampUnit::DAQTIMESTAMPUNIT1S) => "1 s",
+            None => "unknown",
+        };
+
+        // Build event channel → name lookup
+        let available_events = daq_mgr.get_available_events();
+        let event_lookup: std::collections::HashMap<u16, &crate::a2l::DaqEvent> =
+            available_events.iter().map(|e| (e.channel, e)).collect();
+
+        // Group selected measurement indices by event channel (preserving event order)
+        let mut event_groups: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
+        for &meas_idx in selected_indices {
+            let ch = daq_mgr.get_measurement_event(meas_idx);
+            event_groups.entry(ch).or_default().push(meas_idx);
+        }
+
+        // Build DAQ list entries — one per unique event channel
+        // Compute absolute PID counter (for AbsoluteODT identification type)
+        let mut abs_pid: u16 = 0;
+        let mut daq_lists: Vec<serde_json::Value> = Vec::new();
+        for (daq_list_idx, (event_ch, meas_indices)) in event_groups.iter().enumerate() {
+            let event = event_lookup.get(event_ch);
+            let event_name = event.map(|e| e.name.as_str()).unwrap_or("unknown");
+            let event_short_name = event.map(|e| e.short_name.as_str()).unwrap_or("");
+            let event_cycle_ms = event.map(|e| e.cycle_time_ms()).unwrap_or(0.0);
+
+            // All selected measurements for this event → one ODT for preview
+            // (no payload splitting; we don't know slave max_dto without a connection)
+            let entries: Vec<serde_json::Value> = meas_indices
+                .iter()
+                .filter_map(|&idx| all_measurements.get(idx))
+                .map(|m| {
+                    json!({
+                        "name": m.name,
+                        "bytes": m.size,
+                        "data_type": format!("{:?}", m.data_type),
+                        "unit": m.unit.as_deref().unwrap_or(""),
+                        "address_hex": format!("0x{:08X}", m.address),
+                    })
+                })
+                .collect();
+
+            let data_bytes: usize = entries
+                .iter()
+                .map(|e| e["bytes"].as_u64().unwrap_or(0) as usize)
+                .sum();
+
+            // Compute absolute PID for this ODT (AbsoluteODT mode assigns PIDs globally)
+            let odt_pid = abs_pid;
+            abs_pid += 1;
+
+            let odt_total_bytes = pid_bytes as usize + if ts_size > 0 { ts_size as usize } else { 0 } + data_bytes;
+
+            let odt = json!({
+                "odt_idx": 0,
+                "absolute_pid": odt_pid,
+                "pid_bytes": pid_bytes,
+                "has_timestamp": ts_size > 0,
+                "timestamp_bytes": ts_size,
+                "data_bytes": data_bytes,
+                "total_bytes": odt_total_bytes,
+                "entries": entries,
+            });
+
+            daq_lists.push(json!({
+                "daq_list_idx": daq_list_idx,
+                "event_channel": event_ch,
+                "event_name": event_name,
+                "event_short_name": event_short_name,
+                "event_cycle_ms": event_cycle_ms,
+                "odt_count": 1,
+                "odts": [odt],
+            }));
+        }
+
+        result.push(json!({
+            "device_id": device_id,
+            "config_device_id": device.id,
+            "device_name": device_name,
+            "connected": device.connected,
+            "identification_type": id_type_str,
+            "pid_bytes": pid_bytes,
+            "has_timestamp": ts_size > 0,
+            "timestamp_bytes": ts_size,
+            "timestamp_unit": ts_unit_str,
+            "selected_count": selected_indices.len(),
+            "total_measurements": all_measurements.len(),
+            "daq_list_count": daq_lists.len(),
+            "daq_lists": daq_lists,
+        }));
+    }
+
+    Json(json!({
+        "success": true,
+        "devices": result,
+    }))
 }
 
 #[cfg(test)]

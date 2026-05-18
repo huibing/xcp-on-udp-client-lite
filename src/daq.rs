@@ -730,6 +730,21 @@ impl DaqManager {
         self.daq_resolution.as_ref()
     }
 
+    /// Get identification field type (PID format)
+    pub fn get_identification_type(&self) -> &IdentificationFieldType {
+        &self.indentification_field_type
+    }
+
+    /// Get timestamp size in bytes (0 = no timestamp, or unknown before slave connect)
+    pub fn get_timestamp_size(&self) -> Option<u8> {
+        self.timestamp_size
+    }
+
+    /// Get timestamp unit
+    pub fn get_timestamp_unit(&self) -> Option<TimestampUnit> {
+        self.timestamp_unit
+    }
+
     /// Get all available measurements
     pub fn all_measurements(&self) -> &[Measurement] {
         &self.all_measurements
