@@ -377,6 +377,56 @@ export function mergeTimeBases(timesArray) {
 }
 
 /**
+ * Numerical differentiation of a sampled signal using central differences.
+ * Endpoints use one-sided (forward/backward) differences.
+ *
+ * @param {Float64Array|number[]} times  - Monotonically increasing time stamps
+ * @param {Float64Array|number[]} values - Signal values at each time stamp
+ * @returns {Float64Array}              - d(values)/d(times)
+ */
+export function differentiate(times, values) {
+  const n = times.length
+  const out = new Float64Array(n)
+  if (n === 0) return out
+  if (n === 1) { out[0] = 0; return out }
+
+  // Forward difference at first point
+  out[0] = (values[1] - values[0]) / (times[1] - times[0])
+
+  // Central differences for interior points
+  for (let i = 1; i < n - 1; i++) {
+    const dt = times[i + 1] - times[i - 1]
+    out[i] = dt !== 0 ? (values[i + 1] - values[i - 1]) / dt : 0
+  }
+
+  // Backward difference at last point
+  out[n - 1] = (values[n - 1] - values[n - 2]) / (times[n - 1] - times[n - 2])
+
+  return out
+}
+
+/**
+ * Numerical integration using the trapezoidal rule (cumulative sum).
+ * The first output sample is always 0 (initial condition).
+ *
+ * @param {Float64Array|number[]} times  - Monotonically increasing time stamps
+ * @param {Float64Array|number[]} values - Signal values at each time stamp
+ * @returns {Float64Array}              - Cumulative integral of values over time
+ */
+export function integrate(times, values) {
+  const n = times.length
+  const out = new Float64Array(n)
+  if (n === 0) return out
+  out[0] = 0
+  for (let i = 1; i < n; i++) {
+    const dt = times[i] - times[i - 1]
+    out[i] = out[i - 1] + (values[i] + values[i - 1]) * 0.5 * dt
+  }
+  return out
+}
+
+
+/**
  * Compute a derived signal from an expression and source signals.
  *
  * The output time base is the sorted union of all source signals' time bases.

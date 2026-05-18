@@ -45,6 +45,16 @@
                 @input="clearPreview"
               />
               <span class="derived-eq">=</span>
+              <select
+                v-model="v.transform"
+                class="derived-transform-select"
+                title="Optional transformation applied before the formula"
+                @change="clearPreview"
+              >
+                <option value="none">raw</option>
+                <option value="diff">d/dt</option>
+                <option value="integ">∫ dt</option>
+              </select>
               <div class="derived-sig-picker">
                 <input
                   v-model="v.searchText"
@@ -148,7 +158,7 @@
 
 <script setup>
 import { ref, computed } from 'vue'
-import { compile, computeDerivedSignal } from '../utils/expressionEvaluator.js'
+import { compile, computeDerivedSignal, differentiate, integrate } from '../utils/expressionEvaluator.js'
 
 // ── Props / Emits ─────────────────────────────────────────────────────────────
 
@@ -219,6 +229,7 @@ function makeVar(v) {
     sigLabel:     sig?.label        ?? v.signal_key,
     searchText:   sig?.label        ?? v.signal_key,
     dropdownOpen: false,
+    transform:    v.transform       ?? 'none',
   }
 }
 
@@ -244,7 +255,7 @@ function clearPreview() {
 }
 
 function addVar() {
-  vars.value.push({ varName: '', signalKey: '', filePath: '', channelName: '', sigLabel: '', searchText: '', dropdownOpen: false })
+  vars.value.push({ varName: '', signalKey: '', filePath: '', channelName: '', sigLabel: '', searchText: '', dropdownOpen: false, transform: 'none' })
   clearPreview()
 }
 
@@ -316,6 +327,12 @@ async function validate() {
           return
         }
       }
+      // Apply per-variable transform (d/dt or ∫)
+      if (v.transform === 'diff') {
+        data = { times: data.times, values: differentiate(data.times, data.values) }
+      } else if (v.transform === 'integ') {
+        data = { times: data.times, values: integrate(data.times, data.values) }
+      }
       signalData[v.varName] = data
     }
 
@@ -359,7 +376,11 @@ async function confirm() {
   emit('add', {
     name:        signalName.value,
     expression:  expression.value,
-    derivedVars: vars.value.map(v => ({ var_name: v.varName, signal_key: v.signalKey })),
+    derivedVars: vars.value.map(v => ({
+      var_name:   v.varName,
+      signal_key: v.signalKey,
+      transform:  v.transform !== 'none' ? v.transform : undefined,
+    })),
     times:       previewResult.times,
     values:      previewResult.values,
   })
@@ -524,9 +545,25 @@ button.sm {
 
 .derived-var-row {
   display: grid;
-  grid-template-columns: 90px 20px 1fr 30px;
+  grid-template-columns: 90px 20px 68px 1fr 30px;
   align-items: center;
   gap: 6px;
+}
+
+.derived-transform-select {
+  background: var(--exp-bg2);
+  color: var(--exp-fg-bright);
+  border: 1px solid var(--exp-border);
+  border-radius: 4px;
+  padding: 5px 4px;
+  font-family: monospace;
+  font-size: 0.8rem;
+  outline: none;
+  cursor: pointer;
+  text-align: center;
+}
+.derived-transform-select:focus {
+  border-color: var(--exp-fg-bright);
 }
 
 .derived-sig-picker {

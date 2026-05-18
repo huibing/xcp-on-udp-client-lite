@@ -302,6 +302,10 @@ pub struct ChartGroupConfig {
 pub struct DerivedVarBinding {
     pub var_name: String,
     pub signal_key: String,
+    /// Optional per-variable transformation applied before the formula.
+    /// Supported values: "diff" (d/dt, central differences), "integ" (∫ dt, trapezoidal).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transform: Option<String>,
 }
 
 /// Metadata needed to recompute a derived (calculated) signal.

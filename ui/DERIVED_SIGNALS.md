@@ -114,6 +114,26 @@ import { compile, interpolate, mergeTimeBases, computeDerivedSignal }
 | `max(x, y, …)` | Maximum of arguments |
 | `clamp(x, lo, hi)` | Clamp x to [lo, hi] |
 
+### Per-Variable Transforms
+
+Before a variable is fed into the formula, an optional **transform** can be applied to it per variable in the dialog's binding row.
+
+| Transform | Label | Method | Notes |
+|-----------|-------|--------|-------|
+| None | `raw` | — | Values used as-is |
+| Differentiation | `d/dt` | Central differences (forward/backward at endpoints) | Units: signal_unit / time_unit |
+| Integration | `∫ dt` | Trapezoidal rule, cumulative from t=0 | Units: signal_unit × time_unit |
+
+Implementations exported from `expressionEvaluator.js`:
+```js
+export function differentiate(times, values)  // → Float64Array
+export function integrate(times, values)       // → Float64Array
+```
+
+These operate on the **full time series** before interpolation or formula evaluation, so non-uniform sample rates are handled correctly.
+
+**Typical use cases:** `d/dt` position → velocity; `∫ dt` velocity → displacement; `∫ dt` power → energy.
+
 ### Constants
 | Name | Value |
 |------|-------|
@@ -178,15 +198,7 @@ Constants take priority over variable names of the same spelling, so choose name
 
 ## Stateful / Windowed Algorithms
 
-The current evaluator is **sample-by-sample**: `evaluate(vars)` is called once per time point with scalar values. This is correct for pointwise functions (arithmetic, trig) but cannot express stateful operations like:
-
-- Moving average / sliding window
-- Differentiation (`d/dt`)
-- Integration (cumulative sum)
-- Low-pass / high-pass IIR filters
-- Peak detection
-
-### Recommended approach for stateful algorithms
+**d/dt differentiation and ∫ integration are now built-in** — select them from the transform dropdown in each variable binding row. For all other stateful operations:
 
 Instead of adding them to `FUNCTIONS` (which only receive scalars), implement them as **post-processors** that operate on the full `{ times, values }` result or directly on source signals.
 
@@ -252,12 +264,14 @@ Derived signals are saved inside the viewer config file (JSON) via `SignalConfig
   "derived": {
     "expression": "sin(a) * 2 + b",
     "variables": [
-      { "var_name": "a", "signal_key": "/path/to/file.mf4::EngineSpeed" },
+      { "var_name": "a", "signal_key": "/path/to/file.mf4::EngineSpeed", "transform": "diff" },
       { "var_name": "b", "signal_key": "/path/to/file.mf4::Throttle" }
     ]
   }
 }
 ```
+
+`transform` is omitted when `"none"` (raw). Supported values: `"diff"` (d/dt), `"integ"` (∫ dt).
 
 The Rust structs are in `src-tauri/src/commands/mf4_viewer.rs`:
 - `DerivedSignalMeta { expression: String, variables: Vec<DerivedVarBinding> }`

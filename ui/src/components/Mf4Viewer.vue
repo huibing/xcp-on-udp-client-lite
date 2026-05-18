@@ -436,7 +436,7 @@ import SignalChart from './SignalChart.vue'
 import DerivedSignalDialog from './DerivedSignalDialog.vue'
 import { useMf4Settings } from '../composables/useMf4Settings.js'
 import { useTheme } from '../composables/useTheme.js'
-import { computeDerivedSignal } from '../utils/expressionEvaluator.js'
+import { computeDerivedSignal, differentiate, integrate } from '../utils/expressionEvaluator.js'
 
 const SIGNAL_COLORS = ['#00ff66', '#4dd2ff', '#ffcc00', '#ff6688', '#b388ff', '#ff9966', '#66e0a3']
 
@@ -807,6 +807,12 @@ async function loadConfig() {
                 const ch = v.signal_key.slice(sepIdx + 2)
                 try { data = await loadSignalDataForDerived(fp, ch) }
                 catch { missingVar = true; break }
+              }
+              // Re-apply per-variable transform (d/dt or ∫)
+              if (v.transform === 'diff') {
+                data = { times: data.times, values: differentiate(data.times, data.values) }
+              } else if (v.transform === 'integ') {
+                data = { times: data.times, values: integrate(data.times, data.values) }
               }
               signalData[v.var_name] = data
             }
