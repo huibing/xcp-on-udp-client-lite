@@ -448,11 +448,153 @@ export function integrate(times, values) {
 }
 
 
+// ── Filter implementations ────────────────────────────────────────────────────
+
+/**
+ * 1st-order IIR low-pass filter (RC-equivalent).
+ * α = exp(−2π·fc·Δt) is computed per-step, so irregular sampling is handled correctly.
+ *
+ * @param {Float64Array} times  - Monotonically increasing timestamps (seconds)
+ * @param {Float64Array} values - Input signal samples
+ * @param {number}       fc     - Cutoff frequency in Hz
+ * @returns {Float64Array}      - Filtered output
+ */
+export function lowpassFilter(times, values, fc) {
+  const n   = values.length
+  const out = new Float64Array(n)
+  if (n === 0) return out
+  out[0] = values[0]
+  const twoPiFc = 2 * Math.PI * fc
+  for (let i = 1; i < n; i++) {
+    const alpha = Math.exp(-twoPiFc * (times[i] - times[i - 1]))
+    out[i] = alpha * out[i - 1] + (1 - alpha) * values[i]
+  }
+  return out
+}
+
+/**
+ * 1st-order IIR high-pass filter (RC-equivalent).
+ *
+ * @param {Float64Array} times  - Monotonically increasing timestamps (seconds)
+ * @param {Float64Array} values - Input signal samples
+ * @param {number}       fc     - Cutoff frequency in Hz
+ * @returns {Float64Array}      - Filtered output
+ */
+export function highpassFilter(times, values, fc) {
+  const n   = values.length
+  const out = new Float64Array(n)
+  if (n === 0) return out
+  out[0] = 0
+  const twoPiFc = 2 * Math.PI * fc
+  for (let i = 1; i < n; i++) {
+    const alpha = Math.exp(-twoPiFc * (times[i] - times[i - 1]))
+    out[i] = alpha * (out[i - 1] + values[i] - values[i - 1])
+  }
+  return out
+}
+
+/**
+ * Band-pass filter: low-pass at hiFc, then high-pass at loFc.
+ * Passes frequencies in the range [loFc, hiFc].
+ *
+ * @param {Float64Array} times  - Monotonically increasing timestamps (seconds)
+ * @param {Float64Array} values - Input signal samples
+ * @param {number}       loFc   - Lower cutoff frequency in Hz (high-pass edge)
+ * @param {number}       hiFc   - Upper cutoff frequency in Hz (low-pass edge)
+ * @returns {Float64Array}      - Filtered output
+ */
+export function bandpassFilter(times, values, loFc, hiFc) {
+  return highpassFilter(times, lowpassFilter(times, values, hiFc), loFc)
+}
+
+
+/**
+ * Walk the AST and replace Lowpass(expr, fc) / Highpass(expr, fc) /
+ * Bandpass(expr, loFc, hiFc) call nodes with temporary variable references.
+ * The filtered series is pre-computed and stored in workSignalData so the
+ * main point-by-point eval loop never sees filter nodes.
+ *
+ * Nesting is supported: Highpass(Lowpass(a, 10), 1) produces a band-pass result.
+ *
+ * @param {object}       node           - Current AST node
+ * @param {object}       workSignalData - Mutable; temp entries are added here
+ * @param {Float64Array} times          - Merged time base for the full expression
+ * @returns {object}                    - Possibly-replaced AST node
+ */
+function transformFilterNodes(node, workSignalData, times) {
+  if (!node) return node
+
+  const FILTER_NAMES = ['Lowpass', 'Highpass', 'Bandpass']
+  if (node.type === 'call' && FILTER_NAMES.includes(node.name)) {
+    const isBandpass    = node.name === 'Bandpass'
+    const expectedArgs  = isBandpass ? 3 : 2
+    if (node.args.length !== expectedArgs)
+      throw new Error(`${node.name}() requires exactly ${expectedArgs} arguments: ${isBandpass ? '(expression, loHz, hiHz)' : '(expression, cutoffHz)'}`)
+
+    // Recurse into inner expression first (handles nested filters)
+    const innerAst = transformFilterNodes(node.args[0], workSignalData, times)
+
+    // Helper: evaluate a frequency argument as a constant
+    function evalFreqArg(argNode, label) {
+      const a = transformFilterNodes(argNode, workSignalData, times)
+      let v
+      try { v = evalNode(a, {}) } catch {
+        throw new Error(`${node.name}(): ${label} must be a constant expression`)
+      }
+      if (!isFinite(v) || v <= 0)
+        throw new Error(`${node.name}(): ${label} must be a positive number, got ${v}`)
+      return v
+    }
+    const loOrFc = evalFreqArg(node.args[1], isBandpass ? 'loHz' : 'cutoffHz')
+    const hiFc   = isBandpass ? evalFreqArg(node.args[2], 'hiHz') : null
+    if (isBandpass && loOrFc >= hiFc)
+      throw new Error(`Bandpass(): loHz (${loOrFc}) must be less than hiHz (${hiFc})`)
+
+    // Pre-compute the inner expression over all time points
+    const entries   = Object.entries(workSignalData)
+    const innerVals = new Float64Array(times.length)
+    for (let i = 0; i < times.length; i++) {
+      const t    = times[i]
+      const vars = {}
+      for (const [name, data] of entries) vars[name] = interpolate(data.times, data.values, t)
+      innerVals[i] = evalNode(innerAst, vars)
+    }
+
+    // Apply the filter and store as a temporary variable
+    let filtered
+    if (node.name === 'Lowpass')       filtered = lowpassFilter(times, innerVals, loOrFc)
+    else if (node.name === 'Highpass') filtered = highpassFilter(times, innerVals, loOrFc)
+    else                               filtered = bandpassFilter(times, innerVals, loOrFc, hiFc)
+
+    const tmpKey = `__ftmp_${Object.keys(workSignalData).length}`
+    workSignalData[tmpKey] = { times, values: filtered }
+    return { type: 'var', name: tmpKey }
+  }
+
+  // Recursively transform all child nodes
+  const n = { ...node }
+  if (n.args)    n.args    = n.args.map(a => transformFilterNodes(a, workSignalData, times))
+  if (n.left)    n.left    = transformFilterNodes(n.left, workSignalData, times)
+  if (n.right)   n.right   = transformFilterNodes(n.right, workSignalData, times)
+  if (n.operand) n.operand = transformFilterNodes(n.operand, workSignalData, times)
+  if (n.cond)    n.cond    = transformFilterNodes(n.cond, workSignalData, times)
+  if (n.then)    n.then    = transformFilterNodes(n.then, workSignalData, times)
+  // eslint-disable-next-line dot-notation
+  if (n['else']) n['else'] = transformFilterNodes(n['else'], workSignalData, times)
+  return n
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
 /**
  * Compute a derived signal from an expression and source signals.
  *
  * The output time base is the sorted union of all source signals' time bases.
  * Source signals are linearly interpolated at each output time point.
+ *
+ * Supports filter functions: Lowpass(expr, fc) and Highpass(expr, fc) where
+ * fc is the cutoff frequency in Hz. These can wrap any sub-expression and nest:
+ *   Highpass(Lowpass(a * b, 10), 1)   → band-pass
  *
  * @param {string} expression - Formula, e.g. "sin(a) * 2 + b"
  * @param {Record<string, { times: Float64Array, values: Float64Array }>} signalData
@@ -461,20 +603,24 @@ export function integrate(times, values) {
  * @throws on syntax error or unknown variable/function
  */
 export function computeDerivedSignal(expression, signalData) {
-  const { evaluate } = compile(expression)
+  // Parse once to get the raw AST
+  const ast  = new Parser(tokenize(expression.trim())).parse()
 
-  const allTimes = Object.values(signalData).map(d => d.times)
-  const times    = mergeTimeBases(allTimes)
-  const values   = new Float64Array(times.length)
-  const entries  = Object.entries(signalData)
+  // Build merged time base from all source signals
+  const times = mergeTimeBases(Object.values(signalData).map(d => d.times))
 
+  // Pre-process: replace Lowpass/Highpass calls with precomputed temp vars
+  const workData = { ...signalData }
+  const finalAst = transformFilterNodes(ast, workData, times)
+
+  // Point-by-point evaluation of the transformed AST
+  const values  = new Float64Array(times.length)
+  const entries = Object.entries(workData)
   for (let i = 0; i < times.length; i++) {
     const t    = times[i]
     const vars = {}
-    for (const [name, data] of entries) {
-      vars[name] = interpolate(data.times, data.values, t)
-    }
-    values[i] = evaluate(vars)
+    for (const [name, data] of entries) vars[name] = interpolate(data.times, data.values, t)
+    values[i] = evalNode(finalAst, vars)
   }
 
   return { times, values }

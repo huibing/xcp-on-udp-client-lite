@@ -258,8 +258,28 @@ pub fn mf4_get_channel_time(
 // ── Viewer config save / load ─────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Mf4ViewerConfig {
+pub struct TabConfig {
+    pub id: String,
+    pub name: String,
     pub view: ViewConfig,
+    pub groups: Vec<ChartGroupConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Mf4ViewerConfig {
+    #[serde(default)]
+    pub tabs: Vec<TabConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_tab_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_file_path: Option<String>,
+    #[serde(default = "default_true")]
+    pub files_panel_open: bool,
+    #[serde(default)]
+    pub channels_panel_open: bool,
+    #[serde(default, skip_serializing)]
+    pub view: Option<ViewConfig>,
+    #[serde(default, skip_serializing)]
     pub groups: Vec<ChartGroupConfig>,
     #[serde(default)]
     pub file_offsets: HashMap<String, f64>,
@@ -359,6 +379,7 @@ mod tests {
 
     use super::{
         collect_mf4_files, f64_values_to_le_bytes, resolve_records_dir, sort_channel_names,
+        Mf4ViewerConfig,
     };
 
     struct TempDir {

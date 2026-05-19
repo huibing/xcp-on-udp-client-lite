@@ -132,6 +132,11 @@
                 <strong>Constants</strong>
                 <code>pi &nbsp; e</code>
               </div>
+              <div class="derived-ref-row">
+                <strong>Filters</strong>
+                <code>Lowpass(expr, fc) &nbsp; Highpass(expr, fc) &nbsp; Bandpass(expr, loHz, hiHz)</code>
+                <span class="derived-ref-note">fc/loHz/hiHz = cutoff frequency in Hz; wraps any sub-expression, nestable</span>
+              </div>
             </div>
           </details>
         </div>

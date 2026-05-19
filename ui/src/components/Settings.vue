@@ -93,6 +93,51 @@
         <div class="form-hint">Placeholders: {title}, {YYYYMMDD}, {HHMMSS}. The device name is appended automatically when recording multiple devices.</div>
       </div>
     </div>
+
+    <!-- CSV Export settings -->
+    <div class="settings-card">
+      <div class="settings-section-title">📊 CSV Export</div>
+      <p class="settings-hint">Options for the "Export CSV" function in MF4 Viewer.</p>
+
+      <div class="form-group">
+        <label class="form-label">Column Separator</label>
+        <div class="toggle-group">
+          <button
+            class="toggle-btn" :class="{ active: csvSeparator === 'comma' }"
+            @click="csvSeparator = 'comma'">
+            Comma &nbsp;<code>,</code>
+          </button>
+          <button
+            class="toggle-btn" :class="{ active: csvSeparator === 'semicolon' }"
+            @click="csvSeparator = 'semicolon'">
+            Semicolon &nbsp;<code>;</code>
+          </button>
+          <button
+            class="toggle-btn" :class="{ active: csvSeparator === 'colon' }"
+            @click="csvSeparator = 'colon'">
+            Colon &nbsp;<code>:</code>
+          </button>
+        </div>
+        <div class="form-hint">Separator character used between columns in the exported .csv file.</div>
+      </div>
+
+      <div class="form-group" style="margin-bottom: 0">
+        <label class="form-label">Enum Channel Values</label>
+        <div class="toggle-group">
+          <button
+            class="toggle-btn" :class="{ active: enumExportMode === 'text' }"
+            @click="enumExportMode = 'text'">
+            Text (default)
+          </button>
+          <button
+            class="toggle-btn" :class="{ active: enumExportMode === 'raw' }"
+            @click="enumExportMode = 'raw'">
+            Raw (numeric)
+          </button>
+        </div>
+        <div class="form-hint">How to export enum (Value-to-Text) channels. "Text" outputs the label string; "Raw" outputs the underlying numeric value.</div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -100,10 +145,12 @@
 import { useTheme } from '../composables/useTheme.js'
 import { useMf4Settings } from '../composables/useMf4Settings.js'
 import { useFont } from '../composables/useFont.js'
+import { useCsvExportSettings } from '../composables/useCsvExportSettings.js'
 
 const { theme, customFg, customBg, themeOptions } = useTheme()
 const { mf4Dir, mf4Pattern } = useMf4Settings()
 const { fontId, customFont, fontSize, fontOptions, fontSizeOptions } = useFont()
+const { csvSeparator, enumExportMode } = useCsvExportSettings()
 </script>
 
 <style scoped>
@@ -271,5 +318,30 @@ const { fontId, customFont, fontSize, fontOptions, fontSizeOptions } = useFont()
   font-size: 11px;
   color: var(--exp-fg-dim4, #335522);
   margin-top: 4px;
+}
+
+/* ── Toggle button group (CSV Export section) ────────────────────────────── */
+.toggle-group { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.toggle-btn {
+  padding: 5px 14px;
+  border-radius: 5px;
+  cursor: pointer;
+  border: 2px solid var(--exp-border2, #002211);
+  background: var(--exp-bg3, #0d0d0d);
+  color: var(--exp-fg, #00cc44);
+  font-size: 12px;
+  font-family: var(--exp-font, monospace);
+  transition: border-color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+.toggle-btn:hover { border-color: var(--exp-border, #003311); }
+.toggle-btn.active {
+  border-color: var(--exp-fg-bright, #00ff66);
+  color: var(--exp-fg-bright, #00ff66);
+}
+.toggle-btn code {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
 }
 </style>

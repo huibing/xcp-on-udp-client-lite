@@ -815,7 +815,17 @@ function createChart() {
           ticks: {
             color: props.tickColor,
             maxTicksLimit: 8,
-            callback: v => `${Number(v).toFixed(1)}s`,
+            callback: (v, _index, ticks) => {
+              // Compute precision from tick step so zoomed-in labels never repeat
+              let precision = 1
+              if (ticks.length >= 2) {
+                const step = Math.abs(ticks[1].value - ticks[0].value)
+                if (step > 0) {
+                  precision = Math.max(0, Math.min(6, Math.ceil(-Math.log10(step))))
+                }
+              }
+              return `${Number(v).toFixed(precision)}s`
+            },
           },
           border: { color: props.gridColor },
         },
@@ -827,10 +837,19 @@ function createChart() {
           ticks: {
             color: props.tickColor,
             maxTicksLimit: 6,
-            callback: v => {
+            callback: (v, _index, ticks) => {
               const n = Number(v)
+              // Use exponential for extreme magnitudes
               if (Math.abs(n) >= 1e5 || (Math.abs(n) < 1e-3 && n !== 0)) return n.toExponential(1)
-              return parseFloat(n.toPrecision(4)).toString()
+              // Compute precision dynamically from tick step to avoid duplicate labels
+              let precision = 2
+              if (ticks.length >= 2) {
+                const step = Math.abs(ticks[1].value - ticks[0].value)
+                if (step > 0) {
+                  precision = Math.max(0, Math.min(6, Math.ceil(-Math.log10(step))))
+                }
+              }
+              return n.toFixed(precision)
             },
           },
           border: { color: props.gridColor },

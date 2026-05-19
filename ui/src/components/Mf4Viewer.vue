@@ -18,14 +18,54 @@
         <button class="secondary" @click="loadConfig" :disabled="loadingConfig" title="Load a previously saved viewer config (TOML)">
           {{ loadingConfig ? 'Loading…' : '↑ Load Config' }}
         </button>
-        <button class="secondary" @click="saveConfig" :disabled="savingConfig || loadedSignals.length === 0" title="Save current signals, view and zoom to a TOML file">
+        <button class="secondary" @click="saveConfig" :disabled="savingConfig || !anyTabHasSignals" title="Save current signals, view and zoom to a TOML file">
           {{ savingConfig ? 'Saving…' : '↓ Save Config' }}
         </button>
+        <button
+          class="secondary"
+          @click="exportCsv"
+          :disabled="exportingCsv || loadedSignals.length === 0"
+          title="Export all loaded signals to a CSV file"
+        >{{ exportingCsv ? 'Exporting…' : '⇩ Export CSV' }}</button>
         <button @click="browseMf4File" :disabled="openingFile !== '' || loadingSignal !== ''">Open MF4…</button>
       </div>
     </div>
 
     <div v-if="msg" class="msg" :class="msgErr ? 'err' : ''">{{ msg }}</div>
+
+    <!-- ── Tab bar ──────────────────────────────────────────────────────────── -->
+    <div class="tab-bar">
+      <div
+        v-for="(tab, idx) in tabs"
+        :key="tab.id"
+        class="tab-item"
+        :class="{ active: idx === activeTabIdx }"
+        @click="switchTab(idx)"
+      >
+        <span
+          v-if="renamingTabId !== tab.id"
+          class="tab-name"
+          @dblclick.stop="startRenaming(tab.id)"
+          :title="tab.name + ' — double-click to rename'"
+        >{{ tab.name }}</span>
+        <input
+          v-else
+          ref="renameInputEl"
+          class="tab-rename-input"
+          :value="tab.name"
+          @keydown.enter.prevent="finishRenaming($event.target.value)"
+          @keydown.escape.prevent="cancelRenaming"
+          @blur="finishRenaming($event.target.value)"
+        />
+        <button
+          v-if="tabs.length > 1"
+          class="tab-close-btn"
+          @click.stop="closeTab(idx)"
+          title="Close tab"
+        >✕</button>
+      </div>
+      <button class="tab-add-btn" @click="addTab" title="Add new tab">+</button>
+    </div>
 
     <div class="layout" :style="layoutGridStyle">
       <!-- ── Side panels wrapper ────────────────────────────────────────── -->
@@ -154,21 +194,24 @@
             </div>
           </div>
 
-          <!-- ── Derived signals mini-list ─────────────────────────────── -->
-          <template v-if="loadedSignals.some(s => s.isDerived)">
+          <!-- ── Global derived signals list ─────────────────────────────── -->
+          <template v-if="globalDerivedSignals.length > 0">
             <div class="panel-header" style="margin-top: 8px;">
               <h2 style="font-size: 0.85rem; margin: 0;">Derived Signals</h2>
             </div>
             <div class="channel-list">
               <div
-                v-for="sig in loadedSignals.filter(s => s.isDerived)"
-                :key="sig.key + '-mini'"
+                v-for="sig in globalDerivedSignals"
+                :key="sig.key + '-global'"
                 class="channel-row"
               >
                 <span class="channel-name">{{ sig.name }}</span>
                 <div style="display:flex; gap:4px;">
                   <button class="sm" @click="openEditDerivedDialog(sig)" title="Edit expression">✎</button>
-                  <button class="sm" @click="addDerivedToNewChart(sig)">Add +</button>
+                  <button class="sm" @click="addDerivedToActiveTab(sig)" :disabled="isDerivedInActiveTab(sig.key)">
+                    {{ isDerivedInActiveTab(sig.key) ? '✓' : 'Add' }}
+                  </button>
+                  <button class="sm danger-sm" @click="removeDerivedSignal(sig.key)" title="Remove derived signal">✕</button>
                 </div>
               </div>
             </div>
@@ -255,9 +298,9 @@
               :cursorBTime="diffCursorBTime"
               :fileTimeOffsets="fileTimeOffsets"
               :showGrabHandle="true"
-              @cursor-move="sharedCursorTime = $event"
-              @cursor-a-move="diffCursorATime = $event"
-              @cursor-b-move="diffCursorBTime = $event"
+              @cursor-move="setCursorTime"
+              @cursor-a-move="setDiffCursorA"
+              @cursor-b-move="setDiffCursorB"
               @color-change="onSignalColorChange"
               @zoom-x="applyChartZoom"
               @zoom-y="onChartZoomY(group.id, $event)"
@@ -390,7 +433,7 @@
       <div class="confirm-dialog">
         <div class="confirm-title">⚠ Unsaved State</div>
         <div class="confirm-body">
-          You have <strong>{{ loadedSignalKeys.size }} signal(s)</strong> loaded.
+          You have signals loaded in one or more tabs.
           Navigating away will clear them — they won't be restored when you return to MF4 Viewer.
         </div>
         <div class="confirm-actions">
@@ -427,7 +470,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, markRaw, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { open, save as dialogSave } from '@tauri-apps/plugin-dialog'
@@ -436,12 +479,14 @@ import SignalChart from './SignalChart.vue'
 import DerivedSignalDialog from './DerivedSignalDialog.vue'
 import { useMf4Settings } from '../composables/useMf4Settings.js'
 import { useTheme } from '../composables/useTheme.js'
+import { useCsvExportSettings } from '../composables/useCsvExportSettings.js'
 import { computeDerivedSignal, differentiate, integrate } from '../utils/expressionEvaluator.js'
 
 const SIGNAL_COLORS = ['#00ff66', '#4dd2ff', '#ffcc00', '#ff6688', '#b388ff', '#ff9966', '#66e0a3']
 
 const { mf4Dir } = useMf4Settings()
 const { theme } = useTheme()
+const { csvSeparator, enumExportMode } = useCsvExportSettings()
 
 const recordFiles = ref([])
 const recordDirectory = ref('')
@@ -455,17 +500,169 @@ const openingFile = ref('')
 const loadingSignal = ref('')
 const msg = ref('')
 const msgErr = ref(false)
-// ── Chart groups ── each group holds one or more signals rendered in one chart ─
-const chartGroups = ref([])   // [{ id: string, signals: [sigObj, ...] }]
-const loadedSignals = computed(() => chartGroups.value.flatMap(g => g.signals))
 const historyStore = new Map()
-const sharedCursorTime = ref(null)
-const mf4CursorVisible = ref(false)
-const diffCursorActive = ref(false)
-const diffCursorATime = ref(null)
-const diffCursorBTime = ref(null)
+
+// ── Tab state ─────────────────────────────────────────────────────────────────
+function createTab(name, id) {
+  return {
+    id: id ?? crypto.randomUUID(),
+    name: name ?? `Tab ${tabs.length + 1}`,
+    chartGroups: [],
+    chartRefs: markRaw(new Map()),
+    undoQueue: markRaw([]),
+    undoCount: 0,
+    cursorVisible: false,
+    cursorTime: null,
+    diffCursorActive: false,
+    diffCursorATime: null,
+    diffCursorBTime: null,
+    viewStart: 0,
+    viewEnd: 1,
+    viewStartInput: 0,
+    viewEndInput: 1,
+    dataTimeMin: 0,
+    dataTimeMax: 1,
+  }
+}
+
+const tabs = reactive([])
+const activeTabIdx = ref(0)
+const activeTab = computed(() => tabs[activeTabIdx.value] ?? tabs[0])
+
+tabs.push(createTab('Tab 1'))
+
+// ── Global derived signals registry (shared across all tabs) ──────────────────
+// Data lives in historyStore; this registry tracks signal metadata.
+const globalDerivedSignals = reactive([])
+
+const chartGroups = computed({
+  get: () => activeTab.value?.chartGroups ?? [],
+  set: (v) => { if (activeTab.value) activeTab.value.chartGroups = v },
+})
+const sharedCursorTime = computed({
+  get: () => activeTab.value?.cursorTime ?? null,
+  set: (v) => { if (activeTab.value) activeTab.value.cursorTime = v },
+})
+const mf4CursorVisible = computed({
+  get: () => activeTab.value?.cursorVisible ?? false,
+  set: (v) => { if (activeTab.value) activeTab.value.cursorVisible = v },
+})
+const diffCursorActive = computed({
+  get: () => activeTab.value?.diffCursorActive ?? false,
+  set: (v) => { if (activeTab.value) activeTab.value.diffCursorActive = v },
+})
+const diffCursorATime = computed({
+  get: () => activeTab.value?.diffCursorATime ?? null,
+  set: (v) => { if (activeTab.value) activeTab.value.diffCursorATime = v },
+})
+const diffCursorBTime = computed({
+  get: () => activeTab.value?.diffCursorBTime ?? null,
+  set: (v) => { if (activeTab.value) activeTab.value.diffCursorBTime = v },
+})
+const viewStart = computed({
+  get: () => activeTab.value?.viewStart ?? 0,
+  set: (v) => { if (activeTab.value) activeTab.value.viewStart = v },
+})
+const viewEnd = computed({
+  get: () => activeTab.value?.viewEnd ?? 1,
+  set: (v) => { if (activeTab.value) activeTab.value.viewEnd = v },
+})
+const viewStartInput = computed({
+  get: () => activeTab.value?.viewStartInput ?? 0,
+  set: (v) => { if (activeTab.value) activeTab.value.viewStartInput = v },
+})
+const viewEndInput = computed({
+  get: () => activeTab.value?.viewEndInput ?? 1,
+  set: (v) => { if (activeTab.value) activeTab.value.viewEndInput = v },
+})
+const dataTimeMin = computed({
+  get: () => activeTab.value?.dataTimeMin ?? 0,
+  set: (v) => { if (activeTab.value) activeTab.value.dataTimeMin = v },
+})
+const dataTimeMax = computed({
+  get: () => activeTab.value?.dataTimeMax ?? 1,
+  set: (v) => { if (activeTab.value) activeTab.value.dataTimeMax = v },
+})
+const undoCount = computed(() => activeTab.value?.undoCount ?? 0)
+const loadedSignals = computed(() => chartGroups.value.flatMap(g => g.signals))
 
 const fileChannelsMap = reactive(new Map())  // filePath → { fileName, channels: string[] }
+
+// ── Tab management ────────────────────────────────────────────────────────────
+const renamingTabId = ref(null)
+const renameInputEl = ref(null)
+
+function syncTabYZoomFromRefs(tab = activeTab.value) {
+  if (!tab) return
+  for (const group of tab.chartGroups) {
+    group.yZoom = tab.chartRefs.get(group.id)?.getYZoom() ?? group.yZoom ?? null
+  }
+}
+
+async function restoreActiveTabYZooms() {
+  await nextTick()
+  const tab = activeTab.value
+  if (!tab) return
+  for (const group of tab.chartGroups) {
+    if (group.yZoom) {
+      tab.chartRefs.get(group.id)?.setYZoom(group.yZoom.min, group.yZoom.max)
+    }
+  }
+}
+
+function addTab() {
+  syncTabYZoomFromRefs(activeTab.value)
+  const tab = createTab()
+  tabs.push(tab)
+  activeTabIdx.value = tabs.length - 1
+}
+
+function closeTab(idx) {
+  if (tabs.length <= 1) return
+  const tab = tabs[idx]
+  if (idx === activeTabIdx.value) {
+    syncTabYZoomFromRefs(activeTab.value)
+  }
+  if (tab && renamingTabId.value === tab.id) cancelRenaming()
+  tabs.splice(idx, 1)
+  if (activeTabIdx.value >= tabs.length) {
+    activeTabIdx.value = tabs.length - 1
+  } else if (idx < activeTabIdx.value) {
+    activeTabIdx.value -= 1
+  }
+}
+
+function switchTab(idx) {
+  if (idx === activeTabIdx.value) return
+  syncTabYZoomFromRefs(activeTab.value)
+  if (renamingTabId.value) cancelRenaming()
+  activeTabIdx.value = idx
+  nextTick(() => restoreActiveTabYZooms())
+}
+
+function startRenaming(tabId) {
+  renamingTabId.value = tabId
+  nextTick(() => {
+    const input = Array.isArray(renameInputEl.value)
+      ? renameInputEl.value[0]
+      : renameInputEl.value
+    if (input) input.select()
+  })
+}
+
+function finishRenaming(newName) {
+  const tab = tabs.find(t => t.id === renamingTabId.value)
+  if (tab && newName.trim()) tab.name = newName.trim()
+  renamingTabId.value = null
+}
+
+function cancelRenaming() {
+  renamingTabId.value = null
+}
+
+const setCursorTime = (t) => { if (activeTab.value) activeTab.value.cursorTime = t }
+const setDiffCursorA = (t) => { if (activeTab.value) activeTab.value.diffCursorATime = t }
+const setDiffCursorB = (t) => { if (activeTab.value) activeTab.value.diffCursorBTime = t }
 
 // ── Derived signal dialog ─────────────────────────────────────────────────────
 const showDerivedDialog = ref(false)
@@ -513,45 +710,80 @@ async function loadSignalDataForDerived(filePath, channelName) {
 
 function addDerivedSignalFromDialog({ name, expression, derivedVars, times, values }) {
   if (editingDerivedSig.value) {
-    // ── Edit mode: update the existing derived signal in place ───────────────
+    // ── Edit mode: update signal everywhere it appears ──────────────────────
     const sig = editingDerivedSig.value
     historyStore.set(sig.key, { times, values })
     sig.name              = name
     sig.derivedExpression = expression
     sig.derivedVars       = derivedVars
-    // Trigger reactivity by replacing the chartGroups array (signals are plain objects)
-    chartGroups.value = chartGroups.value.map(g => ({
-      ...g,
-      signals: g.signals.map(s => (s.key === sig.key ? { ...sig } : s)),
-    }))
+    // Update global registry entry
+    const globalEntry = globalDerivedSignals.find(d => d.key === sig.key)
+    if (globalEntry) {
+      globalEntry.name              = name
+      globalEntry.derivedExpression = expression
+      globalEntry.derivedVars       = derivedVars
+    }
+    // Propagate changes to ALL tabs that reference this signal
+    for (const tab of tabs) {
+      tab.chartGroups = tab.chartGroups.map(g => ({
+        ...g,
+        signals: g.signals.map(s => (s.key === sig.key ? { ...sig } : s)),
+      }))
+    }
   } else {
-    // ── Create mode: add as a new chart group ─────────────────────────────────
+    // ── Create mode: register globally, add to active tab ──────────────────
     const key = `derived::${crypto.randomUUID()}`
     historyStore.set(key, { times, values })
     const sigObj = {
       key,
       name,
       device_name: '[derived]',
-      color: pickColor(loadedSignals.value.length),
-      path: '',       // no file path for derived signals
+      color: pickColor(allGlobalSignalCount()),
+      path: '',
       vtab_map: null,
       isDerived:          true,
       derivedExpression:  expression,
-      derivedVars,        // [{ var_name, signal_key }]
+      derivedVars,
     }
+    // Register in global list
+    globalDerivedSignals.push(sigObj)
+    // Add to active tab
     const newGroupId = crypto.randomUUID()
-    chartGroups.value = [...chartGroups.value, { id: newGroupId, signals: [sigObj] }]
+    chartGroups.value = [...chartGroups.value, { id: newGroupId, signals: [{ ...sigObj }] }]
     pushUndo({ type: 'add-signal', key, groupId: newGroupId })
   }
   editingDerivedSig.value = null
   showDerivedDialog.value = false
 }
 
-// Adds an already-computed derived signal as a new chart group (from the mini-list)
-function addDerivedToNewChart(sig) {
+/** Returns total signal count across all tabs (used for color picking) */
+function allGlobalSignalCount() {
+  return tabs.reduce((n, t) => n + t.chartGroups.reduce((m, g) => m + g.signals.length, 0), 0)
+}
+
+/** True when the active tab already shows this derived signal */
+function isDerivedInActiveTab(key) {
+  return chartGroups.value.some(g => g.signals.some(s => s.key === key))
+}
+
+/** Add a global derived signal to the active tab (no-op if already there) */
+function addDerivedToActiveTab(sig) {
+  if (isDerivedInActiveTab(sig.key)) return
   const newGroupId = crypto.randomUUID()
-  chartGroups.value = [...chartGroups.value, { id: newGroupId, signals: [sig] }]
+  chartGroups.value = [...chartGroups.value, { id: newGroupId, signals: [{ ...sig }] }]
   pushUndo({ type: 'add-signal', key: sig.key, groupId: newGroupId })
+}
+
+/** Remove a derived signal from global registry and all tabs */
+function removeDerivedSignal(key) {
+  const idx = globalDerivedSignals.findIndex(d => d.key === key)
+  if (idx !== -1) globalDerivedSignals.splice(idx, 1)
+  for (const tab of tabs) {
+    tab.chartGroups = tab.chartGroups
+      .map(g => ({ ...g, signals: g.signals.filter(s => s.key !== key) }))
+      .filter(g => g.signals.length > 0)
+  }
+  historyStore.delete(key)
 }
 
 // ── Drag-and-drop state ───────────────────────────────────────────────────────
@@ -572,44 +804,44 @@ const reorderInsertIdx = ref(null)  // number | null — insert position indicat
 //
 // remove-signal, remove-group, and clear-all preserve historyStore data for undo.
 // Data is cleaned up when the entry is evicted from the 10-slot queue.
-const undoQueue = []   // plain array — not reactive, mutations trigger no re-render
-const undoCount = ref(0)   // reactive mirror of undoQueue.length for UI
 
 function pushUndo(action) {
-  if (undoQueue.length >= 10) {
-    const evicted = undoQueue.shift()
-    // Free historyStore data retained for remove/clear actions once they leave the queue
+  const tab = activeTab.value
+  if (!tab) return
+  const q = tab.undoQueue
+  if (q.length >= 10) {
+    const evicted = q.shift()
+    // Free historyStore data — check ALL tabs AND global derived registry before deleting
+    const allKeys = new Set([
+      ...tabs.flatMap(t => t.chartGroups.flatMap(g => g.signals.map(s => s.key))),
+      ...globalDerivedSignals.map(d => d.key),
+    ])
     if (evicted.type === 'remove-signal') {
-      if (!chartGroups.value.some(g => g.signals.some(s => s.key === evicted.key))) {
-        historyStore.delete(evicted.key)
-      }
+      if (!allKeys.has(evicted.key)) historyStore.delete(evicted.key)
     } else if (evicted.type === 'remove-group') {
       for (const sig of evicted.group.signals) {
-        if (!chartGroups.value.some(g => g.signals.some(s => s.key === sig.key))) {
-          historyStore.delete(sig.key)
-        }
+        if (!allKeys.has(sig.key)) historyStore.delete(sig.key)
       }
     } else if (evicted.type === 'clear-all') {
       for (const group of evicted.groups) {
         for (const sig of group.signals) {
-          if (!chartGroups.value.some(g => g.signals.some(s => s.key === sig.key))) {
-            historyStore.delete(sig.key)
-          }
+          if (!allKeys.has(sig.key)) historyStore.delete(sig.key)
         }
       }
     }
   }
-  undoQueue.push(action)
-  undoCount.value = undoQueue.length
+  q.push(action)
+  tab.undoCount = q.length
 }
 
 // ── Chart component refs (keyed by group.id) for Y-zoom undo ─────────────────
-const chartRefs = new Map()
 const chartPanelEl = ref(null)
 
 function registerChartRef(groupId, el) {
-  if (el) chartRefs.set(groupId, el)
-  else chartRefs.delete(groupId)
+  const tab = activeTab.value
+  if (!tab) return
+  if (el) tab.chartRefs.set(groupId, el)
+  else tab.chartRefs.delete(groupId)
 }
 
 // ── Panel collapse state ──────────────────────────────────────────────────────
@@ -642,8 +874,12 @@ const showLeaveWarning = ref(false)
 const pendingNavigateTo = ref(null)
 const leaveConfirmed = ref(false)
 
+const anyTabHasSignals = computed(() =>
+  tabs.some(tab => tab.chartGroups.some(g => g.signals.length > 0))
+)
+
 onBeforeRouteLeave((to) => {
-  if (loadedSignals.value.length > 0 && !leaveConfirmed.value) {
+  if (anyTabHasSignals.value && !leaveConfirmed.value) {
     showLeaveWarning.value = true
     pendingNavigateTo.value = to.fullPath
     return false
@@ -665,9 +901,10 @@ function cancelLeave() {
 // ── Config save / load ────────────────────────────────────────────────────────
 const savingConfig = ref(false)
 const loadingConfig = ref(false)
+const exportingCsv = ref(false)
 
 async function saveConfig() {
-  if (loadedSignals.value.length === 0) {
+  if (!anyTabHasSignals.value) {
     setMsg('Nothing to save — add some signals first.', true)
     return
   }
@@ -680,42 +917,43 @@ async function saveConfig() {
 
   savingConfig.value = true
   try {
-    const groups = chartGroups.value.map(g => {
-      const chartRef = chartRefs.get(g.id)
-      const yZoom = chartRef?.getYZoom() ?? null
-      return {
-        id: g.id,
-        signals: g.signals.map(s => {
-          const base = {
-            file_path: s.path || '',
-            channel: s.name,
-            color: s.color,
-          }
-          if (s.isDerived) {
-            base.derived = {
-              expression: s.derivedExpression,
-              variables:  s.derivedVars,
-            }
-          }
-          return base
-        }),
-        y_zoom: yZoom,  // { min, max } or null
+    // Sync Y zoom from chartRefs into each tab's group objects before serializing
+    for (const tab of tabs) {
+      for (const group of tab.chartGroups) {
+        const ref = tab.chartRefs.get(group.id)
+        if (ref) group.yZoom = ref.getYZoom()
       }
-    })
+    }
     const config = {
-      view: {
-        start: viewStart.value,
-        end: viewEnd.value,
-        cursor_visible: mf4CursorVisible.value,
-        cursor_time: sharedCursorTime.value ?? null,
-        active_file_path: activeFile.value?.path ?? null,
-        files_panel_open: filesPanelOpen.value,
-        channels_panel_open: channelsPanelOpen.value,
-        diff_cursor_active: diffCursorActive.value,
-        diff_cursor_a_time: diffCursorATime.value ?? null,
-        diff_cursor_b_time: diffCursorBTime.value ?? null,
-      },
-      groups,
+      active_tab_id: activeTab.value?.id ?? null,
+      active_file_path: activeFile.value?.path ?? null,
+      files_panel_open: filesPanelOpen.value,
+      channels_panel_open: channelsPanelOpen.value,
+      tabs: tabs.map(tab => ({
+        id: tab.id,
+        name: tab.name,
+        view: {
+          start: tab.viewStart,
+          end: tab.viewEnd,
+          cursor_visible: tab.cursorVisible,
+          cursor_time: tab.cursorTime ?? null,
+          active_file_path: null,
+          files_panel_open: true,
+          channels_panel_open: false,
+          diff_cursor_active: tab.diffCursorActive,
+          diff_cursor_a_time: tab.diffCursorATime ?? null,
+          diff_cursor_b_time: tab.diffCursorBTime ?? null,
+        },
+        groups: tab.chartGroups.map(g => ({
+          id: g.id,
+          signals: g.signals.map(s => {
+            const base = { file_path: s.path || '', channel: s.name, color: s.color }
+            if (s.isDerived) base.derived = { expression: s.derivedExpression, variables: s.derivedVars }
+            return base
+          }),
+          y_zoom: g.yZoom ?? null,
+        })),
+      })),
       file_offsets: { ...fileTimeOffsets },
     }
     await invoke('mf4_save_config', { path: filePath, config })
@@ -740,12 +978,27 @@ async function loadConfig() {
   try {
     const config = await invoke('mf4_load_config', { path: filePath })
 
-    // Open all unique MF4 files first — register them in the files panel
+    // Clear global derived signals registry before rebuilding
+    globalDerivedSignals.splice(0)
+
+    // Normalize: support old single-tab format (view + groups) and new multi-tab format (tabs[])
+    const configTabs = (config.tabs && config.tabs.length > 0)
+      ? config.tabs
+      : [{
+          id: crypto.randomUUID(),
+          name: 'Tab 1',
+          view: config.view ?? { start: 0, end: 1, cursor_visible: false, files_panel_open: true, channels_panel_open: false, diff_cursor_active: false },
+          groups: config.groups ?? [],
+        }]
+
+    // Collect unique file paths from all tabs
     const uniquePaths = [
       ...new Set(
-        config.groups.flatMap(g => g.signals.map(s => s.file_path).filter(p => p))
+        configTabs.flatMap(ct => ct.groups.flatMap(g => g.signals.map(s => s.file_path).filter(p => p)))
       ),
     ]
+
+    // Open all MF4 files
     const openedFileMap = new Map()  // path → mf4_open_file response
     const missingPaths = []
     for (const p of uniquePaths) {
@@ -767,143 +1020,138 @@ async function loadConfig() {
       await new Promise(r => setTimeout(r, 2500))
     }
 
-    // Restore active file / channels panel
-    const savedActivePath = config.view.active_file_path ?? null
+    // Restore file time offsets
+    Object.keys(fileTimeOffsets).forEach(k => delete fileTimeOffsets[k])
+    if (config.file_offsets) Object.assign(fileTimeOffsets, config.file_offsets)
+
+    // Panel state: from top-level (new format) or first tab's view (legacy)
+    const legacyView = config.view ?? {}
+    filesPanelOpen.value    = config.files_panel_open    ?? legacyView.files_panel_open    ?? true
+    channelsPanelOpen.value = config.channels_panel_open ?? legacyView.channels_panel_open ?? false
+    if (filesPanelOpen.value && channelsPanelOpen.value) channelsPanelOpen.value = false
+
+    // Build tabs
+    const newTabs = []
+    let totalExpected = 0
+    let totalLoaded = 0
+
+    for (const ct of configTabs) {
+      const tab = createTab(ct.name, ct.id)
+      const tabView = ct.view ?? {}
+      tab.viewStart      = tabView.start ?? 0
+      tab.viewEnd        = tabView.end   ?? 1
+      tab.viewStartInput = Number((tabView.start ?? 0).toFixed(3))
+      tab.viewEndInput   = Number((tabView.end   ?? 1).toFixed(3))
+      tab.cursorVisible    = tabView.cursor_visible    ?? false
+      tab.cursorTime       = tabView.cursor_time       ?? null
+      tab.diffCursorActive = tabView.diff_cursor_active ?? false
+      tab.diffCursorATime  = tabView.diff_cursor_a_time ?? null
+      tab.diffCursorBTime  = tabView.diff_cursor_b_time ?? null
+      if (tab.diffCursorActive) tab.cursorVisible = false
+
+      for (const g of ct.groups) {
+        const signals = []
+        for (const s of g.signals) {
+          totalExpected++
+          if (s.derived) {
+            try {
+              const signalData = {}
+              let missingVar = false
+              for (const v of (s.derived.variables ?? [])) {
+                let data = historyStore.get(v.signal_key)
+                if (!data) {
+                  const sepIdx = v.signal_key.indexOf('::')
+                  if (sepIdx < 0) { missingVar = true; break }
+                  const fp = v.signal_key.slice(0, sepIdx)
+                  const ch = v.signal_key.slice(sepIdx + 2)
+                  try { data = await loadSignalDataForDerived(fp, ch) }
+                  catch { missingVar = true; break }
+                }
+                if (v.transform === 'diff') {
+                  data = { times: data.times, values: differentiate(data.times, data.values) }
+                } else if (v.transform === 'integ') {
+                  data = { times: data.times, values: integrate(data.times, data.values) }
+                }
+                signalData[v.var_name] = data
+              }
+              if (missingVar) continue
+              const { times: dTimes, values: dValues } = computeDerivedSignal(s.derived.expression, signalData)
+              const dKey = `derived::${crypto.randomUUID()}`
+              historyStore.set(dKey, { times: dTimes, values: dValues })
+              signals.push({
+                key: dKey, name: s.channel, device_name: '[derived]',
+                color: s.color, path: '', vtab_map: null,
+                isDerived: true, derivedExpression: s.derived.expression,
+                derivedVars: s.derived.variables ?? [],
+              })
+              totalLoaded++
+            } catch { /* skip */ }
+          } else {
+            const key = signalKey(s.file_path, s.channel)
+            try {
+              const [dataBytes, timeBytes] = await Promise.all([
+                invoke('mf4_get_channel_data', { mf4Path: s.file_path, channelName: s.channel }),
+                invoke('mf4_get_channel_time', { mf4Path: s.file_path, channelName: s.channel }),
+              ])
+              const values = toFloat64Array(dataBytes)
+              const times  = toFloat64Array(timeBytes)
+              if (times.length !== values.length) continue
+              historyStore.set(key, { times, values })
+              const fileName = s.file_path.split(/[\\/]/).pop() || s.file_path
+              signals.push({ key, name: s.channel, device_name: fileName, color: s.color, path: s.file_path, vtab_map: null })
+              totalLoaded++
+            } catch { /* skip */ }
+          }
+        }
+        if (signals.length > 0) {
+          tab.chartGroups.push({ id: g.id, signals, yZoom: g.y_zoom ?? null })
+        }
+      }
+      newTabs.push(tab)
+    }
+
+    // Replace tabs array
+    tabs.splice(0, tabs.length, ...newTabs)
+    if (tabs.length === 0) tabs.push(createTab('Tab 1'))
+
+    // Rebuild global derived signals registry from all tabs (deduplicated by key)
+    globalDerivedSignals.splice(0)
+    const seenDerivedKeys = new Set()
+    for (const tab of tabs) {
+      for (const g of tab.chartGroups) {
+        for (const s of g.signals) {
+          if (s.isDerived && !seenDerivedKeys.has(s.key)) {
+            seenDerivedKeys.add(s.key)
+            globalDerivedSignals.push({ ...s })
+          }
+        }
+      }
+    }
+
+    // Set active tab index
+    const savedActiveTabId = config.active_tab_id
+    const savedActiveIdx = savedActiveTabId ? tabs.findIndex(t => t.id === savedActiveTabId) : -1
+    activeTabIdx.value = savedActiveIdx >= 0 ? savedActiveIdx : 0
+
+    // Restore active file
+    const savedActivePath = config.active_file_path ?? legacyView.active_file_path ?? null
     const activeResponse = savedActivePath
       ? (openedFileMap.get(savedActivePath) ?? openedFileMap.values().next().value ?? null)
       : (openedFileMap.values().next().value ?? null)
     if (activeResponse) {
-      activeFile.value = activeResponse.file
+      activeFile.value     = activeResponse.file
       activeChannels.value = activeResponse.channels || []
       activeVtabMaps.value = activeResponse.vtab_maps || {}
-      channelSearch.value = ''
+      channelSearch.value  = ''
     }
 
-    // Restore panel open state
-    filesPanelOpen.value = config.view.files_panel_open ?? true
-    channelsPanelOpen.value = config.view.channels_panel_open ?? false
-    // Mutual-exclusion: only one can be open at a time
-    if (filesPanelOpen.value && channelsPanelOpen.value) {
-      channelsPanelOpen.value = false
-    }
+    // Restore Y zoom for active tab after charts mount
+    setTimeout(() => restoreActiveTabYZooms(), 100)
 
-    // Rebuild chart groups from config
-    chartGroups.value = []
-    for (const g of config.groups) {
-      const signals = []
-      for (const s of g.signals) {
-        if (s.derived) {
-          // ── Derived (calculated) signal ────────────────────────────────────
-          try {
-            const signalData = {}
-            let missingVar = false
-            for (const v of (s.derived.variables ?? [])) {
-              let data = historyStore.get(v.signal_key)
-              if (!data) {
-                // Source signal not yet in cache — try loading it on demand
-                const sepIdx = v.signal_key.indexOf('::')
-                if (sepIdx < 0) { missingVar = true; break }
-                const fp = v.signal_key.slice(0, sepIdx)
-                const ch = v.signal_key.slice(sepIdx + 2)
-                try { data = await loadSignalDataForDerived(fp, ch) }
-                catch { missingVar = true; break }
-              }
-              // Re-apply per-variable transform (d/dt or ∫)
-              if (v.transform === 'diff') {
-                data = { times: data.times, values: differentiate(data.times, data.values) }
-              } else if (v.transform === 'integ') {
-                data = { times: data.times, values: integrate(data.times, data.values) }
-              }
-              signalData[v.var_name] = data
-            }
-            if (missingVar) continue
-            const { times: dTimes, values: dValues } = computeDerivedSignal(s.derived.expression, signalData)
-            const dKey = `derived::${crypto.randomUUID()}`
-            historyStore.set(dKey, { times: dTimes, values: dValues })
-            signals.push({
-              key:               dKey,
-              name:              s.channel,
-              device_name:       '[derived]',
-              color:             s.color,
-              path:              '',
-              vtab_map:          null,
-              isDerived:         true,
-              derivedExpression: s.derived.expression,
-              derivedVars:       s.derived.variables ?? [],
-            })
-          } catch {
-            // Derived signal failed to reconstruct (e.g. bad expression) — skip
-          }
-        } else {
-          // ── Regular MF4 signal ─────────────────────────────────────────────
-          const key = signalKey(s.file_path, s.channel)
-          try {
-            const [dataBytes, timeBytes] = await Promise.all([
-              invoke('mf4_get_channel_data', { mf4Path: s.file_path, channelName: s.channel }),
-              invoke('mf4_get_channel_time', { mf4Path: s.file_path, channelName: s.channel }),
-            ])
-            const values = toFloat64Array(dataBytes)
-            const times = toFloat64Array(timeBytes)
-            if (times.length !== values.length) continue
-            historyStore.set(key, { times, values })
-            const fileName = s.file_path.split(/[\\/]/).pop() || s.file_path
-            signals.push({
-              key,
-              name: s.channel,
-              device_name: fileName,
-              color: s.color,
-              path: s.file_path,
-              vtab_map: null,
-            })
-          } catch {
-            // Signal unavailable (file missing or channel gone) — skip silently
-          }
-        }
-      }
-      if (signals.length > 0) {
-        chartGroups.value = [...chartGroups.value, { id: g.id, signals }]
-      }
-    }
-
-    // Restore view range
-    // Restore file time offsets before recomputing bounds
-    Object.keys(fileTimeOffsets).forEach(k => delete fileTimeOffsets[k])
-    if (config.file_offsets) {
-      Object.assign(fileTimeOffsets, config.file_offsets)
-    }
-
-    viewStart.value = config.view.start
-    viewEnd.value = config.view.end
-    viewStartInput.value = Number(config.view.start.toFixed(3))
-    viewEndInput.value = Number(config.view.end.toFixed(3))
-    mf4CursorVisible.value = config.view.cursor_visible
-    sharedCursorTime.value = config.view.cursor_time ?? null
-    diffCursorActive.value = config.view.diff_cursor_active ?? false
-    diffCursorATime.value = config.view.diff_cursor_a_time ?? null
-    diffCursorBTime.value = config.view.diff_cursor_b_time ?? null
-    // Mutual exclusion guard
-    if (diffCursorActive.value) mf4CursorVisible.value = false
-
-    // Restore Y zoom after chart refs are mounted (next tick)
-    const yZoomPending = config.groups
-      .filter(g => g.y_zoom)
-      .map(g => ({ id: g.id, min: g.y_zoom.min, max: g.y_zoom.max }))
-    if (yZoomPending.length > 0) {
-      setTimeout(() => {
-        for (const { id, min, max } of yZoomPending) {
-          const ref = chartRefs.get(id)
-          if (ref) ref.setYZoom(min, max)
-        }
-      }, 100)
-    }
-
-    const total = config.groups.reduce((n, g) => n + g.signals.length, 0)
-    const loaded = loadedSignals.value.length
-    if (missingPaths.length > 0) {
-      setMsg(`Config loaded: ${loaded} of ${total} signal(s) restored. (${missingPaths.length} file(s) missing)`, true)
-    } else {
-      setMsg(`Config loaded: ${loaded} of ${total} signal(s) restored.`)
-    }
+    const msg_ = missingPaths.length > 0
+      ? `Config loaded: ${totalLoaded}/${totalExpected} signal(s) across ${newTabs.length} tab(s). (${missingPaths.length} file(s) missing)`
+      : `Config loaded: ${totalLoaded}/${totalExpected} signal(s) across ${newTabs.length} tab(s).`
+    setMsg(msg_, missingPaths.length > 0)
   } catch (e) {
     setMsg(String(e), true)
   } finally {
@@ -911,14 +1159,88 @@ async function loadConfig() {
   }
 }
 
+// ── CSV Export ────────────────────────────────────────────────────────────────
+
+async function exportCsv() {
+  if (loadedSignals.value.length === 0) return
+
+  const filePath = await dialogSave({
+    title: 'Export Signals to CSV',
+    defaultPath: 'signals.csv',
+    filters: [{ name: 'CSV Files', extensions: ['csv'] }],
+  })
+  if (!filePath) return
+
+  exportingCsv.value = true
+  try {
+    // Deduplicate signals by key (same signal may appear in multiple chart groups)
+    const seen = new Set()
+    const signals = []
+    for (const sig of loadedSignals.value) {
+      if (!seen.has(sig.key)) {
+        seen.add(sig.key)
+        signals.push(sig)
+      }
+    }
+
+    // Build column headers — append file name when channel names are not unique
+    const nameCounts = {}
+    for (const sig of signals) nameCounts[sig.name] = (nameCounts[sig.name] || 0) + 1
+    const colHeaders = signals.map(sig =>
+      nameCounts[sig.name] > 1 ? `${sig.name} [${sig.device_name}]` : sig.name
+    )
+
+    const sep = csvSeparator.value === 'comma' ? ',' : csvSeparator.value === 'semicolon' ? ';' : ':'
+
+    // Build a sorted merged timeline from all signals (applying per-file time offsets)
+    const allTimesSet = new Set()
+    const signalData = signals.map(sig => {
+      const entry = historyStore.get(sig.key)
+      const offset = fileTimeOffsets[sig.path] ?? 0
+      const timeMap = new Map()
+      for (let i = 0; i < entry.times.length; i++) {
+        const t = entry.times[i] + offset
+        allTimesSet.add(t)
+        timeMap.set(t, i)
+      }
+      return { timeMap, values: entry.values, sig }
+    })
+
+    const sortedTimes = Array.from(allTimesSet).sort((a, b) => a - b)
+
+    // Build CSV rows
+    const lines = [`time${sep}${colHeaders.join(sep)}`]
+    for (const t of sortedTimes) {
+      const cells = [t.toFixed(6)]
+      for (const { timeMap, values, sig } of signalData) {
+        const idx = timeMap.get(t)
+        if (idx === undefined) {
+          cells.push('')
+        } else {
+          const raw = values[idx]
+          if (enumExportMode.value === 'text' && sig.vtab_map && sig.vtab_map.length > 0) {
+            const entry = sig.vtab_map.find(e => Math.abs(e.key - raw) < 0.5)
+            cells.push(entry ? entry.text : String(raw))
+          } else {
+            cells.push(String(raw))
+          }
+        }
+      }
+      lines.push(cells.join(sep))
+    }
+
+    const content = lines.join('\n')
+    await invoke('write_text_file', { path: filePath, content })
+    setMsg(`Exported ${sortedTimes.length} row(s), ${signals.length} signal(s) → ${filePath.split(/[\\/]/).pop()}`)
+  } catch (e) {
+    setMsg(String(e), true)
+  } finally {
+    exportingCsv.value = false
+  }
+}
+
 // ── Per-file time offsets ─────────────────────────────────────────────────────
 const fileTimeOffsets = reactive({})  // { [filePath]: offsetSeconds }
-const dataTimeMin = ref(0)
-const dataTimeMax = ref(1)
-const viewStart = ref(0)
-const viewEnd = ref(1)
-const viewStartInput = ref(0)
-const viewEndInput = ref(1)
 const tRangeTrackEl = ref(null)
 const isDraggingPan = ref(false)
 
@@ -1364,11 +1686,21 @@ async function addSignal(channelName, targetGroupId = null, insertIndex = null) 
     }
   }
 
-  // If data is already in historyStore, add a copy to the chart without re-fetching
+  // If data is already in historyStore, add to chart without re-fetching.
+  // The data may have been cached as a derived-signal input — in that case
+  // existingSig is null, so we construct the sigObj from channel metadata.
   if (historyStore.has(key)) {
     const existingSig = loadedSignals.value.find(s => s.key === key)
-    if (!existingSig) return
-    const sigObj = { ...existingSig }
+    const sigObj = existingSig
+      ? { ...existingSig }
+      : {
+          key,
+          name:        channelName,
+          device_name: activeFile.value.name,
+          color:       pickColor(loadedSignals.value.length),
+          path:        activeFile.value.path,
+          vtab_map:    activeVtabMaps.value[channelName] || null,
+        }
     if (targetGroupId !== null) {
       const group = chartGroups.value.find(g => g.id === targetGroupId)
       if (group) {
@@ -1456,15 +1788,18 @@ function removeGroup(groupId) {
   // Remove from view; keep historyStore data alive for undo
   chartGroups.value = chartGroups.value.filter(g => g.id !== groupId)
   // Prune stale zoom-y undo entries for the deleted chart
-  for (let i = undoQueue.length - 1; i >= 0; i--) {
-    if (undoQueue[i].type === 'zoom-y' && undoQueue[i].groupId === groupId) {
-      undoQueue.splice(i, 1)
+  const tab = activeTab.value
+  if (tab) {
+    for (let i = tab.undoQueue.length - 1; i >= 0; i--) {
+      if (tab.undoQueue[i].type === 'zoom-y' && tab.undoQueue[i].groupId === groupId) {
+        tab.undoQueue.splice(i, 1)
+      }
     }
   }
   if (group) {
     pushUndo({ type: 'remove-group', group: { id: group.id, signals: [...group.signals] }, groupIndex })
   }
-  undoCount.value = undoQueue.length
+  if (tab) tab.undoCount = tab.undoQueue.length
 }
 
 function onSignalColorChange({ key, color }) {
@@ -1477,8 +1812,10 @@ function onChartZoomY(groupId, { prevMin, prevMax }) {
 }
 
 function undoLast() {
-  const action = undoQueue.pop()
-  undoCount.value = undoQueue.length
+  const tab = activeTab.value
+  if (!tab) return
+  const action = tab.undoQueue.pop()
+  tab.undoCount = tab.undoQueue.length
   if (!action) return
   if (action.type === 'zoom-x') {
     viewStart.value = action.prevStart
@@ -1486,7 +1823,7 @@ function undoLast() {
     viewStartInput.value = Number(action.prevStart.toFixed(4))
     viewEndInput.value = Number(action.prevEnd.toFixed(4))
   } else if (action.type === 'zoom-y') {
-    const chart = chartRefs.get(action.groupId)
+    const chart = tab.chartRefs.get(action.groupId)
     if (chart) chart.setYZoom(action.prevMin, action.prevMax)
   } else if (action.type === 'add-signal') {
     historyStore.delete(action.key)
@@ -1817,7 +2154,7 @@ function onLegendDragStart({ signalKey, originalEvent }) {
       fromGroup.signals = fromGroup.signals.filter(s => s.key !== drag.key)
       if (fromGroup.signals.length === 0) {
         chartGroups.value = chartGroups.value.filter(g => g.id !== drag.sourceGroupId)
-        chartRefs.delete(drag.sourceGroupId)
+        activeTab.value?.chartRefs.delete(drag.sourceGroupId)
       }
       const newGroupId = crypto.randomUUID()
       const groups = [...chartGroups.value]
@@ -1847,7 +2184,7 @@ function onMoveSignalToGroup(signalKey, fromGroupId, toGroupId) {
   // Remove source group if now empty
   if (fromGroup.signals.length === 0) {
     chartGroups.value = chartGroups.value.filter(g => g.id !== fromGroupId)
-    chartRefs.delete(fromGroupId)
+    activeTab.value?.chartRefs.delete(fromGroupId)
   }
 
   // Add to target group (move operation — always add)
@@ -2774,4 +3111,97 @@ button.danger:hover {
   border-color: #cc0044;
   color: #ff6688;
 }
+
+/* ── Tab bar ─────────────────────────────────────────────────────────────── */
+.tab-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--exp-border, #003311);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.tab-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  background: var(--exp-bg2, #060606);
+  color: var(--exp-fg-dim, #556644);
+  font-size: 12px;
+  white-space: nowrap;
+  transition: color 0.15s, background 0.15s;
+  position: relative;
+  bottom: -1px;
+  user-select: none;
+}
+.tab-item:hover { color: var(--exp-fg, #00cc44); }
+.tab-item.active {
+  background: var(--exp-bg, #090909);
+  color: var(--exp-fg-bright, #00ff66);
+  border-color: var(--exp-border, #003311);
+  border-bottom-color: var(--exp-bg, #090909);
+}
+
+.tab-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-rename-input {
+  width: 100px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--exp-fg-bright, #00ff66);
+  color: var(--exp-fg-bright, #00ff66);
+  font-size: 12px;
+  font-family: var(--exp-font, monospace);
+  outline: none;
+  padding: 0 2px;
+}
+
+.tab-close-btn {
+  background: none;
+  border: none;
+  color: var(--exp-fg-dim, #556644);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 2px;
+  line-height: 1;
+  border-radius: 2px;
+  transition: color 0.1s;
+}
+.tab-close-btn:hover { color: #ff4466; }
+
+.tab-add-btn {
+  background: none;
+  border: none;
+  color: var(--exp-fg-dim, #556644);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 10px;
+  border-radius: 4px;
+  transition: color 0.15s;
+  align-self: center;
+  margin-left: 4px;
+}
+.tab-add-btn:hover { color: var(--exp-fg-bright, #00ff66); }
+
+.danger-sm {
+  background: none;
+  border: 1px solid #662222;
+  color: #cc4444;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.danger-sm:hover { background: #440000; color: #ff6666; border-color: #ff4466; }
 </style>
