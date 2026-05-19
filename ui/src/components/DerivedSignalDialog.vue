@@ -124,6 +124,11 @@
                 <span class="derived-ref-note">(short-circuit, return 0 or 1)</span>
               </div>
               <div class="derived-ref-row">
+                <strong>Ternary</strong>
+                <code>cond ? valueIfTrue : valueIfFalse</code>
+                <span class="derived-ref-note">(short-circuit)</span>
+              </div>
+              <div class="derived-ref-row">
                 <strong>Constants</strong>
                 <code>pi &nbsp; e</code>
               </div>

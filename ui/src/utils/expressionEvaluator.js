@@ -55,7 +55,7 @@ const T = {
   NUM: 'NUM', IDENT: 'IDENT', COMMA: ',', LPAREN: '(', RPAREN: ')',
   PLUS: '+', MINUS: '-', STAR: '*', SLASH: '/', PERCENT: '%', CARET: '^',
   BANG: '!', EQ: '==', NEQ: '!=', LTE: '<=', GTE: '>=', LT: '<', GT: '>',
-  AND: '&&', OR: '||', EOF: 'EOF',
+  AND: '&&', OR: '||', QUESTION: '?', COLON: ':', EOF: 'EOF',
 }
 
 function tokenize(expr) {
@@ -113,6 +113,8 @@ function tokenize(expr) {
       case '(': tokens.push({ type: T.LPAREN  }); break
       case ')': tokens.push({ type: T.RPAREN  }); break
       case ',': tokens.push({ type: T.COMMA   }); break
+      case '?': tokens.push({ type: T.QUESTION}); break
+      case ':': tokens.push({ type: T.COLON   }); break
       default:  throw new Error(`Unexpected character '${ch}' at position ${i}`)
     }
     i++
@@ -124,7 +126,8 @@ function tokenize(expr) {
 // ── Recursive-descent parser → AST ───────────────────────────────────────────
 //
 // Grammar (precedence, lowest → highest):
-//   expr    → or_expr
+//   expr    → ternary
+//   ternary → or ('?' ternary ':' ternary)?   ← right-associative
 //   or      → and ('||' and)*
 //   and     → cmp ('&&' cmp)*
 //   cmp     → add (('==' | '!=' | '<' | '<=' | '>' | '>=') add)?
@@ -147,10 +150,20 @@ class Parser {
   match(...types) { return types.includes(this.peek().type) ? this.consume() : null }
 
   parse() {
-    const node = this.parseOr()
+    const node = this.parseTernary()
     if (this.peek().type !== T.EOF)
       throw new Error(`Unexpected token '${this.peek().type}' — check for mismatched parentheses`)
     return node
+  }
+
+  parseTernary() {
+    const cond = this.parseOr()
+    if (this.peek().type !== T.QUESTION) return cond
+    this.consume()                              // consume '?'
+    const then = this.parseTernary()            // right-recursive for nested ternaries
+    this.expect(T.COLON)
+    const else_ = this.parseTernary()
+    return { type: 'ternary', cond, then, else: else_ }
   }
 
   parseOr() {
@@ -223,8 +236,8 @@ class Parser {
         this.consume()
         const args = []
         if (this.peek().type !== T.RPAREN) {
-          args.push(this.parseOr())
-          while (this.match(T.COMMA)) args.push(this.parseOr())
+          args.push(this.parseTernary())
+          while (this.match(T.COMMA)) args.push(this.parseTernary())
         }
         this.expect(T.RPAREN)
         return { type: 'call', name: tok.value, args }
@@ -234,7 +247,7 @@ class Parser {
 
     if (tok.type === T.LPAREN) {
       this.consume()
-      const inner = this.parseOr()
+      const inner = this.parseTernary()
       this.expect(T.RPAREN)
       return inner
     }
@@ -252,6 +265,10 @@ class Parser {
 function evalNode(node, vars) {
   switch (node.type) {
     case 'num': return node.value
+    case 'ternary': {
+      // Short-circuit: only evaluate the chosen branch
+      return evalNode(node.cond, vars) ? evalNode(node.then, vars) : evalNode(node.else, vars)
+    }
     case 'var': {
       const n = node.name
       if (n in CONSTANTS) return CONSTANTS[n]
@@ -300,7 +317,12 @@ function collectVarNames(node, out = new Set()) {
   if (!node) return out
   if (node.type === 'var' && !(node.name in CONSTANTS) && !(node.name in FUNCTIONS))
     out.add(node.name)
-  if (node.type === 'call') node.args.forEach(a => collectVarNames(a, out))
+  if (node.type === 'call')    node.args.forEach(a => collectVarNames(a, out))
+  if (node.type === 'ternary') {
+    collectVarNames(node.cond, out)
+    collectVarNames(node.then, out)
+    collectVarNames(node.else, out)
+  }
   collectVarNames(node.left,    out)
   collectVarNames(node.right,   out)
   collectVarNames(node.operand, out)
