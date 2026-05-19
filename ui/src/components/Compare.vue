@@ -38,6 +38,7 @@
       <div class="toolbar">
         <div class="toolbar-actions">
           <button class="sm" @click="openVarModal">Select Variables</button>
+          <button class="sm secondary" @click="clearAllVariables" :disabled="!(activeSession.selected_variables || []).length">Clear All</button>
           <button class="sm danger" @click="deleteSession">Delete Session</button>
         </div>
         <span class="meta">{{ activeSession.name }} — {{ (activeSession.selected_variables || []).length }} variable(s) selected</span>
@@ -112,10 +113,13 @@
       <template v-else>
         <div class="results-toolbar">
           <span class="meta">{{ rows.length }} total — {{ diffCount }} diff{{ diffCount !== 1 ? 's' : '' }}</span>
-          <label class="toggle-label">
-            <input type="checkbox" v-model="showDiffOnly" />
-            Show differences only
-          </label>
+          <div class="results-toolbar-actions">
+            <label class="toggle-label">
+              <input type="checkbox" v-model="showDiffOnly" />
+              Show differences only
+            </label>
+            <button class="sm secondary" @click="toggleCollapseAll">{{ allCollapsed ? 'Expand All' : 'Collapse All' }}</button>
+          </div>
         </div>
         <div v-if="filteredRows.length === 0" class="empty-state">All selected variables match.</div>
         <div v-else class="results">
@@ -307,6 +311,10 @@ const filteredRows = computed(() =>
 
 const diffCount = computed(() => rows.value.filter(r => !r.matches).length)
 
+const allCollapsed = computed(() =>
+  filteredRows.value.length > 0 && filteredRows.value.every(r => collapsedRows.value.has(r.name))
+)
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function setMsg(text, err = false) {
@@ -340,6 +348,14 @@ function toggleCollapse(name) {
   if (s.has(name)) s.delete(name)
   else s.add(name)
   collapsedRows.value = s
+}
+
+function toggleCollapseAll() {
+  if (allCollapsed.value) {
+    collapsedRows.value = new Set()
+  } else {
+    collapsedRows.value = new Set(filteredRows.value.map(r => r.name))
+  }
 }
 
 // ─── Sessions ─────────────────────────────────────────────────────────────────
@@ -639,6 +655,17 @@ async function applyVarSelection() {
   } catch (e) { setMsg(String(e), true) }
 }
 
+async function clearAllVariables() {
+  if (!activeSession.value) return
+  try {
+    await invoke('compare_select_variables', {
+      sessionId: activeSession.value.id,
+      names: [],
+    })
+    await refreshSessions(activeSession.value.id)
+  } catch (e) { setMsg(String(e), true) }
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 let dndUnlisten = null
@@ -723,6 +750,7 @@ h2 { color: var(--exp-fg, #00cc44); font-size: 1rem; margin-bottom: 10px; }
 /* ── Result cards ── */
 .results { display: flex; flex-direction: column; gap: 8px; }
 .results-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.results-toolbar-actions { display: flex; align-items: center; gap: 10px; }
 .toggle-label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 0.85rem; color: var(--exp-text-muted, #7a8a7a); }
 .toggle-label input[type="checkbox"] { accent-color: var(--exp-accent, #00cc55); cursor: pointer; }
 
@@ -748,7 +776,7 @@ h2 { color: var(--exp-fg, #00cc44); font-size: 1rem; margin-bottom: 10px; }
 .collapse-btn { color: var(--exp-fg-dim, #555); font-size: 0.85rem; transition: transform 0.2s; }
 .result-card.collapsed .collapse-btn { transform: rotate(-90deg); }
 
-.result-body { padding: 12px; overflow-x: auto; }
+.result-body { padding: 12px; overflow-x: auto; }
 .side-tag { color: var(--exp-fg, #00cc44); margin-right: 4px; font-weight: bold; }
 
 /* ── Modal ── */
