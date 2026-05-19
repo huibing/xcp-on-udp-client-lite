@@ -109,23 +109,33 @@
       <div v-else-if="rows.length === 0" class="empty-state">
         No variables selected. Use "Select Variables" to choose compare targets.
       </div>
-      <div v-else class="results">
-        <div v-for="row in rows" :key="row.name"
-          class="result-card" :class="{ diff: !row.matches, collapsed: collapsedRows.has(row.name) }">
-          <div class="result-header" @click="toggleCollapse(row.name)">
-            <div class="result-title">
-              <strong>{{ row.name }}</strong>
+      <template v-else>
+        <div class="results-toolbar">
+          <span class="meta">{{ rows.length }} total — {{ diffCount }} diff{{ diffCount !== 1 ? 's' : '' }}</span>
+          <label class="toggle-label">
+            <input type="checkbox" v-model="showDiffOnly" />
+            Show differences only
+          </label>
+        </div>
+        <div v-if="filteredRows.length === 0" class="empty-state">All selected variables match.</div>
+        <div v-else class="results">
+          <div v-for="row in filteredRows" :key="row.name"
+            class="result-card" :class="{ diff: !row.matches, collapsed: collapsedRows.has(row.name) }">
+            <div class="result-header" @click="toggleCollapse(row.name)">
+              <div class="result-title">
+                <strong>{{ row.name }}</strong>
+              </div>
+              <div class="result-badges">
+                <span class="badge" :class="badgeClass(row)">{{ badgeLabel(row) }}</span>
+                <span class="collapse-btn">▼</span>
+              </div>
             </div>
-            <div class="result-badges">
-              <span class="badge" :class="badgeClass(row)">{{ badgeLabel(row) }}</span>
-              <span class="collapse-btn">▼</span>
+            <div class="result-body">
+              <div v-html="rowHtml(row)"></div>
             </div>
-          </div>
-          <div class="result-body">
-            <div v-html="rowHtml(row)"></div>
           </div>
         </div>
-      </div>
+      </template>
     </template>
 
     <!-- Variable selection modal -->
@@ -254,6 +264,7 @@ function rowHtml(row) {
 const sessions = ref([])
 const activeSessionId = ref(null)
 const rows = ref([])
+const showDiffOnly = ref(false)
 const collapsedRows = ref(new Set())
 
 // Inline tab rename state
@@ -289,6 +300,12 @@ const msgErr = ref(false)
 const activeSession = computed(() =>
   sessions.value.find(s => s.id === activeSessionId.value) || null
 )
+
+const filteredRows = computed(() =>
+  showDiffOnly.value ? rows.value.filter(r => !r.matches) : rows.value
+)
+
+const diffCount = computed(() => rows.value.filter(r => !r.matches).length)
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -705,6 +722,9 @@ h2 { color: var(--exp-fg, #00cc44); font-size: 1rem; margin-bottom: 10px; }
 
 /* ── Result cards ── */
 .results { display: flex; flex-direction: column; gap: 8px; }
+.results-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.toggle-label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 0.85rem; color: var(--exp-text-muted, #7a8a7a); }
+.toggle-label input[type="checkbox"] { accent-color: var(--exp-accent, #00cc55); cursor: pointer; }
 
 .result-card { background: var(--exp-bg3, #0d0d0d); border: 1px solid var(--exp-border, #003311); }
 .result-card.diff { border-color: #ffcc00; }
