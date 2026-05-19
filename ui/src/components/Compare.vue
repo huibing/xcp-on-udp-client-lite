@@ -169,9 +169,12 @@
           </table>
         </div>
         <div class="modal-footer">
-          <span class="meta">{{ tempSelected.size }} selected</span>
+          <span class="meta">{{ tempSelected.size }} selected / {{ varPage.total }} matching</span>
           <div class="modal-footer-actions">
             <button class="sm secondary" @click="closeVarModal">Cancel</button>
+            <button class="sm secondary" :disabled="selectingAll || varPage.total === 0" @click="selectAllFiltered">
+              {{ selectingAll ? 'Selecting…' : 'Select All' }}
+            </button>
             <button @click="applyVarSelection">Apply</button>
           </div>
         </div>
@@ -276,6 +279,7 @@ const varItems = ref([])
 const tempSelected = ref(new Set())
 const varPage = reactive({ offset: 0, limit: 100, total: 0, loading: false, exhausted: false })
 const varModalBody = ref(null)
+const selectingAll = ref(false)
 
 const msg = ref('')
 const msgErr = ref(false)
@@ -584,6 +588,26 @@ function toggleVarItem(name) {
   if (s.has(name)) s.delete(name)
   else s.add(name)
   tempSelected.value = s
+}
+
+async function selectAllFiltered() {
+  if (!activeSession.value || selectingAll.value) return
+  selectingAll.value = true
+  try {
+    const r = await invoke('compare_variables', {
+      sessionId: activeSession.value.id,
+      search: varSearch.value || null,
+      presence: varPresence.value || null,
+      offset: 0,
+      limit: 100000,
+    })
+    if (!r.success) return
+    const items = r.page?.items || []
+    const s = new Set(tempSelected.value)
+    for (const item of items) s.add(item.name)
+    tempSelected.value = s
+  } catch (e) { setMsg(String(e), true) }
+  finally { selectingAll.value = false }
 }
 
 async function applyVarSelection() {
