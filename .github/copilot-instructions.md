@@ -263,3 +263,38 @@ cargo test -- --test-threads=1       # Force serial (needed if tests share globa
 ## Protocol Reference
 
 XCP command codes and error codes match ASAM MCD-1 XCP Protocol Layer V1.5.0 (spec PDF is in the repo root). `CommandCode` is `#[repr(u8)]`; `ErrorCode` implements `From<u8>` for deserialization.
+
+---
+
+### Additions useful for Copilot sessions
+
+- Build / test / lint (quick reference):
+  - Debug build: `cargo build`
+  - Release build: `cargo build --release`
+  - Check only: `cargo check`
+  - Run all tests: `cargo test`
+  - Run a single test (by name/pattern): `cargo test <pattern> -- --nocapture`
+  - Exact single test match: `cargo test <test_name> -- --exact --nocapture`
+  - Integration mock suite (single-threaded):
+    `cargo test --test mock_xcp_integration -- --test-threads=1`
+  - Format code: `cargo fmt --workspace`
+  - Check formatting: `cargo fmt --workspace -- --check`
+  - Lint (Clippy): `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+
+- Web e2e (Playwright):
+  - Install Playwright in a Node environment used for tests (repo root or `web_test`):
+    `npm install -D playwright`
+  - Install browser binaries: `npx playwright install`
+  - Run the existing script: `node web_test/test_browser.js` (requires Playwright + browsers)
+
+- Copilot-specific guidance (how to approach this repo):
+  - Prefer LSP (rust-analyzer) for code navigation and semantics: goToDefinition, findReferences, hover, workspaceSymbol.
+  - Primary entry points: `src/lib.rs`, `src/client.rs`, `src/slave.rs`, `src/a2l/*`, `src/transport/*`, `src/web/*`.
+  - For searches: use `glob` (e.g., `src/**/*.rs`) then `grep` for content. When making edits, prefer small, surgical changes touching only related files.
+  - Windows note: use PowerShell-style backslashes for paths (e.g., `E:\path\to\file`) when invoking shell commands in this environment.
+
+- Quick pointers:
+  - Logs: `logs/xcp_client_<timestamp>.log`
+  - Run Web UI: `cargo run --release -- web` (default: http://localhost:8080)
+
+If any of these additions should be adjusted or moved into separate docs, tell me which and edits will be applied.

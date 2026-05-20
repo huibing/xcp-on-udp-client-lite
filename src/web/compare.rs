@@ -368,6 +368,7 @@ impl CompareSession {
         &self,
         search: &str,
         presence: ComparePresenceFilter,
+        cal_type: Option<&str>,
         offset: usize,
         limit: usize,
     ) -> serde_json::Value {
@@ -399,6 +400,13 @@ impl CompareSession {
                 }
                 if !search.is_empty() && !name.to_ascii_lowercase().contains(&search) {
                     return None;
+                }
+                if let Some(ct) = cal_type {
+                    let left_matches = left_meta.as_ref().map_or(false, |m| m.type_name == ct);
+                    let right_matches = right_meta.as_ref().map_or(false, |m| m.type_name == ct);
+                    if !left_matches && !right_matches {
+                        return None;
+                    }
                 }
                 Some(json!({
                     "name": name,
@@ -770,25 +778,27 @@ pub fn load_dcm_source(filename: &str, bytes: &[u8]) -> Result<CompareSource, St
         let dcm = DcmData::new(Path::new(&dcm_path));
         let mut variables = HashMap::new();
         for (name, block) in &dcm.blocks {
+            // Normalize DCM type names to A2L characteristic type equivalents
+            // so type filtering works consistently across source kinds.
             let (type_name, value) = match block {
                 DcmBlock::Constant(value) => (
-                    "FESTWERT".to_string(),
+                    "VALUE".to_string(),
                     grid_from_dcm_scalar(&value.value)?,
                 ),
                 DcmBlock::ConstantBlock(value) => (
-                    "FESTWERTEBLOCK".to_string(),
+                    "VAL_BLK".to_string(),
                     grid_from_dcm_array(&value.value),
                 ),
                 DcmBlock::Table(value) => (
-                    "GRUPPENKENNLINIE".to_string(),
+                    "CURVE".to_string(),
                     grid_from_dcm_array(&value.value),
                 ),
                 DcmBlock::Distribution(value) => (
-                    "STUETZSTELLENVERTEILUNG".to_string(),
+                    "AXIS".to_string(),
                     grid_from_dcm_array(&value.value),
                 ),
                 DcmBlock::Map(value) => (
-                    "GRUPPENKENNFELD".to_string(),
+                    "MAP".to_string(),
                     grid_from_dcm_map(value)?,
                 ),
             };
@@ -881,7 +891,7 @@ mod tests {
                 "A".to_string(),
                 CompareVariable {
                     name: "A".to_string(),
-                    type_name: "FESTWERT".to_string(),
+                    type_name: "VALUE".to_string(),
                     unit: None,
                     description: String::new(),
                     raw_hex: None,
@@ -903,7 +913,7 @@ mod tests {
                     "A".to_string(),
                     CompareVariable {
                         name: "A".to_string(),
-                        type_name: "FESTWERT".to_string(),
+                        type_name: "VALUE".to_string(),
                         unit: None,
                         description: String::new(),
                         raw_hex: None,
@@ -918,13 +928,13 @@ mod tests {
                     "B".to_string(),
                     CompareVariable {
                         name: "B".to_string(),
-                        type_name: "FESTWERT".to_string(),
+                        type_name: "CURVE".to_string(),
                         unit: None,
                         description: String::new(),
                         raw_hex: None,
                         axis_values: Vec::new(),
                         value: CompareValueGrid::new(
-                            CompareValueKind::Scalar,
+                            CompareValueKind::Array,
                             vec![vec![CompareAtom::new("2".to_string(), Some(2.0))]],
                         ),
                     },
@@ -941,9 +951,26 @@ mod tests {
             selected_variables: vec!["A".to_string()],
         };
 
-        let page = session.page_variables("", ComparePresenceFilter::RightOnly, 0, 50);
+        let page = session.page_variables("", ComparePresenceFilter::RightOnly, None, 0, 50);
         let items = page.get("items").and_then(|value| value.as_array()).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].get("name").and_then(|value| value.as_str()), Some("B"));
+
+        // Cal type filter: only VALUE variables
+        let page = session.page_variables("", ComparePresenceFilter::All, Some("VALUE"), 0, 50);
+        let items = page.get("items").and_then(|value| value.as_array()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].get("name").and_then(|value| value.as_str()), Some("A"));
+
+        // Cal type filter: only CURVE variables
+        let page = session.page_variables("", ComparePresenceFilter::All, Some("CURVE"), 0, 50);
+        let items = page.get("items").and_then(|value| value.as_array()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].get("name").and_then(|value| value.as_str()), Some("B"));
+
+        // Cal type filter: no MAP variables
+        let page = session.page_variables("", ComparePresenceFilter::All, Some("MAP"), 0, 50);
+        let items = page.get("items").and_then(|value| value.as_array()).unwrap();
+        assert_eq!(items.len(), 0);
     }
 }

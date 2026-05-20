@@ -169,6 +169,7 @@ pub async fn compare_variables(
     session_id: String,
     presence: Option<String>,
     search: Option<String>,
+    cal_type: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<Value, String> {
@@ -187,7 +188,13 @@ pub async fn compare_variables(
     let offset = offset.unwrap_or(0);
     let limit = limit.unwrap_or(100);
 
-    let page = session.page_variables(&search_str, presence_filter, offset, limit);
+    let page = session.page_variables(
+        &search_str,
+        presence_filter,
+        cal_type.as_deref(),
+        offset,
+        limit,
+    );
     Ok(json!({ "success": true, "page": page }))
 }
 

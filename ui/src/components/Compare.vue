@@ -115,10 +115,14 @@
           <span class="meta">{{ rows.length }} total — {{ diffCount }} diff{{ diffCount !== 1 ? 's' : '' }}</span>
           <div class="results-toolbar-actions">
             <label class="toggle-label">
-              <input type="checkbox" v-model="showDiffOnly" />
-              Show differences only
+              <input type="checkbox" v-model="showDiffOnly" @click="onClickShowDiffOnly"/>
+              DIFF 
             </label>
-            <button class="sm secondary" @click="toggleCollapseAll">{{ allCollapsed ? 'Expand All' : 'Collapse All' }}</button>
+            <label class="toggle-label">
+              <input type="checkbox" @click="onClickShowCommon" v-model="showCommonOnly"/>
+              COMMON
+            </label>
+            <button class="sm secondary" @click="toggleCollapseAll" :title=' allCollapsed ? "Expand All":"Collapsed ALL" '>{{ allCollapsed ? '▼' : '▲' }}</button>
           </div>
         </div>
         <div v-if="filteredRows.length === 0" class="empty-state">All selected variables match.</div>
@@ -156,6 +160,15 @@
             <option value="common">Common</option>
             <option value="left_only">Left Only</option>
             <option value="right_only">Right Only</option>
+          </select>
+          <select v-model="varCalType" class="sel" @change="reloadVariables">
+            <option value="">All Types</option>
+            <option value="VALUE">VALUE</option>
+            <option value="CURVE">CURVE</option>
+            <option value="MAP">MAP</option>
+            <option value="VAL_BLK">VAL_BLK</option>
+            <option value="AXIS">AXIS</option>
+            <option value="ASCII">ASCII</option>
           </select>
         </div>
         <div class="modal-body" @scroll="maybeLoadMore" ref="varModalBody">
@@ -253,8 +266,8 @@ function rowHtml(row) {
       const ld = lr[ci]?.display ?? '—'
       const rd = rr[ci]?.display ?? '—'
       return `<td class="merged-cell${isDiff ? ' diff-cell' : ''}">` +
-        `<div class="cell-left">${escHtml(ld)}</div>` +
-        `<div class="cell-right">${escHtml(rd)}</div>` +
+        `<div class="cell-left"><span class="stag">L</span>${escHtml(ld)}</div>` +
+        `<div class="cell-right"><span class="stag">R</span>${escHtml(rd)}</div>` +
         `</td>`
     }).join('')
     return `<tr><th>${escHtml(String(rowLabel(ri)))}</th>${cells}</tr>`
@@ -269,6 +282,7 @@ const sessions = ref([])
 const activeSessionId = ref(null)
 const rows = ref([])
 const showDiffOnly = ref(false)
+const showCommonOnly = ref(false)
 const collapsedRows = ref(new Set())
 
 // Inline tab rename state
@@ -290,6 +304,7 @@ const loadStatusClass = reactive({ left: '', right: '' })
 const showVarModal = ref(false)
 const varSearch = ref('')
 const varPresence = ref('all')
+const varCalType = ref('')
 const varItems = ref([])
 const tempSelected = ref(new Set())
 const varPage = reactive({ offset: 0, limit: 100, total: 0, loading: false, exhausted: false })
@@ -306,7 +321,7 @@ const activeSession = computed(() =>
 )
 
 const filteredRows = computed(() =>
-  showDiffOnly.value ? rows.value.filter(r => !r.matches) : rows.value
+  showDiffOnly.value ? rows.value.filter(r => !r.matches) : (showCommonOnly.value ? rows.value.filter(r => r.matches) : rows.value)
 )
 
 const diffCount = computed(() => rows.value.filter(r => !r.matches).length)
@@ -316,6 +331,26 @@ const allCollapsed = computed(() =>
 )
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+function onClickShowDiffOnly() {
+  if (showDiffOnly.value) {
+    showDiffOnly.value = false
+    showCommonOnly.value = true
+  } else {
+    showDiffOnly.value = true
+    showCommonOnly.value = false
+  }
+}
+
+
+function onClickShowCommon() {
+  if (showCommonOnly.value) {
+    showCommonOnly.value = false
+    showDiffOnly.value = true
+  } else {
+    showCommonOnly.value = true
+    showDiffOnly.value = false
+  }
+}
 
 function setMsg(text, err = false) {
   msg.value = text
@@ -566,6 +601,7 @@ function openVarModal() {
   tempSelected.value = new Set(activeSession.value.selected_variables || [])
   varSearch.value = ''
   varPresence.value = 'all'
+  varCalType.value = ''
   varItems.value = []
   varPage.offset = 0
   varPage.total = 0
@@ -594,6 +630,7 @@ async function loadVarPage(reset) {
       sessionId: activeSession.value.id,
       search: varSearch.value || null,
       presence: varPresence.value || null,
+      calType: varCalType.value || null,
       offset,
       limit: varPage.limit,
     })
@@ -631,6 +668,7 @@ async function selectAllFiltered() {
       sessionId: activeSession.value.id,
       search: varSearch.value || null,
       presence: varPresence.value || null,
+      calType: varCalType.value || null,
       offset: 0,
       limit: 100000,
     })

@@ -408,6 +408,7 @@ pub async fn compare_variables(
     let presence = ComparePresenceFilter::from_str(
         params.get("presence").map_or("all", String::as_str),
     );
+    let cal_type = params.get("cal_type").map(String::as_str);
     let offset = params
         .get("offset")
         .and_then(|value| value.parse::<usize>().ok())
@@ -419,7 +420,7 @@ pub async fn compare_variables(
 
     Json(json!({
         "success": true,
-        "page": session.page_variables(&search, presence, offset, limit),
+        "page": session.page_variables(&search, presence, cal_type, offset, limit),
     }))
 }
 
