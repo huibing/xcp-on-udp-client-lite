@@ -228,12 +228,27 @@ function diffSet(positions) {
   return new Set((positions || []).map(p => `${p.row}:${p.col}`))
 }
 
+function fmtAxis(v) {
+  return v !== undefined ? Number(v).toFixed(3) : ''
+}
+
+function axisCell(leftVal, rightVal) {
+  if (leftVal === undefined && rightVal === undefined) return '—'
+  if (leftVal === undefined) return `<div class="merged-scalar"><div class="cell-left"><span class="stag">L</span>—</div><div class="cell-right"><span class="stag">R</span>${escHtml(fmtAxis(rightVal))}</div></div>`
+  if (rightVal === undefined) return `<div class="merged-scalar"><div class="cell-left"><span class="stag">L</span>${escHtml(fmtAxis(leftVal))}</div><div class="cell-right"><span class="stag">R</span>—</div></div>`
+  const ls = fmtAxis(leftVal), rs = fmtAxis(rightVal)
+  if (ls === rs) return escHtml(ls)
+  const isDiff = Math.abs(Number(leftVal) - Number(rightVal)) > 1e-6
+  return `<div class="merged-scalar${isDiff ? ' diff-cell' : ''}"><div class="cell-left"><span class="stag">L</span>${escHtml(ls)}</div><div class="cell-right"><span class="stag">R</span>${escHtml(rs)}</div></div>`
+}
+
 function rowHtml(row) {
   const left = row.left?.value || null
   const right = row.right?.value || null
   const kind = (left || right)?.kind || 'scalar'
   const diffs = diffSet(row.diff_positions)
-  const ax = row.left?.axis_values || row.right?.axis_values || []
+  const leftAx = row.left?.axis_values || []
+  const rightAx = row.right?.axis_values || []
 
   if (kind === 'scalar') {
     const ld = left?.cells?.[0]?.[0]?.display ?? '—'
@@ -250,13 +265,17 @@ function rowHtml(row) {
   const numRows = Math.max(leftRows.length, rightRows.length)
   if (numRows === 0) return '<div class="empty-state">No value data.</div>'
   const numCols = Math.max((leftRows[0] || rightRows[0] || []).length, 0)
-  const xAxis = ax[0]?.length ? ax[0] : null
-  const yAxis = ax[1]?.length ? ax[1] : null
-  const colLabel = ci => xAxis ? (xAxis[ci] !== undefined ? Number(xAxis[ci]).toFixed(3) : ci) : ci
-  const rowLabel = ri => yAxis ? (yAxis[ri] !== undefined ? Number(yAxis[ri]).toFixed(3) : ri) : ri
+
+  const leftX = leftAx[0] || [], rightX = rightAx[0] || []
+  const leftY = leftAx[1] || [], rightY = rightAx[1] || []
+  const hasXAxis = leftX.length > 0 || rightX.length > 0
+  const hasYAxis = leftY.length > 0 || rightY.length > 0
+
+  const colLabel = ci => hasXAxis ? axisCell(leftX[ci], rightX[ci]) : String(ci)
+  const rowLabel = ri => hasYAxis ? axisCell(leftY[ri], rightY[ri]) : String(ri)
 
   const header = `<tr><th></th>${Array.from({ length: numCols }, (_, ci) =>
-    `<th>${escHtml(String(colLabel(ci)))}</th>`).join('')}</tr>`
+    `<th>${colLabel(ci)}</th>`).join('')}</tr>`
 
   const body = Array.from({ length: numRows }, (_, ri) => {
     const lr = leftRows[ri] || []
@@ -265,12 +284,17 @@ function rowHtml(row) {
       const isDiff = diffs.has(`${ri}:${ci}`)
       const ld = lr[ci]?.display ?? '—'
       const rd = rr[ci]?.display ?? '—'
-      return `<td class="merged-cell${isDiff ? ' diff-cell' : ''}">` +
+      if (isDiff) {
+        return `<td class="merged-cell diff-cell">` +
         `<div class="cell-left"><span class="stag">L</span>${escHtml(ld)}</div>` +
         `<div class="cell-right"><span class="stag">R</span>${escHtml(rd)}</div>` +
         `</td>`
+      } else {
+        return  `<td>` + `<div class="cell-left">${escHtml(ld)} </div>` + `</td>`
+      }
+      
     }).join('')
-    return `<tr><th>${escHtml(String(rowLabel(ri)))}</th>${cells}</tr>`
+    return `<tr><th>${rowLabel(ri)}</th>${cells}</tr>`
   }).join('')
 
   return `<div class="grid-wrap"><table class="merged-grid"><thead>${header}</thead><tbody>${body}</tbody></table></div>`
@@ -873,6 +897,9 @@ button.danger:hover:not(:disabled) { background: #1a0000; }
 :deep(.merged-grid th),
 :deep(.merged-grid td) { border: 1px solid var(--exp-border2, #002211); padding: 3px 8px; text-align: center; font-family: Consolas, monospace; font-size: 0.8rem; }
 :deep(.merged-grid th) { color: var(--exp-fg-dim, #555); background: var(--exp-bg, #0a0a0a); }
+:deep(.merged-grid th .merged-scalar) { font-size: 0.7rem; padding: 2px 4px; min-width: auto; background: none; }
+:deep(.merged-grid th .merged-scalar .cell-left),
+:deep(.merged-grid th .merged-scalar .cell-right) { font-size: 0.7rem; }
 :deep(.merged-cell) { vertical-align: top; min-width: 60px; }
 :deep(.diff-cell) { background: #1a1000 !important; }
 :deep(.diff-cell .cell-left),
