@@ -314,11 +314,44 @@ const editingTabId = ref(null)
 const editingTabName = ref('')
 const tabNameInput = ref(null)
 
-const sourceType = reactive({ left: 'a2l_hex', right: 'a2l_hex' })
-const sourceFiles = reactive({
-  left: { a2l: '', hex: '', dcm: '' },
-  right: { a2l: '', hex: '', dcm: '' }
+// Per-session source UI state — each session gets its own sourceType / sourceFiles
+const sessionSourceState = reactive(new Map())
+
+function getSessionSourceState(sessionId) {
+  if (!sessionSourceState.has(sessionId)) {
+    sessionSourceState.set(sessionId, {
+      sourceType: { left: 'a2l_hex', right: 'a2l_hex' },
+      sourceFiles: {
+        left: { a2l: '', hex: '', dcm: '' },
+        right: { a2l: '', hex: '', dcm: '' }
+      }
+    })
+  }
+  return sessionSourceState.get(sessionId)
+}
+
+const sourceType = computed({
+  get() {
+    const s = getSessionSourceState(activeSessionId.value || '__default')
+    return s.sourceType
+  },
+  set(v) {
+    const s = getSessionSourceState(activeSessionId.value || '__default')
+    s.sourceType = v
+  }
 })
+
+const sourceFiles = computed({
+  get() {
+    const s = getSessionSourceState(activeSessionId.value || '__default')
+    return s.sourceFiles
+  },
+  set(v) {
+    const s = getSessionSourceState(activeSessionId.value || '__default')
+    s.sourceFiles = v
+  }
+})
+
 const draggingOver = reactive({ left: false, right: false })
 const cardRefs = reactive({ left: null, right: null })
 const loadingSource = reactive({ left: false, right: false })
@@ -358,7 +391,7 @@ const allCollapsed = computed(() =>
 function onClickShowDiffOnly() {
   if (showDiffOnly.value) {
     showDiffOnly.value = false
-    showCommonOnly.value = true
+    // showCommonOnly.value = true
   } else {
     showDiffOnly.value = true
     showCommonOnly.value = false
@@ -369,7 +402,7 @@ function onClickShowDiffOnly() {
 function onClickShowCommon() {
   if (showCommonOnly.value) {
     showCommonOnly.value = false
-    showDiffOnly.value = true
+    // showDiffOnly.value = true
   } else {
     showCommonOnly.value = true
     showDiffOnly.value = false
@@ -442,6 +475,11 @@ async function selectSession(id) {
   cancelTabRename()
   activeSessionId.value = id
   rows.value = []
+  // Clear transient UI states for source cards
+  loadingSource.left = false
+  loadingSource.right = false
+  loadStatus.left = ''
+  loadStatus.right = ''
   await refreshResults()
 }
 
@@ -484,8 +522,10 @@ async function commitTabRename() {
 async function deleteSession() {
   if (!activeSession.value) return
   if (!window.confirm(`Delete session "${activeSession.value.name}"?`)) return
+  const id = activeSession.value.id
   try {
-    await invoke('compare_delete_session', { sessionId: activeSession.value.id })
+    await invoke('compare_delete_session', { sessionId: id })
+    sessionSourceState.delete(id)
     await refreshSessions()
   } catch (e) { setMsg(String(e), true) }
 }
@@ -506,7 +546,7 @@ async function browseFile(side, kind) {
   }
   try {
     const path = await open({ multiple: false, directory: false, title, filters })
-    if (path) sourceFiles[side][kind] = path
+    if (path) sourceFiles.value[side][kind] = path
   } catch (e) { setMsg(String(e), true) }
 }
 
@@ -530,38 +570,38 @@ async function processDroppedPaths(side, paths) {
   for (const path of paths) {
     const ext = (path.split('.').pop() || '').toLowerCase()
     if (ext === 'a2l') {
-      sourceFiles[side].a2l = path
-      if (sourceType[side] === 'dcm') sourceType[side] = 'a2l_hex'
+      sourceFiles.value[side].a2l = path
+      if (sourceType.value[side] === 'dcm') sourceType.value[side] = 'a2l_hex'
       changed = true
     } else if (HEX_EXTS.has(ext)) {
-      sourceFiles[side].hex = path
-      if (sourceType[side] === 'dcm') sourceType[side] = 'a2l_hex'
+      sourceFiles.value[side].hex = path
+      if (sourceType.value[side] === 'dcm') sourceType.value[side] = 'a2l_hex'
       changed = true
     } else if (ext === 'dcm') {
-      sourceFiles[side].dcm = path
-      if (sourceType[side] === 'a2l_hex') sourceType[side] = 'dcm'
+      sourceFiles.value[side].dcm = path
+      if (sourceType.value[side] === 'a2l_hex') sourceType.value[side] = 'dcm'
       changed = true
     }
   }
   if (!changed) return
-  const type = sourceType[side]
-  if (type === 'dcm' && sourceFiles[side].dcm) {
+  const type = sourceType.value[side]
+  if (type === 'dcm' && sourceFiles.value[side].dcm) {
     await loadSource(side)
-  } else if (type === 'a2l_hex' && sourceFiles[side].a2l && sourceFiles[side].hex) {
+  } else if (type === 'a2l_hex' && sourceFiles.value[side].a2l && sourceFiles.value[side].hex) {
     await loadSource(side)
   }
 }
 
 async function loadSource(side) {
   if (!activeSession.value) return
-  const type = sourceType[side]
+  const type = sourceType.value[side]
   if (type === 'a2l_hex') {
-    if (!sourceFiles[side].a2l || !sourceFiles[side].hex) {
+    if (!sourceFiles.value[side].a2l || !sourceFiles.value[side].hex) {
       setMsg('Please select both A2L and HEX files.', true)
       return
     }
   } else {
-    if (!sourceFiles[side].dcm) {
+    if (!sourceFiles.value[side].dcm) {
       setMsg('Please select a DCM file.', true)
       return
     }
@@ -574,9 +614,9 @@ async function loadSource(side) {
       sessionId: activeSession.value.id,
       side,
       sourceType: type,
-      filePath: type === 'a2l_hex' ? sourceFiles[side].a2l : sourceFiles[side].dcm,
+      filePath: type === 'a2l_hex' ? sourceFiles.value[side].a2l : sourceFiles.value[side].dcm,
     }
-    if (type === 'a2l_hex') args.hexPath = sourceFiles[side].hex
+    if (type === 'a2l_hex') args.hexPath = sourceFiles.value[side].hex
 
     const r = await invoke('compare_load_source', args)
     if (r.success) {
