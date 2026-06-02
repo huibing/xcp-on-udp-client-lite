@@ -814,7 +814,6 @@ function createChart() {
           grid: { color: props.gridColor },
           ticks: {
             color: props.tickColor,
-            maxTicksLimit: 8,
             callback: (v, _index, ticks) => {
               // Compute precision from tick step so zoomed-in labels never repeat
               let precision = 1
@@ -827,6 +826,13 @@ function createChart() {
               return `${Number(v).toFixed(precision)}s`
             },
           },
+          afterBuildTicks(axis) {
+            const min = axis.min, max = axis.max
+            const step = (max - min) / 5
+            const ticks = []
+            for (let i = 0; i < 6; i++) ticks.push({ value: min + i * step })
+            axis.ticks = ticks
+          },
           border: { color: props.gridColor },
         },
         y: {
@@ -836,7 +842,6 @@ function createChart() {
           grid: { color: props.gridColor },
           ticks: {
             color: props.tickColor,
-            maxTicksLimit: 6,
             callback: (v, _index, ticks) => {
               const n = Number(v)
               // Use exponential for extreme magnitudes
@@ -851,6 +856,13 @@ function createChart() {
               }
               return n.toFixed(precision)
             },
+          },
+          afterBuildTicks(axis) {
+            const min = axis.min, max = axis.max
+            const step = (max - min) / 5
+            const ticks = []
+            for (let i = 0; i < 6; i++) ticks.push({ value: min + i * step })
+            axis.ticks = ticks
           },
           border: { color: props.gridColor },
           afterFit(scale) { scale.width = 58 },  // fixed Y-axis width keeps plot area stable

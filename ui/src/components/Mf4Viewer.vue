@@ -1425,6 +1425,26 @@ const visibleFiles = computed(() => recordFiles.value.filter(f => !hiddenFilePat
 
 function hideFile(path) {
   hiddenFilePaths.add(path)
+  fileChannelsMap.delete(path)
+  if (activeFile.value?.path === path) {
+    activeFile.value = null
+    activeChannels.value = []
+    activeVtabMaps.value = {}
+    channelSearch.value = ''
+  }
+  for (const tab of tabs) {
+    tab.chartGroups = tab.chartGroups
+      .map(g => ({ ...g, signals: g.signals.filter(s => s.path !== path) }))
+      .filter(g => g.signals.length > 0)
+    tab.undoCount = tab.undoQueue.length
+  }
+  for (const [key] of historyStore) {
+    if (key.startsWith(path + '::')) {
+      historyStore.delete(key)
+    }
+  }
+  delete fileTimeOffsets[path]
+  recomputeTimeBounds()
 }
 
 /** vtabMaps keyed by signal key for SignalChart — { [signalKey]: Array<{key, text}> } */
