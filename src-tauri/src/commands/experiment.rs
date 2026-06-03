@@ -7,7 +7,7 @@ use tauri::{AppHandle, State};
 use xcp_client::slave::PageMode;
 
 use crate::commands::daq_live::spawn_live_daq_event_pump;
-use crate::commands::helpers::bytes_to_calibration_value;
+use crate::commands::helpers::{bytes_to_calibration_value, read_axis_values_from_slave, read_axis_values_from_hex};
 use crate::state::SharedState;
 
 /// Return all measurements and calibration params across all devices.
@@ -804,6 +804,18 @@ pub async fn experiment_dcm_export(
         let cal_mgr = dev.cal_manager.read().await;
         let cal_cache = dev.cal_values.read().await;
 
+        // Pre-read axis values for this device: connected → XCP slave, disconnected → HEX image
+        let slave_opt = if dev.connected {
+            dev.slave_id.and_then(|sid| app.client.get_slave(sid))
+        } else {
+            None
+        };
+        let hex_opt = if slave_opt.is_none() {
+            dev.hex_image.read().await.clone()
+        } else {
+            None
+        };
+
         for (idx, param) in cal_mgr.params().iter().enumerate() {
             let _ = idx;
             // If per-variable filter is set, skip params not in the selection
@@ -822,10 +834,22 @@ pub async fn experiment_dcm_export(
             let desc = param.description.clone();
             let unit = param.unit.clone().unwrap_or_default();
 
+            // Resolve axis values: static first, then XCP/HEX for Memory-type axes
+            let axis_values: Vec<Vec<f64>> = if param.axis_info.iter().all(|a| a.get_static_values().is_some()) {
+                param.axis_info.iter().map(|a| a.get_static_values().unwrap()).collect()
+            } else if let Some(ref slave) = slave_opt {
+                let slave_guard = slave.lock().await;
+                read_axis_values_from_slave(&slave_guard, param).await
+            } else if let Some(ref hex) = hex_opt {
+                read_axis_values_from_hex(hex, param)
+            } else {
+                param.axis_info.iter().map(|a| a.get_static_values().unwrap_or_else(|| (0..a.num_points).map(|i| i as f64).collect())).collect()
+            };
+
             let get_axis = |axis_idx: usize, fallback_n: usize| -> Vec<f64> {
-                param.axis_info
+                axis_values
                     .get(axis_idx)
-                    .and_then(|a| a.get_static_values())
+                    .cloned()
                     .unwrap_or_else(|| (0..fallback_n).map(|i| i as f64).collect())
             };
 
