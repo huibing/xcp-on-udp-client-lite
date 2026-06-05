@@ -3,7 +3,8 @@
 
 use serde_json::{json, Value};
 use xcp_client::a2l::{A2lCharacteristic, A2lDataType, A2lMeasurement, A2lReader, AxisPointSource};
-use xcp_client::calibration::{CalibrationParam, CalibrationType, CalibrationValue};
+use xcp_client::calibration::{CalibrationParam, CalibrationType, CalibrationValue, StorageOrder,
+    matrix_to_flat};
 use xcp_client::daq::Measurement;
 use xcp_client::protocol::Mta;
 use xcp_client::slave::XcpSlave;
@@ -415,49 +416,49 @@ pub fn calibration_value_to_bytes(
         (CalibrationValue::BoolArray(arr), CalibrationType::BoolArray(_)) => {
             arr.iter().map(|v| if *v { 1u8 } else { 0u8 }).collect()
         }
-        (CalibrationValue::U8Matrix(mat), CalibrationType::U8Matrix(_, _)) => {
-            mat.iter().flat_map(|row| row.iter().copied()).collect()
+        (CalibrationValue::U8Matrix(mat), CalibrationType::U8Matrix(rows, cols)) => {
+            matrix_to_flat(mat, *rows, *cols, param.storage_order)
         }
-        (CalibrationValue::U16Matrix(mat), CalibrationType::U16Matrix(_, _)) => mat
-            .iter()
-            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
-            .collect(),
-        (CalibrationValue::U32Matrix(mat), CalibrationType::U32Matrix(_, _)) => mat
-            .iter()
-            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
-            .collect(),
-        (CalibrationValue::U64Matrix(mat), CalibrationType::U64Matrix(_, _)) => mat
-            .iter()
-            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
-            .collect(),
-        (CalibrationValue::I8Matrix(mat), CalibrationType::I8Matrix(_, _)) => mat
-            .iter()
-            .flat_map(|row| row.iter().map(|v| *v as u8))
-            .collect(),
-        (CalibrationValue::I16Matrix(mat), CalibrationType::I16Matrix(_, _)) => mat
-            .iter()
-            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
-            .collect(),
-        (CalibrationValue::I32Matrix(mat), CalibrationType::I32Matrix(_, _)) => mat
-            .iter()
-            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
-            .collect(),
-        (CalibrationValue::I64Matrix(mat), CalibrationType::I64Matrix(_, _)) => mat
-            .iter()
-            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
-            .collect(),
-        (CalibrationValue::F32Matrix(mat), CalibrationType::F32Matrix(_, _)) => mat
-            .iter()
-            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
-            .collect(),
-        (CalibrationValue::F64Matrix(mat), CalibrationType::F64Matrix(_, _)) => mat
-            .iter()
-            .flat_map(|row| row.iter().flat_map(|v| v.to_le_bytes()))
-            .collect(),
-        (CalibrationValue::BoolMatrix(mat), CalibrationType::BoolMatrix(_, _)) => mat
-            .iter()
-            .flat_map(|row| row.iter().map(|v| if *v { 1u8 } else { 0u8 }))
-            .collect(),
+        (CalibrationValue::U16Matrix(mat), CalibrationType::U16Matrix(rows, cols)) => {
+            let flat: Vec<u16> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::U32Matrix(mat), CalibrationType::U32Matrix(rows, cols)) => {
+            let flat: Vec<u32> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::U64Matrix(mat), CalibrationType::U64Matrix(rows, cols)) => {
+            let flat: Vec<u64> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I8Matrix(mat), CalibrationType::I8Matrix(rows, cols)) => {
+            let flat: Vec<i8> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+            flat.iter().map(|v| v as u8).collect()
+        }
+        (CalibrationValue::I16Matrix(mat), CalibrationType::I16Matrix(rows, cols)) => {
+            let flat: Vec<i16> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I32Matrix(mat), CalibrationType::I32Matrix(rows, cols)) => {
+            let flat: Vec<i32> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::I64Matrix(mat), CalibrationType::I64Matrix(rows, cols)) => {
+            let flat: Vec<i64> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::F32Matrix(mat), CalibrationType::F32Matrix(rows, cols)) => {
+            let flat: Vec<f32> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::F64Matrix(mat), CalibrationType::F64Matrix(rows, cols)) => {
+            let flat: Vec<f64> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+            flat.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        (CalibrationValue::BoolMatrix(mat), CalibrationType::BoolMatrix(rows, cols)) => {
+            let flat: Vec<bool> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
+            flat.iter().map(|v| if *v { 1u8 } else { 0u8 }).collect()
+        }
         (CalibrationValue::Ascii(s), CalibrationType::Ascii(n)) => {
             let src = s.as_bytes();
             let mut bytes = vec![0u8; *n];

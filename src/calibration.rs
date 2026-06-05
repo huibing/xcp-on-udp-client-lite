@@ -1498,9 +1498,14 @@ impl CalibrationManager {
                 }
                 let flat: Result<Vec<f32>, _> = values.iter().map(|s| s.trim().parse()).collect();
                 let flat = flat.map_err(|_| "Invalid F32 value")?;
+                tracing::debug!(
+                    "parse_value F32Matrix: rows={}, cols={}, flat values (first 16): {:?}",
+                    rows, cols, &flat[..flat.len().min(16)]
+                );
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
                     let row: Vec<f32> = flat[r * cols..(r + 1) * cols].to_vec();
+                    tracing::debug!("parse_value F32Matrix: row[{}] = {:?}", r, row);
                     matrix.push(row);
                 }
                 Ok(CalibrationValue::F32Matrix(matrix))

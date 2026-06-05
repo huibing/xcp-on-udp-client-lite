@@ -31,7 +31,6 @@ daq_data.csv
 
 # dcm_utils debug output (generated in debug builds by write_dcm_data)
 /output/
-
 # A2L/AML files
 *.a2l
 *.aml
@@ -48,3 +47,4 @@ web_test/screenshots/
 # Vue/Vite frontend
 ui/node_modules/
 ui/dist/
+src-tauri/output/data.json

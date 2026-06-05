@@ -1495,10 +1495,11 @@ impl XcpSlave {
 
         for (i, chunk) in data.chunks(max_block).enumerate() {
             let chunk_size = chunk.len();
-            tracing::trace!(
-                "download_sequential: packet {} - {} bytes",
+            tracing::debug!(
+                "download_sequential: packet {} - {} bytes, data: {:02X?}",
                 i + 1,
-                chunk_size
+                chunk_size,
+                &chunk[..chunk.len().min(32)]
             );
 
             let response = self
