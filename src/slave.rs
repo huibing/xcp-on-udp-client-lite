@@ -187,6 +187,12 @@ pub struct XcpSlave {
 
     /// Current page state for each segment (keyed by segment number)
     segment_pages: Vec<SegmentPageState>,
+
+    /// Optional shared packet log for the in-app packet browser
+    pub packet_log: Option<Arc<crate::xcp_packet_log::XcpPacketLog>>,
+
+    /// Last outgoing CTO command code, used for correlating the next response label.
+    pub last_cmd_code: std::sync::Mutex<Option<u8>>,
 }
 
 impl XcpSlave {
@@ -194,6 +200,7 @@ impl XcpSlave {
     pub async fn connect(
         name: impl Into<String>,
         transport_config: TransportConfig,
+        packet_log: Option<Arc<crate::xcp_packet_log::XcpPacketLog>>,
     ) -> Result<(Self, SlaveId), SlaveError> {
         let id = SlaveId::new();
         let name = name.into();
@@ -241,6 +248,8 @@ impl XcpSlave {
             daq_manager: Arc::new(Mutex::new(DaqManager::new())),
             a2l_path: None,
             segment_pages: Vec::new(),
+            packet_log,
+            last_cmd_code: std::sync::Mutex::new(None),
         };
 
         // Send CONNECT command
@@ -297,11 +306,54 @@ impl XcpSlave {
             .await
             .map_err(SlaveError::Transport)?;
 
+        // Capture outgoing CTO (cheap when disabled)
+        let cmd_code = command.first().copied();
+        if let Some(log) = &self.packet_log {
+            if log.is_enabled() {
+                let entry = crate::xcp_packet_log::XcpPacketEntry {
+                    id: log.next_id(),
+                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                    source: "xcp-client".to_string(),
+                    direction: crate::xcp_packet_log::PacketDirection::Outgoing,
+                    hex: crate::protocol::packet_display::format_hex(command),
+                    description: crate::protocol::packet_display::describe_cto_command(command),
+                    packet_class: crate::xcp_packet_log::PacketClass::Cto,
+                    daq_timestamp: None,
+                };
+                log.push(entry);
+            }
+        }
+        if let Some(code) = cmd_code {
+            if let Ok(mut last) = self.last_cmd_code.lock() {
+                *last = Some(code);
+            }
+        }
+
         // Wait for response
         let mut rx = self.cto_rx.lock().await;
 
         match timeout(Duration::from_secs(1), rx.recv()).await {
             Ok(Some(msg)) => {
+                // Capture incoming CTO
+                if let Some(log) = &self.packet_log {
+                    if log.is_enabled() {
+                        let last = self.last_cmd_code.lock().ok().and_then(|g| *g);
+                        let entry = crate::xcp_packet_log::XcpPacketEntry {
+                            id: log.next_id(),
+                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                            source: self.info.name.clone(),
+                            direction: crate::xcp_packet_log::PacketDirection::Incoming,
+                            hex: crate::protocol::packet_display::format_hex(&msg.payload),
+                            description: crate::protocol::packet_display::describe_cto_response(
+                                &msg.payload, last,
+                            ),
+                            packet_class: crate::xcp_packet_log::PacketClass::Cto,
+                            daq_timestamp: None,
+                        };
+                        log.push(entry);
+                    }
+                }
+
                 // Check for negative response
                 if let Ok(Response::Err(err_code)) = parse_response(&msg.payload) {
                     let cmd_code = command.first().copied().unwrap_or(0xFF);

@@ -205,7 +205,7 @@ pub async fn run_daq_record(config_path: &str) -> Result<(), Box<dyn std::error:
         addr: slave_addr.clone(),
     };
     let slave_id = client
-        .connect_slave("daq-record-target", transport_config)
+        .connect_slave("daq-record-target", transport_config, None)
         .await
         .map_err(|e| format!("Failed to connect: {}", e))?;
     println!("  Connected (id: {})", slave_id);

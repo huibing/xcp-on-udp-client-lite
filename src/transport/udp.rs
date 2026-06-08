@@ -189,7 +189,7 @@ impl UdpTransport {
             "Sending XCP command: counter={}, cmd=0x{:02X}({}), len={}, packet=[{:02X?}]",
             counter,
             command.first().copied().unwrap_or(0xFF),
-            command_name(command.first().copied().unwrap_or(0xFF)),
+            crate::protocol::packet_display::command_name(command.first().copied().unwrap_or(0xFF)),
             command.len(),
             packet
         );
@@ -365,59 +365,6 @@ impl Transport for UdpTransport {
 
     fn target_addr(&self) -> String {
         self.remote_addr.to_string()
-    }
-}
-
-/// Get human-readable command name from command code
-fn command_name(cmd_code: u8) -> &'static str {
-    match cmd_code {
-        0xFF => "CONNECT",
-        0xFE => "DISCONNECT",
-        0xFD => "GET_STATUS",
-        0xFC => "SYNCH",
-        0xFB => "GET_COMM_MODE_INFO",
-        0xFA => "GET_ID",
-        0xF9 => "SET_REQUEST",
-        0xF8 => "GET_SEED",
-        0xF7 => "UNLOCK",
-        0xF6 => "SET_MTA",
-        0xF5 => "UPLOAD",
-        0xF4 => "SHORT_UPLOAD",
-        0xF3 => "BUILD_CHECKSUM",
-        0xF2 => "TRANSPORT_LAYER_CMD",
-        0xF1 => "USER_CMD",
-        0xF0 => "DOWNLOAD",
-        0xEF => "DOWNLOAD_NEXT",
-        0xEE => "DOWNLOAD_MAX",
-        0xED => "SHORT_DOWNLOAD",
-        0xEC => "MODIFY_BITS",
-        0xEB => "SET_CAL_PAGE",
-        0xEA => "GET_CAL_PAGE",
-        0xE4 => "COPY_CAL_PAGE",
-        0xD7 => "GET_DAQ_EVENT_INFO",
-        0xE2 => "SET_DAQ_PTR",
-        0xE1 => "WRITE_DAQ",
-        0xE0 => "SET_DAQ_LIST_MODE",
-        0xDF => "GET_DAQ_LIST_MODE",
-        0xDE => "START_STOP_DAQ_LIST",
-        0xDD => "START_STOP_SYNCH",
-        0xDC => "GET_DAQ_CLOCK",
-        0xDB => "READ_DAQ",
-        0xDA => "GET_DAQ_PROCESSOR_INFO",
-        0xD9 => "GET_DAQ_RESOLUTION_INFO",
-        0xD8 => "GET_DAQ_LIST_INFO",
-        0xD6 => "FREE_DAQ",
-        0xD5 => "ALLOC_DAQ",
-        0xD4 => "ALLOC_ODT",
-        0xD3 => "ALLOC_ODT_ENTRY",
-        0xD2 => "PROGRAM_START",
-        0xD1 => "PROGRAM_CLEAR",
-        0xD0 => "PROGRAM",
-        0xCF => "PROGRAM_RESET",
-        0xCE => "GET_PGM_PROCESSOR_INFO",
-        0xC6 => "TIME_CORRELATION_PROPERTIES",
-        0xC4 => "DAQ_MULTIPLE",
-        _ => "UNKNOWN",
     }
 }
 

@@ -105,7 +105,7 @@ pub async fn run_calibrate(
         addr: slave_addr.clone(),
     };
     let slave_id = client
-        .connect_slave("calibrate-target", transport_config)
+        .connect_slave("calibrate-target", transport_config, None)
         .await
         .map_err(|e| format!("Failed to connect: {}", e))?;
     println!("  Connected (id: {})", slave_id);

@@ -127,11 +127,12 @@ impl XcpClient {
         &mut self,
         name: impl Into<String>,
         transport_config: TransportConfig,
+        packet_log: Option<Arc<crate::xcp_packet_log::XcpPacketLog>>,
     ) -> Result<SlaveId, XcpError> {
         let name = name.into();
         let name_for_log = name.clone();
 
-        let (slave, id) = XcpSlave::connect(name, transport_config).await?;
+        let (slave, id) = XcpSlave::connect(name, transport_config, packet_log).await?;
         let slave_arc = Arc::new(Mutex::new(slave));
 
         self.slaves.insert(id, slave_arc.clone());
@@ -159,7 +160,7 @@ impl XcpClient {
         let config = TransportConfig::Udp {
             addr: addr.to_string(),
         };
-        self.connect_slave(name, config).await
+        self.connect_slave(name, config, None).await
     }
 
     /// Disconnect a specific slave

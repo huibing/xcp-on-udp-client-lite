@@ -65,11 +65,17 @@ fn init_logging() -> Arc<ConsoleLogState> {
 
 pub fn run() {
     let console_state = init_logging();
+
+    let app_state = TauriAppState::new();
+    let packet_log = app_state.packet_log.clone();
+    let app_state_arc = Arc::new(RwLock::new(app_state));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(console_state)
-        .manage(Arc::new(RwLock::new(TauriAppState::new())))
+        .manage(app_state_arc)
+        .manage(packet_log)
         .manage(commands::mf4_viewer::Mf4FileCache::new())
         .invoke_handler(tauri::generate_handler![
             // Console log viewer
@@ -155,6 +161,10 @@ pub fn run() {
             // Upload
             commands::upload::upload_get_segments,
             commands::upload::upload_memory,
+            // XCP Packet Browser
+            commands::xcp_packet::xcp_packet_get,
+            commands::xcp_packet::xcp_packet_clear,
+            commands::xcp_packet::xcp_packet_set_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running xcp-client-desktop");

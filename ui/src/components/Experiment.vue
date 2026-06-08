@@ -43,6 +43,9 @@
         <button class="sb-btn" :class="{ 'sb-active': showCalHistory }"
           :title="`Calibration History (${calHistory.length} action${calHistory.length !== 1 ? 's' : ''})`"
           @click="showCalHistory = !showCalHistory">🕐</button>
+        <button class="sb-btn" :class="{ 'sb-active': showPacketBrowser }"
+          title="XCP Packet Browser — view raw XCP traffic"
+          @click="showPacketBrowser = !showPacketBrowser">📦</button>
         <div class="sb-flex"></div>
         <button class="sb-btn" :class="{ 'sb-active': showDaqLayout }"
           title="DAQ List Allocation Layout — shows planned DAQ structure per device"
@@ -269,6 +272,8 @@
         {{ pageMode === 'working' ? '✎ WORKING' : '🔒 REFERENCE' }}
       </span>
     </div>
+
+    <XcpPacketBrowser v-if="showPacketBrowser" @close="showPacketBrowser = false" />
 
     <!-- ===== MODALS ===== -->
 
@@ -818,6 +823,7 @@ import { listen } from '@tauri-apps/api/event'
 import { save, open } from '@tauri-apps/plugin-dialog'
 import { useRouter } from 'vue-router'
 import SignalChart from './SignalChart.vue'
+import XcpPacketBrowser from './XcpPacketBrowser.vue'
 import { useTheme } from '../composables/useTheme.js'
 import { useMf4Settings } from '../composables/useMf4Settings.js'
 
@@ -1006,6 +1012,9 @@ const showHelpModal = ref(false)
 const showDaqLayout = ref(false)
 const daqLayoutNote = ref('')
 const daqLayoutHtml = ref('')
+
+// ── XCP Packet Browser ───────────────────────────────────────────────────────
+const showPacketBrowser = ref(false)
 
 // ── Event selection state ─────────────────────────────────────────────────────
 // config_device_id → [{channel, name, short_name, cycle_time_ms}]

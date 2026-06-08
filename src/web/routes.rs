@@ -574,7 +574,7 @@ pub async fn connect_all_devices(
         };
         let transport_config = resolved_transport.to_transport_config();
 
-        match client.connect_slave(&device.name, transport_config).await {
+        match client.connect_slave(&device.name, transport_config, None).await {
             Ok(slave_id) => {
                 // Copy pre-parsed memory segments to XcpSlave (no re-parsing)
                 if !device.a2l_path.is_empty() {
@@ -741,7 +741,7 @@ pub async fn connect_device(
 
     let mut client = state.client.lock().await;
 
-    match client.connect_slave(&device.name, transport_config).await {
+        match client.connect_slave(&device.name, transport_config, None).await {
         Ok(slave_id) => {
             // Copy pre-parsed memory segments to XcpSlave (no re-parsing)
             if !device.a2l_path.is_empty() {

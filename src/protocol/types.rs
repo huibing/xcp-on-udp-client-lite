@@ -116,6 +116,61 @@ pub enum CommandCode {
     DaqMultiple = 0xC4,
 }
 
+impl CommandCode {
+    /// Reverse lookup from byte value to enum variant.
+    pub fn from_repr(value: u8) -> Option<Self> {
+        match value {
+            0xFF => Some(Self::Connect),
+            0xFE => Some(Self::Disconnect),
+            0xFD => Some(Self::GetStatus),
+            0xFC => Some(Self::Synch),
+            0xFB => Some(Self::GetCommModeInfo),
+            0xFA => Some(Self::GetId),
+            0xF9 => Some(Self::SetRequest),
+            0xF8 => Some(Self::GetSeed),
+            0xF7 => Some(Self::Unlock),
+            0xF6 => Some(Self::SetMta),
+            0xF5 => Some(Self::Upload),
+            0xF4 => Some(Self::ShortUpload),
+            0xF3 => Some(Self::BuildChecksum),
+            0xF2 => Some(Self::TransportLayerCmd),
+            0xF1 => Some(Self::UserCmd),
+            0xF0 => Some(Self::Download),
+            0xEF => Some(Self::DownloadNext),
+            0xEE => Some(Self::DownloadMax),
+            0xED => Some(Self::ShortDownload),
+            0xEC => Some(Self::ModifyBits),
+            0xEB => Some(Self::SetCalPage),
+            0xEA => Some(Self::GetCalPage),
+            0xE4 => Some(Self::CopyCalPage),
+            0xD6 => Some(Self::FreeDaq),
+            0xD5 => Some(Self::AllocDaq),
+            0xD4 => Some(Self::AllocOdt),
+            0xD3 => Some(Self::AllocOdtEntry),
+            0xE2 => Some(Self::SetDaqPtr),
+            0xE1 => Some(Self::WriteDaq),
+            0xE0 => Some(Self::SetDaqListMode),
+            0xDF => Some(Self::GetDaqListMode),
+            0xDE => Some(Self::StartStopDaqList),
+            0xDD => Some(Self::StartStopSynch),
+            0xDC => Some(Self::GetDaqClock),
+            0xDB => Some(Self::ReadDaq),
+            0xDA => Some(Self::GetDaqProcessorInfo),
+            0xD9 => Some(Self::GetDaqResolutionInfo),
+            0xD8 => Some(Self::GetDaqListInfo),
+            0xD7 => Some(Self::GetDaqEventInfo),
+            0xD2 => Some(Self::ProgramStart),
+            0xD1 => Some(Self::ProgramClear),
+            0xD0 => Some(Self::Program),
+            0xCF => Some(Self::ProgramReset),
+            0xCE => Some(Self::GetPgmProcessorInfo),
+            0xC6 => Some(Self::TimeCorrelationProperties),
+            0xC4 => Some(Self::DaqMultiple),
+            _ => None,
+        }
+    }
+}
+
 /// XCP Error Codes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[repr(u8)]

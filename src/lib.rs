@@ -14,6 +14,7 @@ pub mod hex;
 pub mod slave;
 pub mod variable;
 pub mod web;
+pub mod xcp_packet_log;
 
 pub use calibration::{
     a2l_characteristic_to_param, a2l_type_to_calibration, matrix_to_flat, CalibrationManager,

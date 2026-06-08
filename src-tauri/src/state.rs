@@ -16,6 +16,7 @@ use xcp_client::hex::HexImage;
 use xcp_client::slave::{PageMode, SlaveId};
 use xcp_client::transport::TransportType;
 use xcp_client::web::compare::CompareSession;
+use xcp_client::xcp_packet_log::XcpPacketLog;
 use xcp_client::XcpClient;
 
 // ─── Device configuration (from config.toml, same as web/state.rs) ────────────
@@ -168,6 +169,7 @@ pub struct TauriAppState {
     pub current_device_id: Option<String>,
     pub compare_sessions: Vec<CompareSession>,
     pub experiment_active: bool,
+    pub packet_log: Arc<XcpPacketLog>,
 }
 
 impl TauriAppState {
@@ -205,6 +207,7 @@ impl TauriAppState {
             current_device_id: None,
             compare_sessions: Vec::new(),
             experiment_active: false,
+            packet_log: Arc::new(XcpPacketLog::new()),
         }
     }
 

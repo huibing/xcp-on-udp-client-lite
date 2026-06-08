@@ -508,6 +508,12 @@ pub struct DaqManager {
     recording_start_instant: Arc<RwLock<Option<std::time::Instant>>>,
     /// Measurement info for MDF4 channel setup (name, unit)
     recording_measurement_info: Arc<RwLock<Vec<(String, Option<String>)>>>,
+
+    /// Optional shared packet log for the in-app packet browser
+    pub packet_log: Option<Arc<crate::xcp_packet_log::XcpPacketLog>>,
+
+    /// Slave display name for labeling DAQ entries
+    pub slave_name: String,
 }
 
 impl DaqManager {
@@ -554,6 +560,8 @@ impl DaqManager {
             recording_ts_tracker: Arc::new(RwLock::new(None)),
             recording_start_instant: Arc::new(RwLock::new(None)),
             recording_measurement_info: Arc::new(RwLock::new(Vec::new())),
+            packet_log: None,
+            slave_name: String::new(),
         }
     }
 
@@ -608,6 +616,8 @@ impl DaqManager {
             recording_ts_tracker: Arc::new(RwLock::new(None)),
             recording_start_instant: Arc::new(RwLock::new(None)),
             recording_measurement_info: Arc::new(RwLock::new(Vec::new())),
+            packet_log: None,
+            slave_name: String::new(),
         })
     }
 
@@ -982,6 +992,16 @@ impl DaqManager {
     /// Set slave address for DAQ
     pub fn set_slave_addr(&mut self, addr: String) {
         self.slave_addr = addr;
+    }
+
+    /// Set packet log for DAQ packet capture
+    pub fn set_packet_log(&mut self, log: Arc<crate::xcp_packet_log::XcpPacketLog>) {
+        self.packet_log = Some(log);
+    }
+
+    /// Set slave display name
+    pub fn set_slave_name(&mut self, name: String) {
+        self.slave_name = name;
     }
 
     /// Clear the latest DAQ sample
@@ -1406,6 +1426,9 @@ impl DaqManager {
         #[cfg(feature = "mf4-rs-backend")]
         let recording_meas_info = self.recording_measurement_info.clone();
 
+        let packet_log = self.packet_log.clone();
+        let slave_name = self.slave_name.clone();
+
         // Build TimestampTracker for live display using local clock
         let display_start = std::time::Instant::now();
 
@@ -1459,6 +1482,31 @@ impl DaqManager {
                                     extract_odt0_timestamp(&data.data, timestamp_size);
                                 data.timestamp = ts;
                                 data.data = remaining;
+                            }
+
+                            // Log DAQ packet to packet browser (if enabled)
+                            if let Some(log) = &packet_log {
+                                if log.is_enabled() {
+                                    let hex = crate::protocol::packet_display::format_hex_truncated(
+                                        &msg.payload,
+                                        crate::xcp_packet_log::DAQ_HEX_MAX_BYTES,
+                                    );
+                                    let entry = crate::xcp_packet_log::XcpPacketEntry {
+                                        id: log.next_id(),
+                                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                        source: format!("{} DAQ {}/{}", slave_name, resolved_daq_list, resolved_odt),
+                                        direction: crate::xcp_packet_log::PacketDirection::Incoming,
+                                        hex,
+                                        description: "DAQ".to_string(),
+                                        packet_class: crate::xcp_packet_log::PacketClass::Daq,
+                                        daq_timestamp: if resolved_odt == 0 {
+                                            data.timestamp.map(|t| t as u64)
+                                        } else {
+                                            None
+                                        },
+                                    };
+                                    log.push(entry);
+                                }
                             }
 
                             // Find entries for this ODT

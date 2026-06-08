@@ -270,10 +270,15 @@ pub async fn connect_device(
         }));
     }
 
+    let packet_log = {
+        let app = state.read().await;
+        app.packet_log.clone()
+    };
+
     let slave_id = {
         let mut app = state.write().await;
         app.client
-            .connect_slave(&dev_name, transport_config.clone().to_transport_config())
+            .connect_slave(&dev_name, transport_config.clone().to_transport_config(), Some(packet_log.clone()))
             .await
             .map_err(|e| format!("Failed to connect: {}", e))?
     };
@@ -310,6 +315,13 @@ pub async fn connect_device(
                 }
             }
         }
+        let display_name = slave_guard.info.name.clone();
+        drop(slave_guard);
+
+        // Wire packet log into DaqManager
+        let mut dm = daq_manager_arc.write().await;
+        dm.set_packet_log(packet_log.clone());
+        dm.set_slave_name(display_name);
     }
 
     {
@@ -377,6 +389,20 @@ pub async fn disconnect_device(
             .disconnect_slave(slave_id)
             .await
             .map_err(|e| format!("Failed to disconnect: {}", e))?;
+        // Push a disconnect marker entry to the packet log
+        let packet_log = app.packet_log.clone();
+        if packet_log.is_enabled() {
+            packet_log.push(xcp_client::xcp_packet_log::XcpPacketEntry {
+                id: packet_log.next_id(),
+                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                source: dev_name.clone(),
+                direction: xcp_client::xcp_packet_log::PacketDirection::Incoming,
+                hex: String::new(),
+                description: "<disconnected>".to_string(),
+                packet_class: xcp_client::xcp_packet_log::PacketClass::Cto,
+                daq_timestamp: None,
+            });
+        }
         if let Some(dev) = app.get_device_mut(&device_id) {
             dev.connected = false;
             dev.slave_id = None;
