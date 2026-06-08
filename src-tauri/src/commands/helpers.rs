@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 use xcp_client::a2l::{A2lCharacteristic, A2lDataType, A2lMeasurement, A2lReader, AxisPointSource};
-use xcp_client::calibration::{CalibrationParam, CalibrationType, CalibrationValue, StorageOrder,
+use xcp_client::calibration::{CalibrationParam, CalibrationType, CalibrationValue,
     matrix_to_flat};
 use xcp_client::daq::Measurement;
 use xcp_client::protocol::Mta;
@@ -433,7 +433,7 @@ pub fn calibration_value_to_bytes(
         }
         (CalibrationValue::I8Matrix(mat), CalibrationType::I8Matrix(rows, cols)) => {
             let flat: Vec<i8> = matrix_to_flat(mat, *rows, *cols, param.storage_order);
-            flat.iter().map(|v| v as u8).collect()
+            flat.iter().map(|v| *v as u8).collect()
         }
         (CalibrationValue::I16Matrix(mat), CalibrationType::I16Matrix(rows, cols)) => {
             let flat: Vec<i16> = matrix_to_flat(mat, *rows, *cols, param.storage_order);

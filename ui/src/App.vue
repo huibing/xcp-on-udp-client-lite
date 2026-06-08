@@ -24,28 +24,50 @@
       <router-link to="/settings" class="settings-link" :title="sidebarCollapsed ? 'Settings' : ''">
         <span class="nav-icon">⚙</span><span class="nav-label">Settings</span>
       </router-link>
+      <button class="sidebar-console-btn" @click="toggleConsole" :title="sidebarCollapsed ? 'Console' : ''">
+        <span class="nav-icon">⎚</span><span class="nav-label">Console</span>
+      </button>
     </nav>
-    <main class="content" :class="{ 'content-flush': $route.path === '/experiment' }">
-      <router-view />
-    </main>
+    <div class="content-wrapper" :class="{ 'content-wrapper-flush': $route.path === '/experiment' }">
+      <main class="content" :class="{ 'content-flush': $route.path === '/experiment' }">
+        <router-view />
+      </main>
+      <LogConsole v-if="consoleVisible" @close="consoleVisible = false" />
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useTheme } from './composables/useTheme.js'
 import { useFont } from './composables/useFont.js'
+import LogConsole from './components/LogConsole.vue'
 
 const { theme, customThemeStyle } = useTheme()
 useFont() // initializes watchEffect that sets --exp-font / --exp-font-size on :root
 
 const STORAGE_KEY = 'xcp-sidebar-collapsed'
 const sidebarCollapsed = ref(localStorage.getItem(STORAGE_KEY) === 'true')
+const consoleVisible = ref(false)
 
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
   localStorage.setItem(STORAGE_KEY, sidebarCollapsed.value)
 }
+
+function toggleConsole() {
+  consoleVisible.value = !consoleVisible.value
+}
+
+function onKeyDown(e) {
+  if (e.ctrlKey && e.key === '`') {
+    e.preventDefault()
+    toggleConsole()
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeyDown))
+onUnmounted(() => window.removeEventListener('keydown', onKeyDown))
 </script>
 
 <style>
@@ -157,6 +179,38 @@ body { font-family: var(--exp-font, 'Consolas', 'Courier New', monospace); font-
   margin-top: auto;
   border-top: 1px solid var(--exp-border, #003311);
   padding-top: 8px !important;
+}
+
+/* ── Console sidebar button ──────────────────────────────────────────────── */
+.sidebar-console-btn {
+  background: none;
+  border: none;
+  border-top: 1px solid var(--exp-border, #003311);
+  color: var(--exp-fg-mid, #00aa33);
+  cursor: pointer;
+  padding: 8px 0 8px 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-family: inherit;
+  font-size: inherit;
+  flex-shrink: 0;
+}
+.sidebar-console-btn:hover {
+  background: var(--exp-border3, #001a09);
+  color: var(--exp-fg-bright, #00ff66);
+}
+
+/* ── Content wrapper (supports bottom console panel) ─────────────────────── */
+.content-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.content-wrapper.content-wrapper-flush {
+  overflow: hidden;
 }
 
 /* ── Content area ────────────────────────────────────────────────────────── */

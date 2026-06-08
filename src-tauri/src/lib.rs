@@ -3,16 +3,28 @@
 mod commands;
 mod state;
 
-use state::TauriAppState;
 use std::sync::Arc;
+use state::TauriAppState;
 use tokio::sync::RwLock;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+use commands::log_console::{ConsoleLogLayer, ConsoleLogState};
 
 /// Initialise file-based tracing for the desktop app.
 /// Logs go to `logs/` (relative to the working directory) as `xcp_desktop_<timestamp>.log`,
-/// consistent with the CLI binary.
-fn init_logging() {
+/// consistent with the CLI binary.  Also captures logs to an in-memory buffer for the
+/// in-app console viewer.
+fn init_logging() -> Arc<ConsoleLogState> {
     use std::fs::OpenOptions;
     use std::path::Path;
+
+    let console_state = Arc::new(ConsoleLogState::new());
+    let console_layer = ConsoleLogLayer::new(console_state.clone());
+
+    let filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("debug".parse().unwrap())
+        .add_directive("a2lfile=error".parse().unwrap());
 
     let logs_dir = Path::new("logs");
     let _ = std::fs::create_dir_all(logs_dir);
@@ -21,28 +33,48 @@ fn init_logging() {
     let filename = format!("xcp_desktop_{}.log", now.format("%Y%m%d_%H%M%S"));
     let log_path = logs_dir.join(filename);
 
-    if let Ok(log_file) = OpenOptions::new().create(true).truncate(true).write(true).open(&log_path) {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive("debug".parse().unwrap())
-                    .add_directive("a2lfile=error".parse().unwrap()),
-            )
-            .with_ansi(false)
-            .with_writer(move || log_file.try_clone().expect("clone log fd"))
-            .try_init();
-        tracing::info!("Tauri desktop logging started → {}", log_path.display());
+    match OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&log_path)
+    {
+        Ok(log_file) => {
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(move || log_file.try_clone().expect("clone log fd"));
+
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(file_layer)
+                .with(console_layer)
+                .try_init();
+            tracing::info!("Tauri desktop logging started → {}", log_path.display());
+        }
+        Err(e) => {
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(console_layer)
+                .try_init();
+            tracing::warn!("Failed to create log file: {}", e);
+        }
     }
+
+    console_state
 }
 
 pub fn run() {
-    init_logging();
+    let console_state = init_logging();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .manage(console_state)
         .manage(Arc::new(RwLock::new(TauriAppState::new())))
         .manage(commands::mf4_viewer::Mf4FileCache::new())
         .invoke_handler(tauri::generate_handler![
+            // Console log viewer
+            commands::log_console::console_logs_get,
+            commands::log_console::console_logs_clear,
             // Device management
             commands::device::list_devices,
             commands::device::add_device,
