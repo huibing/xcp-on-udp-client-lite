@@ -5,6 +5,7 @@
 use serde_json::{json, Value};
 use tauri::State;
 use xcp_client::calibration::CalibrationValue;
+use xcp_client::protocol::Mta;
 use xcp_client::slave::PageMode;
 use xcp_client::CharacteristicType;
 
@@ -39,7 +40,10 @@ pub async fn cal_available(state: State<'_, SharedState>) -> Result<Value, Strin
     Ok(json!({ "params": params }))
 }
 
-/// Read a calibration parameter from the XCP slave.
+/// Read a calibration parameter value.
+///
+/// Priority: if a HEX file is associated, read from the HEX image.
+/// Otherwise, if the device is connected, read directly from the ECU via UPLOAD.
 #[tauri::command]
 pub async fn cal_read(
     state: State<'_, SharedState>,
@@ -48,7 +52,7 @@ pub async fn cal_read(
 ) -> Result<Value, String> {
     // Extract handles from state without cloning heavy data.
     // Arc clones are just refcount bumps; HexImage is NOT cloned here.
-    let (param, hex_image_arc, cal_values_arc, _dev_id, source) = {
+    let (param, hex_image_arc, cal_values_arc, slave_arc_opt, source) = {
         let app = state.read().await;
         let dev = app
             .get_device(&device_id)
@@ -69,10 +73,15 @@ pub async fn cal_read(
             (dev.hex_image.clone(), "hex_reference")
         };
 
-        (param, hex_image_arc, cal_values_arc, dev.id.clone(), source)
+        // Also grab slave handle for ECU fallback
+        let slave_arc_opt = dev
+            .slave_id
+            .and_then(|sid| app.client.get_slave(sid));
+
+        (param, hex_image_arc, cal_values_arc, slave_arc_opt, source)
     };
 
-    // Read from the appropriate HEX image (no state lock held)
+    // Priority 1: Read from the appropriate HEX image (no state lock held)
     {
         let hex_guard = hex_image_arc.read().await;
         if let Some(hex_image) = hex_guard.as_ref() {
@@ -126,7 +135,55 @@ pub async fn cal_read(
         }
     }
 
-    Ok(json!({ "success": false, "error": "Device not connected and no HEX file loaded" }))
+    // Priority 2: Read directly from ECU via UPLOAD command
+    if let Some(slave_arc) = slave_arc_opt {
+        let size = param.data_type.size();
+        if size == 0 {
+            return Ok(json!({ "success": false, "error": "Unknown parameter size" }));
+        }
+        let mta = Mta::new(param.address, param.address_ext);
+        let bytes = {
+            let guard = slave_arc.lock().await;
+            guard
+                .read_large_data(mta, size, None)
+                .await
+                .map_err(|e| format!("ECU read error: {}", e))?
+        };
+        let value = bytes_to_calibration_value(&bytes, &param.data_type)
+            .map_err(|e| format!("Decode error: {}", e))?;
+
+        cal_values_arc.write().await.insert(param.name.clone(), value.clone());
+
+        let is_enum = param.is_enum();
+        let raw_i64 = cal_value_to_raw_i64(&value);
+        let display_value: Option<String> = raw_i64.map(|raw| param.format_value(raw));
+        tracing::debug!(
+            "cal_read [ecu] '{}': data_type={:?} is_enum={} raw_i64={:?} value_format={:?} display_value={:?}",
+            param.name,
+            param.data_type,
+            is_enum,
+            raw_i64,
+            value.format(),
+            display_value,
+        );
+        let is_1d = param.characteristic_type == CharacteristicType::Curve;
+        let display_value_arr = cal_value_display_string(&value, &param);
+        let display_value_data = calibration_value_to_display_json(&value, is_1d, &param);
+        let effective_display = display_value.or(display_value_arr);
+
+        return Ok(json!({
+            "success": true,
+            "name": param.name,
+            "value": value.format(),
+            "value_data": calibration_value_to_json(&value, is_1d),
+            "is_enum": is_enum,
+            "display_value": effective_display,
+            "display_value_data": display_value_data,
+            "source": "ecu",
+        }));
+    }
+
+    Ok(json!({ "success": false, "error": "No HEX file loaded and device not connected" }))
 }
 
 /// Batch-read all requested calibration parameters in a single IPC call.
@@ -134,6 +191,9 @@ pub async fn cal_read(
 /// Groups items by device so each slave mutex is acquired only once, then reads
 /// all parameters for that device sequentially (XCP is request-response, so
 /// pipelining is not possible). Returns one result entry per input item.
+///
+/// Priority per device: if a HEX file is associated, read from HEX image.
+/// Otherwise, if connected, read directly from ECU via UPLOAD.
 #[tauri::command]
 pub async fn cal_read_all(
     state: State<'_, SharedState>,
@@ -161,7 +221,7 @@ pub async fn cal_read_all(
 
     for (device_id, positions) in &by_device {
         // Snapshot params and Arc handles. No HexImage data is cloned.
-        let (params, hex_image_arc, cache_arc) = {
+        let (params, hex_image_arc, cache_arc, slave_arc_opt) = {
             let app = state.read().await;
             let dev = match app.get_device(device_id) {
                 Some(d) => d,
@@ -182,10 +242,14 @@ pub async fn cal_read_all(
                 dev.hex_image.clone()
             };
 
-            (params, hex_image_arc, cache_arc)
+            let slave_arc_opt = dev
+                .slave_id
+                .and_then(|sid| app.client.get_slave(sid));
+
+            (params, hex_image_arc, cache_arc, slave_arc_opt)
         }; // state read lock released here
 
-        // Acquire a single read lock on the HexImage for all reads — no clone of the map data
+        // Priority 1: Acquire a single read lock on the HexImage for all reads
         let hex_guard = hex_image_arc.read().await;
         if let Some(hex_image) = hex_guard.as_ref() {
             for ((pos, _), param_opt) in positions.iter().zip(params.iter()) {
@@ -213,6 +277,7 @@ pub async fn cal_read_all(
                             "success": true,
                             "name": param.name,
                             "value": value.format(),
+                            "source": "hex",
                         });
                     }
                     Err(e) => {
@@ -220,6 +285,60 @@ pub async fn cal_read_all(
                     }
                 }
             }
+            continue; // HEX path done for this device
+        }
+        drop(hex_guard);
+
+        // Priority 2: Read from ECU via UPLOAD command
+        if let Some(slave_arc) = slave_arc_opt {
+            let guard = slave_arc.lock().await;
+            for ((pos, _), param_opt) in positions.iter().zip(params.iter()) {
+                let param = match param_opt {
+                    Some(p) => p,
+                    None => {
+                        results[*pos] = json!({ "success": false, "error": "Parameter index out of range" });
+                        continue;
+                    }
+                };
+                let size = param.data_type.size();
+                if size == 0 {
+                    results[*pos] = json!({ "success": false, "name": param.name, "error": "Unknown parameter size" });
+                    continue;
+                }
+                let mta = Mta::new(param.address, param.address_ext);
+                match guard.read_large_data(mta, size, None).await {
+                    Ok(bytes) => match bytes_to_calibration_value(&bytes, &param.data_type) {
+                        Ok(value) => {
+                            cache_arc.write().await.insert(param.name.clone(), value.clone());
+                            results[*pos] = json!({
+                                "success": true,
+                                "name": param.name,
+                                "value": value.format(),
+                                "source": "ecu",
+                            });
+                        }
+                        Err(e) => {
+                            results[*pos] = json!({ "success": false, "name": param.name, "error": e });
+                        }
+                    },
+                    Err(e) => {
+                        results[*pos] = json!({
+                            "success": false,
+                            "name": param.name,
+                            "error": format!("ECU read error: {}", e),
+                        });
+                    }
+                }
+            }
+            continue; // ECU path done for this device
+        }
+
+        // No HEX and no ECU connection — mark remaining items as failed
+        for (pos, _) in positions {
+            results[*pos] = json!({
+                "success": false,
+                "error": "No HEX file loaded and device not connected",
+            });
         }
     }
 
