@@ -394,7 +394,11 @@ pub async fn cal_write(
             Err(_) => parse_json_value_to_cal(&param.data_type, &value)?,
         }
     } else {
-        parse_json_value_to_cal(&param.data_type, &value)?
+        // For non-enum, non-Identical compute methods (e.g. LINEAR), invert
+        // the physical value entered by the user into the raw value that the
+        // ECU expects. Float storage types skip COMPU_METHOD entirely (per
+        // A2L convention) and are parsed directly.
+        parse_value_with_compu_method(&param, &value)?
     };
 
     // Convert value to bytes once (used for both XCP write and working-hex patch)
@@ -747,6 +751,115 @@ pub async fn switch_page_mode(
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
+
+/// Parse a user-entered physical value into a raw CalibrationValue, applying
+/// the inverse of the parameter's COMPU_METHOD where appropriate.
+///
+/// Rules:
+/// - Float storage types (F32/F64, and their arrays/matrices) skip COMPU_METHOD
+///   and are parsed directly as IEEE 754 values.
+/// - Identical compute method: parse the value directly into the integer type.
+/// - Linear / other reversible compute method on integer storage: parse as f64,
+///   then invert via `compu_method.to_raw()` to get the raw integer.
+/// - For arrays/matrices, the conversion is applied element-wise.
+fn parse_value_with_compu_method(
+    param: &xcp_client::calibration::CalibrationParam,
+    json_val: &Value,
+) -> Result<CalibrationValue, String> {
+    use xcp_client::calibration::CalibrationType;
+
+    // Floats: parse directly, no compu_method inversion
+    if is_float_storage(&param.data_type) {
+        return parse_json_value_to_cal(&param.data_type, json_val);
+    }
+
+    // Identical compute method: parse directly as integer
+    if matches!(
+        param.compu_method,
+        xcp_client::a2l::CompuMethod::Identical
+    ) {
+        return parse_json_value_to_cal(&param.data_type, json_val);
+    }
+
+    // Flatten input into a list of display strings (one per scalar element)
+    let flat: Vec<String> = flatten_value_to_strings(json_val);
+
+    // Convert each display string → raw i64 via inverse compu_method
+    let convert = |s: &str| -> Result<i64, String> {
+        param.compu_method.to_raw(s.trim_matches('"'))
+    };
+
+    Ok(match &param.data_type {
+        CalibrationType::U8 => CalibrationValue::U8(convert(first_or_zero(&flat))? as u8),
+        CalibrationType::U16 => CalibrationValue::U16(convert(first_or_zero(&flat))? as u16),
+        CalibrationType::U32 => CalibrationValue::U32(convert(first_or_zero(&flat))? as u32),
+        CalibrationType::U64 => CalibrationValue::U64(convert(first_or_zero(&flat))? as u64),
+        CalibrationType::I8 => CalibrationValue::I8(convert(first_or_zero(&flat))? as i8),
+        CalibrationType::I16 => CalibrationValue::I16(convert(first_or_zero(&flat))? as i16),
+        CalibrationType::I32 => CalibrationValue::I32(convert(first_or_zero(&flat))? as i32),
+        CalibrationType::I64 => CalibrationValue::I64(convert(first_or_zero(&flat))?),
+        CalibrationType::Bool => {
+            // Bool: accept "true"/"false"/"1"/"0" directly, no compu_method inversion
+            return parse_json_value_to_cal(&param.data_type, json_val);
+        }
+        CalibrationType::U8Array(n) => CalibrationValue::U8Array(
+            flat.iter().take(*n).map(|s| convert(s).map(|v| v as u8))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        CalibrationType::U16Array(n) => CalibrationValue::U16Array(
+            flat.iter().take(*n).map(|s| convert(s).map(|v| v as u16))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        CalibrationType::U32Array(n) => CalibrationValue::U32Array(
+            flat.iter().take(*n).map(|s| convert(s).map(|v| v as u32))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        CalibrationType::I8Array(n) => CalibrationValue::I8Array(
+            flat.iter().take(*n).map(|s| convert(s).map(|v| v as i8))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        CalibrationType::I16Array(n) => CalibrationValue::I16Array(
+            flat.iter().take(*n).map(|s| convert(s).map(|v| v as i16))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        CalibrationType::I32Array(n) => CalibrationValue::I32Array(
+            flat.iter().take(*n).map(|s| convert(s).map(|v| v as i32))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        // For unsupported integer-array/matrix types, fall back to direct parse
+        _ => return parse_json_value_to_cal(&param.data_type, json_val),
+    })
+}
+
+fn is_float_storage(data_type: &xcp_client::calibration::CalibrationType) -> bool {
+    use xcp_client::calibration::CalibrationType;
+    matches!(
+        data_type,
+        CalibrationType::F32
+            | CalibrationType::F64
+            | CalibrationType::F32Array(_)
+            | CalibrationType::F64Array(_)
+            | CalibrationType::F32Matrix(_, _)
+            | CalibrationType::F64Matrix(_, _)
+    )
+}
+
+fn flatten_value_to_strings(json_val: &Value) -> Vec<String> {
+    match json_val {
+        Value::Array(arr) => arr
+            .iter()
+            .flat_map(|v| match v {
+                Value::Array(inner) => inner.iter().map(|x| x.to_string()).collect::<Vec<_>>(),
+                other => vec![other.to_string().trim_matches('"').to_string()],
+            })
+            .collect(),
+        other => vec![other.to_string().trim_matches('"').to_string()],
+    }
+}
+
+fn first_or_zero(flat: &[String]) -> &str {
+    flat.get(0).map(|s| s.as_str()).unwrap_or("0")
+}
 
 /// Parse a JSON value array into a CalibrationValue matching the given CalibrationType.
 fn parse_json_value_to_cal(
