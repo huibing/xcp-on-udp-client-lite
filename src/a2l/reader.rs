@@ -4,7 +4,7 @@
 //! characteristic information for XCP calibration and DAQ.
 
 use a2lfile::A2lObjectName;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 // Import types from types module
@@ -450,8 +450,7 @@ impl A2lReader {
                 m.unit = self.get_unit_for_conversion(&m.conversion_name);
             }
             // Drop any synthetic name that collides with a flat name; warn.
-            let flat_names: std::collections::HashSet<&str> =
-                measurements.iter().map(|m| m.name.as_str()).collect();
+            let flat_names: HashSet<&str> = measurements.iter().map(|m| m.name.as_str()).collect();
             flattened.retain(|m| {
                 if flat_names.contains(m.name.as_str()) {
                     tracing::warn!(name = %m.name, "structural measurement collides with flat MEASUREMENT, dropped");
@@ -2781,12 +2780,18 @@ ASAP2_VERSION 1 71
   /begin INSTANCE lookup "" Lookup 0xFFF4 ECU_ADDRESS_EXTENSION 2 /end INSTANCE
 /end MODULE /end PROJECT
 "#;
-        let tmp = std::env::temp_dir().join("xcp_struct_meas_test.a2l");
+        let tmp = std::env::temp_dir().join(format!(
+            "xcp_struct_meas_test_{}_{}.a2l",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::write(&tmp, src).unwrap();
         let reader = super::A2lReader::load(&tmp).unwrap();
         let measurements = reader.get_measurements();
-        let names: std::collections::HashSet<_> =
-            measurements.iter().map(|m| m.name.as_str()).collect();
+        let names: HashSet<_> = measurements.iter().map(|m| m.name.as_str()).collect();
         assert!(names.contains("counter"), "flat measurement preserved");
         assert!(names.contains("lookup.input"));
         assert!(names.contains("lookup.output_linear"));
