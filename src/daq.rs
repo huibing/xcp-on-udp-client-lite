@@ -1452,9 +1452,7 @@ impl DaqManager {
                 match msg {
                     Ok(Some(msg)) => {
                         // Parse single DTO packet (PID + raw data, no timestamp parsed yet)
-                        if let Some(mut data) =
-                            parse_dto_packet(&msg.payload, &iden_field_type)
-                        {
+                        if let Some(mut data) = parse_dto_packet(&msg.payload, &iden_field_type) {
                             // Get configuration for this DAQ list and ODT
                             let config = daq_config.read().await;
 
@@ -1493,8 +1491,13 @@ impl DaqManager {
                                     );
                                     let entry = crate::xcp_packet_log::XcpPacketEntry {
                                         id: log.next_id(),
-                                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                        source: format!("{} DAQ {}/{}", slave_name, resolved_daq_list, resolved_odt),
+                                        timestamp: chrono::Local::now()
+                                            .format("%H:%M:%S%.3f")
+                                            .to_string(),
+                                        source: format!(
+                                            "{} DAQ {}/{}",
+                                            slave_name, resolved_daq_list, resolved_odt
+                                        ),
                                         direction: crate::xcp_packet_log::PacketDirection::Incoming,
                                         hex,
                                         description: "DAQ".to_string(),
@@ -1541,9 +1544,9 @@ impl DaqManager {
                                     let raw_bytes = &data.data[offset..offset + entry.size];
                                     let is_float = entry.data_type.is_float();
                                     let is_signed = entry.data_type.is_signed_integer();
-                                    let physical_value = entry.compu_method.bytes_to_display(
-                                        raw_bytes, is_float, is_signed,
-                                    );
+                                    let physical_value = entry
+                                        .compu_method
+                                        .bytes_to_display(raw_bytes, is_float, is_signed);
                                     record.add_value(&entry.name, physical_value);
                                     record.add_raw_value(&entry.name, raw_bytes.to_vec());
                                 } else {
@@ -1929,8 +1932,10 @@ impl DaqManager {
                         for entry in entries {
                             if seen.insert(&entry.name) {
                                 let unit = entry.unit.as_deref().unwrap_or("");
-                                if let CompuMethod::CompuVtab { entries: vtab_entries, .. } =
-                                    &entry.compu_method
+                                if let CompuMethod::CompuVtab {
+                                    entries: vtab_entries,
+                                    ..
+                                } = &entry.compu_method
                                 {
                                     // Enum channel: FLOAT64 raw data + Value2Text CC block
                                     let (keys, texts): (Vec<f64>, Vec<String>) = vtab_entries
@@ -2263,10 +2268,7 @@ impl Default for DaqManager {
 /// DTO packet payload format:
 /// - 1 byte: PID / identification start
 /// - N bytes: ODT data (including identification field and timestamp)
-fn parse_dto_packet(
-    packet: &[u8],
-    ind_field_type: &IdentificationFieldType,
-) -> Option<DtoData> {
+fn parse_dto_packet(packet: &[u8], ind_field_type: &IdentificationFieldType) -> Option<DtoData> {
     if packet.is_empty() {
         tracing::error!("DTO packet too short: {} bytes", packet.len());
         return None;
@@ -2951,14 +2953,11 @@ mod tests {
     #[test]
     fn test_mf4_enum_channel_has_value2text_cc() {
         use crate::CompuVtabEntry;
-        use mf4_parse::{
-            Mf4Wrapper,
-            components::cc::conversion::CcType,
-        };
         use mf4_parse::writer::builder::Mf4Metadata;
         use mf4_parse::writer::stream_writer::{
             ChannelDef, ChannelGroupDefBuilder, Mf4StreamWriter, StreamingDataGroup,
         };
+        use mf4_parse::{components::cc::conversion::CcType, Mf4Wrapper};
         use std::path::PathBuf;
 
         let path = PathBuf::from("test_enum_channel_mf4.mf4");
@@ -2968,9 +2967,18 @@ mod tests {
         // - "speed"  : numeric (Identical), stored as f64
         // - "status" : enum (CompuVtab), stored as f64 + Value2Text CC block
         let vtab_entries = vec![
-            CompuVtabEntry { raw_value: 0, text_value: "OFF".to_string() },
-            CompuVtabEntry { raw_value: 1, text_value: "ACTIVE".to_string() },
-            CompuVtabEntry { raw_value: 2, text_value: "ERROR".to_string() },
+            CompuVtabEntry {
+                raw_value: 0,
+                text_value: "OFF".to_string(),
+            },
+            CompuVtabEntry {
+                raw_value: 1,
+                text_value: "ACTIVE".to_string(),
+            },
+            CompuVtabEntry {
+                raw_value: 2,
+                text_value: "ERROR".to_string(),
+            },
         ];
         let (keys, texts): (Vec<f64>, Vec<String>) = vtab_entries
             .iter()
@@ -2981,18 +2989,18 @@ mod tests {
             .name("test_group")
             .with_time_channel("time_s")
             .add_f64_channel("speed", "km/h")
-            .channel(
-                ChannelDef::new("status")
-                    .data_type(4)
-                    .bit_count(64)
-                    .vtab(keys, texts, String::new()),
-            )
+            .channel(ChannelDef::new("status").data_type(4).bit_count(64).vtab(
+                keys,
+                texts,
+                String::new(),
+            ))
             .build()
             .unwrap();
 
-        let mut writer =
-            Mf4StreamWriter::new(path.clone(), Mf4Metadata::default()).unwrap();
-        writer.add_data_group(StreamingDataGroup::new(cg).unwrap()).unwrap();
+        let mut writer = Mf4StreamWriter::new(path.clone(), Mf4Metadata::default()).unwrap();
+        writer
+            .add_data_group(StreamingDataGroup::new(cg).unwrap())
+            .unwrap();
         writer.finalize_structure().unwrap();
 
         // Write two sample records
@@ -3008,13 +3016,22 @@ mod tests {
         // Read back and verify CC types
         let mf4 = Mf4Wrapper::new::<fn(f64)>(path.clone(), None).unwrap();
         let names = mf4.get_channel_names();
-        assert!(names.contains(&"speed".to_string()), "speed channel missing");
-        assert!(names.contains(&"status".to_string()), "status channel missing");
+        assert!(
+            names.contains(&"speed".to_string()),
+            "speed channel missing"
+        );
+        assert!(
+            names.contains(&"status".to_string()),
+            "status channel missing"
+        );
 
         // "speed" must have no conversion (OneToOne)
         let speed_link = mf4.get_channel_link("speed").expect("speed link");
         assert!(
-            matches!(speed_link.0.get_conversion().get_cc_type(), CcType::OneToOne),
+            matches!(
+                speed_link.0.get_conversion().get_cc_type(),
+                CcType::OneToOne
+            ),
             "speed should have OneToOne CC, got {:?}",
             speed_link.0.get_conversion().get_cc_type()
         );

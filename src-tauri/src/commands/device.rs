@@ -2,7 +2,6 @@
 ///
 /// Mirrors the web slave management routes more closely than the initial stub:
 /// list/add/rename/remove/connect devices, plus transport selection metadata.
-
 use std::collections::HashMap;
 
 use serde_json::{json, Value};
@@ -162,10 +161,30 @@ pub async fn ensure_devices_registered(
     let mut already_existed: Vec<String> = Vec::new();
 
     for entry in &devices {
-        let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let a2l_path = entry.get("a2l_path").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let address = entry.get("address").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let id = entry
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let a2l_path = entry
+            .get("a2l_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let address = entry
+            .get("address")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
 
         if id.is_empty() && name.is_empty() {
             continue;
@@ -184,12 +203,19 @@ pub async fn ensure_devices_registered(
             continue;
         }
 
-        let device_id = if !id.is_empty() { id.clone() } else {
+        let device_id = if !id.is_empty() {
+            id.clone()
+        } else {
             format!("device_{}", uuid::Uuid::new_v4().simple())
         };
-        let device_name = if !name.is_empty() { name.clone() } else { device_id.clone() };
+        let device_name = if !name.is_empty() {
+            name.clone()
+        } else {
+            device_id.clone()
+        };
 
-        let mut device = crate::state::DeviceState::new_empty(device_id.clone(), device_name.clone());
+        let mut device =
+            crate::state::DeviceState::new_empty(device_id.clone(), device_name.clone());
 
         // Set address as initial value (may be overridden by A2L-derived address below)
         if !address.is_empty() {
@@ -199,16 +225,33 @@ pub async fn ensure_devices_registered(
         // Restore A2L if the file path is known and accessible
         if !a2l_path.is_empty() {
             if std::path::Path::new(&a2l_path).exists() {
-                if let Err(e) = crate::state::TauriAppState::restore_a2l_pub(&mut device, &a2l_path) {
-                    tracing::warn!("ensure_devices_registered: A2L restore failed for '{}': {}", device_name, e);
+                if let Err(e) = crate::state::TauriAppState::restore_a2l_pub(&mut device, &a2l_path)
+                {
+                    tracing::warn!(
+                        "ensure_devices_registered: A2L restore failed for '{}': {}",
+                        device_name,
+                        e
+                    );
                     // Still set the path so it can be retried on next connect
                     device.a2l_path = a2l_path.clone();
-                    device.original_filename = a2l_path.split(['/', '\\']).last().unwrap_or(&a2l_path).to_string();
+                    device.original_filename = a2l_path
+                        .split(['/', '\\'])
+                        .last()
+                        .unwrap_or(&a2l_path)
+                        .to_string();
                 }
             } else {
-                tracing::warn!("ensure_devices_registered: A2L file not found at '{}' for '{}'", a2l_path, device_name);
+                tracing::warn!(
+                    "ensure_devices_registered: A2L file not found at '{}' for '{}'",
+                    a2l_path,
+                    device_name
+                );
                 device.a2l_path = a2l_path.clone();
-                device.original_filename = a2l_path.split(['/', '\\']).last().unwrap_or(&a2l_path).to_string();
+                device.original_filename = a2l_path
+                    .split(['/', '\\'])
+                    .last()
+                    .unwrap_or(&a2l_path)
+                    .to_string();
             }
         }
 
@@ -278,7 +321,11 @@ pub async fn connect_device(
     let slave_id = {
         let mut app = state.write().await;
         app.client
-            .connect_slave(&dev_name, transport_config.clone().to_transport_config(), Some(packet_log.clone()))
+            .connect_slave(
+                &dev_name,
+                transport_config.clone().to_transport_config(),
+                Some(packet_log.clone()),
+            )
             .await
             .map_err(|e| format!("Failed to connect: {}", e))?
     };
@@ -308,9 +355,14 @@ pub async fn connect_device(
         let slave_guard = slave_arc.lock().await;
         if let Ok(daq_info) = slave_guard.get_daq_processor_info().await {
             if daq_info.max_event_channel > 0 {
-                if let Ok(live_events) = slave_guard.get_daq_events(daq_info.max_event_channel).await {
+                if let Ok(live_events) =
+                    slave_guard.get_daq_events(daq_info.max_event_channel).await
+                {
                     if !live_events.is_empty() {
-                        daq_manager_arc.write().await.set_available_events(live_events);
+                        daq_manager_arc
+                            .write()
+                            .await
+                            .set_available_events(live_events);
                     }
                 }
             }
@@ -408,7 +460,11 @@ pub async fn disconnect_device(
             dev.slave_id = None;
         }
         if app.current_device_id.as_deref() == Some(&device_id) {
-            let next = app.devices.iter().find(|d| d.connected).map(|d| d.id.clone());
+            let next = app
+                .devices
+                .iter()
+                .find(|d| d.connected)
+                .map(|d| d.id.clone());
             app.current_device_id = next;
         }
     }

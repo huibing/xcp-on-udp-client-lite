@@ -4,8 +4,8 @@ use xcp_client::protocol::Mta;
 
 use super::fixture::{
     MockFixture, COUNTER_ADDR, COUNTER_EXT, EPK_BASE_ADDR, MOCK_EVENT_CHANNEL, MOCK_SEGMENT_EPK,
-    MOCK_SEGMENT_PARAMS, PARAM_ARRAY_ADDR, PARAM_ARRAY_LEN, PARAM_BASE_ADDR, PARAM_COUNTER_MAX_ADDR,
-    PARAM_COUNTER_ON_ADDR, PARAM_MATRIX_ADDR, PARAM_MATRIX_LEN,
+    MOCK_SEGMENT_PARAMS, PARAM_ARRAY_ADDR, PARAM_ARRAY_LEN, PARAM_BASE_ADDR,
+    PARAM_COUNTER_MAX_ADDR, PARAM_COUNTER_ON_ADDR, PARAM_MATRIX_ADDR, PARAM_MATRIX_LEN,
 };
 
 #[derive(Debug, Clone)]
@@ -175,7 +175,10 @@ impl MockXcpState {
             return Ok(());
         }
 
-        Err(format!("unsupported write at address 0x{:08X}", mta.address))
+        Err(format!(
+            "unsupported write at address 0x{:08X}",
+            mta.address
+        ))
     }
 
     pub fn checksum(&self, mta: Mta, block_size: u32) -> Result<(u8, u32), u32> {
@@ -334,7 +337,10 @@ impl MockXcpState {
 
         for entry in &entries {
             let bytes = self
-                .read_memory(Mta::new(entry.address, entry.address_ext), entry.size as usize)
+                .read_memory(
+                    Mta::new(entry.address, entry.address_ext),
+                    entry.size as usize,
+                )
                 .ok()?;
             payload.extend_from_slice(&bytes);
         }
@@ -412,7 +418,9 @@ impl MockXcpState {
 
     fn segment_offset(&self, segment: u8, address: u32) -> Option<usize> {
         match segment {
-            MOCK_SEGMENT_EPK => address.checked_sub(EPK_BASE_ADDR).map(|offset| offset as usize),
+            MOCK_SEGMENT_EPK => address
+                .checked_sub(EPK_BASE_ADDR)
+                .map(|offset| offset as usize),
             MOCK_SEGMENT_PARAMS => address
                 .checked_sub(PARAM_BASE_ADDR)
                 .map(|offset| offset as usize),
@@ -481,11 +489,15 @@ mod tests {
             .write_memory(Mta::new(PARAM_COUNTER_ON_ADDR, 0), &[0])
             .expect("write bool");
 
-        let scalar = state.read_memory(Mta::new(PARAM_COUNTER_MAX_ADDR, 0), 4).unwrap();
+        let scalar = state
+            .read_memory(Mta::new(PARAM_COUNTER_MAX_ADDR, 0), 4)
+            .unwrap();
         let array = state
             .read_memory(Mta::new(PARAM_ARRAY_ADDR, 0), PARAM_ARRAY_LEN)
             .unwrap();
-        let flag = state.read_memory(Mta::new(PARAM_COUNTER_ON_ADDR, 0), 1).unwrap();
+        let flag = state
+            .read_memory(Mta::new(PARAM_COUNTER_ON_ADDR, 0), 1)
+            .unwrap();
         assert_eq!(u32::from_le_bytes(scalar.try_into().unwrap()), 123);
         assert_eq!(array, vec![4, 5, 6, 7]);
         assert_eq!(flag, vec![0]);

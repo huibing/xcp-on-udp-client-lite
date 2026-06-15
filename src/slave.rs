@@ -345,7 +345,8 @@ impl XcpSlave {
                             direction: crate::xcp_packet_log::PacketDirection::Incoming,
                             hex: crate::protocol::packet_display::format_hex(&msg.payload),
                             description: crate::protocol::packet_display::describe_cto_response(
-                                &msg.payload, last,
+                                &msg.payload,
+                                last,
                             ),
                             packet_class: crate::xcp_packet_log::PacketClass::Cto,
                             daq_timestamp: None,

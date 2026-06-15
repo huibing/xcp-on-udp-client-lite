@@ -1,12 +1,12 @@
 /// Shared helper functions ported from src/web/routes.rs.
 /// Used by calibration, a2l, and other command modules.
-
 use serde_json::{json, Value};
 use xcp_client::a2l::{
     A2lCharacteristic, A2lDataType, A2lMeasurement, A2lReader, AxisInfo, AxisPointSource,
 };
-use xcp_client::calibration::{CalibrationParam, CalibrationType, CalibrationValue,
-    matrix_to_flat};
+use xcp_client::calibration::{
+    matrix_to_flat, CalibrationParam, CalibrationType, CalibrationValue,
+};
 use xcp_client::daq::Measurement;
 use xcp_client::protocol::Mta;
 use xcp_client::slave::XcpSlave;
@@ -17,58 +17,126 @@ use xcp_client::slave::XcpSlave;
 /// non-Identical conversion; returns `None` for scalars, float arrays, and Identical.
 /// The returned string mirrors `CalibrationValue::format()` but with converted elements:
 ///   U32Array → "[9.800000, 17.800000, 27.000000, ...]"
-pub fn cal_value_display_string(value: &CalibrationValue, param: &CalibrationParam) -> Option<String> {
+pub fn cal_value_display_string(
+    value: &CalibrationValue,
+    param: &CalibrationParam,
+) -> Option<String> {
     if param.compu_method.variant_name() == "Identical" {
         return None;
     }
     let fmt = |raw: i64| param.format_value(raw);
     match value {
-        CalibrationValue::U8Array(arr) => {
-            Some(format!("[{}]", arr.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", ")))
-        }
-        CalibrationValue::U16Array(arr) => {
-            Some(format!("[{}]", arr.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", ")))
-        }
-        CalibrationValue::U32Array(arr) => {
-            Some(format!("[{}]", arr.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", ")))
-        }
-        CalibrationValue::U64Array(arr) => {
-            Some(format!("[{}]", arr.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", ")))
-        }
-        CalibrationValue::I8Array(arr) => {
-            Some(format!("[{}]", arr.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", ")))
-        }
-        CalibrationValue::I16Array(arr) => {
-            Some(format!("[{}]", arr.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", ")))
-        }
-        CalibrationValue::I32Array(arr) => {
-            Some(format!("[{}]", arr.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", ")))
-        }
-        CalibrationValue::I64Array(arr) => {
-            Some(format!("[{}]", arr.iter().map(|&v| fmt(v)).collect::<Vec<_>>().join(", ")))
-        }
+        CalibrationValue::U8Array(arr) => Some(format!(
+            "[{}]",
+            arr.iter()
+                .map(|&v| fmt(v as i64))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        CalibrationValue::U16Array(arr) => Some(format!(
+            "[{}]",
+            arr.iter()
+                .map(|&v| fmt(v as i64))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        CalibrationValue::U32Array(arr) => Some(format!(
+            "[{}]",
+            arr.iter()
+                .map(|&v| fmt(v as i64))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        CalibrationValue::U64Array(arr) => Some(format!(
+            "[{}]",
+            arr.iter()
+                .map(|&v| fmt(v as i64))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        CalibrationValue::I8Array(arr) => Some(format!(
+            "[{}]",
+            arr.iter()
+                .map(|&v| fmt(v as i64))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        CalibrationValue::I16Array(arr) => Some(format!(
+            "[{}]",
+            arr.iter()
+                .map(|&v| fmt(v as i64))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        CalibrationValue::I32Array(arr) => Some(format!(
+            "[{}]",
+            arr.iter()
+                .map(|&v| fmt(v as i64))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        CalibrationValue::I64Array(arr) => Some(format!(
+            "[{}]",
+            arr.iter().map(|&v| fmt(v)).collect::<Vec<_>>().join(", ")
+        )),
         CalibrationValue::U8Matrix(mat) => {
-            let rows: Vec<String> = mat.iter().map(|row| {
-                format!("[{}]", row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", "))
-            }).collect();
+            let rows: Vec<String> = mat
+                .iter()
+                .map(|row| {
+                    format!(
+                        "[{}]",
+                        row.iter()
+                            .map(|&v| fmt(v as i64))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect();
             Some(format!("[{}]", rows.join(", ")))
         }
         CalibrationValue::U16Matrix(mat) => {
-            let rows: Vec<String> = mat.iter().map(|row| {
-                format!("[{}]", row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", "))
-            }).collect();
+            let rows: Vec<String> = mat
+                .iter()
+                .map(|row| {
+                    format!(
+                        "[{}]",
+                        row.iter()
+                            .map(|&v| fmt(v as i64))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect();
             Some(format!("[{}]", rows.join(", ")))
         }
         CalibrationValue::U32Matrix(mat) => {
-            let rows: Vec<String> = mat.iter().map(|row| {
-                format!("[{}]", row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", "))
-            }).collect();
+            let rows: Vec<String> = mat
+                .iter()
+                .map(|row| {
+                    format!(
+                        "[{}]",
+                        row.iter()
+                            .map(|&v| fmt(v as i64))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect();
             Some(format!("[{}]", rows.join(", ")))
         }
         CalibrationValue::I32Matrix(mat) => {
-            let rows: Vec<String> = mat.iter().map(|row| {
-                format!("[{}]", row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>().join(", "))
-            }).collect();
+            let rows: Vec<String> = mat
+                .iter()
+                .map(|row| {
+                    format!(
+                        "[{}]",
+                        row.iter()
+                            .map(|&v| fmt(v as i64))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect();
             Some(format!("[{}]", rows.join(", ")))
         }
         _ => None, // scalar, float, bool — handled elsewhere or no conversion needed
@@ -120,30 +188,38 @@ pub fn calibration_value_to_display_json(
             let items: Vec<Value> = arr.iter().map(|&v| fmt(v)).collect();
             Some(if is_1d { json!(items) } else { json!([items]) })
         }
-        CalibrationValue::U8Matrix(mat) => Some(json!(mat.iter().map(|row| {
-            row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
-        }).collect::<Vec<_>>())),
-        CalibrationValue::U16Matrix(mat) => Some(json!(mat.iter().map(|row| {
-            row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
-        }).collect::<Vec<_>>())),
-        CalibrationValue::U32Matrix(mat) => Some(json!(mat.iter().map(|row| {
-            row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
-        }).collect::<Vec<_>>())),
-        CalibrationValue::U64Matrix(mat) => Some(json!(mat.iter().map(|row| {
-            row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
-        }).collect::<Vec<_>>())),
-        CalibrationValue::I8Matrix(mat) => Some(json!(mat.iter().map(|row| {
-            row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
-        }).collect::<Vec<_>>())),
-        CalibrationValue::I16Matrix(mat) => Some(json!(mat.iter().map(|row| {
-            row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
-        }).collect::<Vec<_>>())),
-        CalibrationValue::I32Matrix(mat) => Some(json!(mat.iter().map(|row| {
-            row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>()
-        }).collect::<Vec<_>>())),
-        CalibrationValue::I64Matrix(mat) => Some(json!(mat.iter().map(|row| {
-            row.iter().map(|&v| fmt(v)).collect::<Vec<_>>()
-        }).collect::<Vec<_>>())),
+        CalibrationValue::U8Matrix(mat) => Some(json!(mat
+            .iter()
+            .map(|row| { row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>() })
+            .collect::<Vec<_>>())),
+        CalibrationValue::U16Matrix(mat) => Some(json!(mat
+            .iter()
+            .map(|row| { row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>() })
+            .collect::<Vec<_>>())),
+        CalibrationValue::U32Matrix(mat) => Some(json!(mat
+            .iter()
+            .map(|row| { row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>() })
+            .collect::<Vec<_>>())),
+        CalibrationValue::U64Matrix(mat) => Some(json!(mat
+            .iter()
+            .map(|row| { row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>() })
+            .collect::<Vec<_>>())),
+        CalibrationValue::I8Matrix(mat) => Some(json!(mat
+            .iter()
+            .map(|row| { row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>() })
+            .collect::<Vec<_>>())),
+        CalibrationValue::I16Matrix(mat) => Some(json!(mat
+            .iter()
+            .map(|row| { row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>() })
+            .collect::<Vec<_>>())),
+        CalibrationValue::I32Matrix(mat) => Some(json!(mat
+            .iter()
+            .map(|row| { row.iter().map(|&v| fmt(v as i64)).collect::<Vec<_>>() })
+            .collect::<Vec<_>>())),
+        CalibrationValue::I64Matrix(mat) => Some(json!(mat
+            .iter()
+            .map(|row| { row.iter().map(|&v| fmt(v)).collect::<Vec<_>>() })
+            .collect::<Vec<_>>())),
         _ => None,
     }
 }
@@ -157,23 +233,23 @@ pub fn bytes_to_calibration_value(
     let value = match cal_type {
         CalibrationType::U8 => CalibrationValue::U8(data[0]),
         CalibrationType::U16 => CalibrationValue::U16(u16::from_le_bytes([data[0], data[1]])),
-        CalibrationType::U32 => CalibrationValue::U32(u32::from_le_bytes([
-            data[0], data[1], data[2], data[3],
-        ])),
+        CalibrationType::U32 => {
+            CalibrationValue::U32(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+        }
         CalibrationType::U64 => CalibrationValue::U64(u64::from_le_bytes([
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ])),
         CalibrationType::I8 => CalibrationValue::I8(data[0] as i8),
         CalibrationType::I16 => CalibrationValue::I16(i16::from_le_bytes([data[0], data[1]])),
-        CalibrationType::I32 => CalibrationValue::I32(i32::from_le_bytes([
-            data[0], data[1], data[2], data[3],
-        ])),
+        CalibrationType::I32 => {
+            CalibrationValue::I32(i32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+        }
         CalibrationType::I64 => CalibrationValue::I64(i64::from_le_bytes([
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ])),
-        CalibrationType::F32 => CalibrationValue::F32(f32::from_le_bytes([
-            data[0], data[1], data[2], data[3],
-        ])),
+        CalibrationType::F32 => {
+            CalibrationValue::F32(f32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+        }
         CalibrationType::F64 => CalibrationValue::F64(f64::from_le_bytes([
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ])),
@@ -253,9 +329,7 @@ pub fn bytes_to_calibration_value(
                 .map(|row| {
                     row.chunks_exact(8)
                         .map(|c| {
-                            u64::from_le_bytes([
-                                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-                            ])
+                            u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
                         })
                         .collect()
                 })
@@ -289,9 +363,7 @@ pub fn bytes_to_calibration_value(
                 .map(|row| {
                     row.chunks_exact(8)
                         .map(|c| {
-                            i64::from_le_bytes([
-                                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-                            ])
+                            i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
                         })
                         .collect()
                 })
@@ -311,9 +383,7 @@ pub fn bytes_to_calibration_value(
                 .map(|row| {
                     row.chunks_exact(8)
                         .map(|c| {
-                            f64::from_le_bytes([
-                                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-                            ])
+                            f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
                         })
                         .collect()
                 })
@@ -675,47 +745,91 @@ pub fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -> Value
         CalibrationValue::Bool(v) => json!([*v]),
         CalibrationValue::U8Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::U16Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::U32Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::U64Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::I8Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::I16Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::I32Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::I64Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::F32Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(format!("{:.6}", v))).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::F64Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(format!("{:.6}", v))).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::BoolArray(arr) => {
             let items: Vec<Value> = arr.iter().map(|v| json!(*v)).collect();
-            if is_1d { json!(items) } else { json!([items]) }
+            if is_1d {
+                json!(items)
+            } else {
+                json!([items])
+            }
         }
         CalibrationValue::U8Matrix(mat) => json!(mat
             .iter()

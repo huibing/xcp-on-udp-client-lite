@@ -252,7 +252,9 @@ fn matrix_value_to_bytes(
 ) -> Option<Vec<u8>> {
     tracing::debug!(
         "matrix_value_to_bytes: rows={}, cols={}, storage_order={:?}",
-        rows, cols, storage_order
+        rows,
+        cols,
+        storage_order
     );
     let result = match value {
         CalibrationValue::U8Matrix(mat) => Some(matrix_to_flat(mat, rows, cols, storage_order)),
@@ -348,7 +350,10 @@ async fn write_to_slave(
     let mta = Mta::new(param.address, param.address_ext);
     tracing::debug!(
         "write_to_slave: param='{}', address=0x{:08X}, ext={}, data_type={:?}",
-        param.name, param.address, param.address_ext, param.data_type
+        param.name,
+        param.address,
+        param.address_ext,
+        param.data_type
     );
 
     // For matrix types, use the dedicated helper that handles the dimension convention
@@ -558,7 +563,10 @@ fn dcm_map_to_raw_string(
     let (dcm_ncol, dcm_nrow) = map.dim; // ncol = X-axis size, nrow = Y-axis size
     tracing::debug!(
         "dcm_map_to_raw_string: param='{}', dcm_ncol(X)={}, dcm_nrow(Y)={}, storage_order={:?}",
-        param.name, dcm_ncol, dcm_nrow, param.storage_order
+        param.name,
+        dcm_ncol,
+        dcm_nrow,
+        param.storage_order
     );
 
     // Collect DCM values into [nrow(Y)][ncol(X)] numeric matrix

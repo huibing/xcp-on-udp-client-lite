@@ -21,7 +21,9 @@ use crate::daq::DaqManager;
 use crate::slave::SlaveId;
 use crate::transport::TransportType;
 use crate::web::auth::{clear_session, try_create_session, verify_credentials};
-use crate::web::compare::{load_a2l_hex_source, load_dcm_source, ComparePresenceFilter, CompareSide};
+use crate::web::compare::{
+    load_a2l_hex_source, load_dcm_source, ComparePresenceFilter, CompareSide,
+};
 use crate::web::state::{AppState, DeviceState, SlaveState};
 use crate::web::templates;
 
@@ -112,7 +114,11 @@ pub async fn login_api(
         match try_create_session(&client_ip) {
             Ok(token) => {
                 let cookie = format!("session={}; Path=/; HttpOnly; SameSite=Strict", token);
-                (AppendHeaders([(SET_COOKIE, cookie)]), Redirect::to("/?fresh=1")).into_response()
+                (
+                    AppendHeaders([(SET_COOKIE, cookie)]),
+                    Redirect::to("/?fresh=1"),
+                )
+                    .into_response()
             }
             Err(error_msg) => {
                 // Another user is already connected
@@ -326,7 +332,8 @@ pub async fn compare_load_source(
                     "error": "DCM source requires a DCM file",
                 }));
             };
-            match tokio::task::spawn_blocking(move || load_dcm_source(&dcm_name, &dcm_bytes)).await {
+            match tokio::task::spawn_blocking(move || load_dcm_source(&dcm_name, &dcm_bytes)).await
+            {
                 Ok(Ok(source)) => source,
                 Ok(Err(error)) => {
                     return Json(json!({
@@ -405,9 +412,8 @@ pub async fn compare_variables(
         }));
     };
     let search = params.get("search").cloned().unwrap_or_default();
-    let presence = ComparePresenceFilter::from_str(
-        params.get("presence").map_or("all", String::as_str),
-    );
+    let presence =
+        ComparePresenceFilter::from_str(params.get("presence").map_or("all", String::as_str));
     let cal_type = params.get("cal_type").map(String::as_str);
     let offset = params
         .get("offset")
@@ -442,7 +448,10 @@ pub async fn compare_select_variables(
         })
         .unwrap_or_default();
 
-    let Some(session) = state.set_compare_selected_variables(&session_id, names).await else {
+    let Some(session) = state
+        .set_compare_selected_variables(&session_id, names)
+        .await
+    else {
         return Json(json!({
             "success": false,
             "error": "Compare session not found",
@@ -574,7 +583,10 @@ pub async fn connect_all_devices(
         };
         let transport_config = resolved_transport.to_transport_config();
 
-        match client.connect_slave(&device.name, transport_config, None).await {
+        match client
+            .connect_slave(&device.name, transport_config, None)
+            .await
+        {
             Ok(slave_id) => {
                 // Copy pre-parsed memory segments to XcpSlave (no re-parsing)
                 if !device.a2l_path.is_empty() {
@@ -741,7 +753,10 @@ pub async fn connect_device(
 
     let mut client = state.client.lock().await;
 
-        match client.connect_slave(&device.name, transport_config, None).await {
+    match client
+        .connect_slave(&device.name, transport_config, None)
+        .await
+    {
         Ok(slave_id) => {
             // Copy pre-parsed memory segments to XcpSlave (no re-parsing)
             if !device.a2l_path.is_empty() {
@@ -1468,9 +1483,9 @@ fn bytes_to_calibration_value(
         }
 
         // Matrix types - row-major
-        CalibrationType::U8Matrix(_, cols) => CalibrationValue::U8Matrix(
-            data.chunks_exact(*cols).map(|c| c.to_vec()).collect(),
-        ),
+        CalibrationType::U8Matrix(_, cols) => {
+            CalibrationValue::U8Matrix(data.chunks_exact(*cols).map(|c| c.to_vec()).collect())
+        }
         CalibrationType::U16Matrix(_, cols) => CalibrationValue::U16Matrix(
             data.chunks_exact(cols * 2)
                 .map(|row| {
@@ -1814,9 +1829,7 @@ pub async fn cal_write_json_api(
     let value = match parse_mgr.parse_value(&param, &value_str) {
         Ok(v) => v,
         Err(e) => {
-            return Json(
-                json!({ "success": false, "error": format!("Invalid value: {}", e) }),
-            );
+            return Json(json!({ "success": false, "error": format!("Invalid value: {}", e) }));
         }
     };
 
@@ -1830,11 +1843,11 @@ pub async fn cal_write_json_api(
                     .write()
                     .await
                     .insert(param.name.clone(), value);
-                Json(json!({ "success": true, "message": format!("Wrote {} = {}", param.name, value_str) }))
+                Json(
+                    json!({ "success": true, "message": format!("Wrote {} = {}", param.name, value_str) }),
+                )
             }
-            Err(e) => {
-                Json(json!({ "success": false, "error": format!("Write failed: {}", e) }))
-            }
+            Err(e) => Json(json!({ "success": false, "error": format!("Write failed: {}", e) })),
         }
     } else {
         Json(json!({ "success": false, "error": "Slave not available" }))
@@ -1880,9 +1893,7 @@ pub async fn cal_original_api(
         };
         return match read_calibration_from_hex(hex, &param) {
             Ok(value) => Json(json!({ "success": true, "value": value.format_scalar_str() })),
-            Err(e) => {
-                Json(json!({ "success": false, "error": format!("HEX read failed: {}", e) }))
-            }
+            Err(e) => Json(json!({ "success": false, "error": format!("HEX read failed: {}", e) })),
         };
     }
 
@@ -2663,11 +2674,8 @@ pub async fn daq_data(
             seen_device_ids.insert(device_id.clone());
             let device_name = device.display_name_or_custom().await;
             for (k, v) in &r.values {
-                if filter_set.is_empty()
-                    || filter_set.contains(&(device_id.clone(), k.clone()))
-                {
-                    let updated_at =
-                        r.signal_timestamps.get(k).copied().unwrap_or(r.timestamp_s);
+                if filter_set.is_empty() || filter_set.contains(&(device_id.clone(), k.clone())) {
+                    let updated_at = r.signal_timestamps.get(k).copied().unwrap_or(r.timestamp_s);
                     values.push(json!({
                         "device_id": device_id,
                         "var_name": k,
@@ -2692,8 +2700,7 @@ pub async fn daq_data(
             if let Some(r) = daq_manager.get_latest_sample().await {
                 for (k, v) in &r.values {
                     let device_id = slave_device_id.clone();
-                    if filter_set.is_empty()
-                        || filter_set.contains(&(device_id.clone(), k.clone()))
+                    if filter_set.is_empty() || filter_set.contains(&(device_id.clone(), k.clone()))
                     {
                         let updated_at =
                             r.signal_timestamps.get(k).copied().unwrap_or(r.timestamp_s);
@@ -2883,7 +2890,9 @@ pub async fn a2l_load(
     let max_cto = reader.get_max_cto().unwrap_or(255);
     let cal_count = characteristics.len();
     let meas_count = measurements.len();
-    let original_filename = file_name.clone().unwrap_or_else(|| "unknown.a2l".to_string());
+    let original_filename = file_name
+        .clone()
+        .unwrap_or_else(|| "unknown.a2l".to_string());
 
     let mut cal_manager = CalibrationManager::new();
     for ch in characteristics {
@@ -3108,7 +3117,10 @@ fn convert_characteristic(
 }
 
 /// Convert A2L measurement to DAQ measurement
-fn convert_measurement(m: crate::a2l::A2lMeasurement, reader: &crate::a2l::A2lReader) -> Option<crate::daq::Measurement> {
+fn convert_measurement(
+    m: crate::a2l::A2lMeasurement,
+    reader: &crate::a2l::A2lReader,
+) -> Option<crate::daq::Measurement> {
     Some(crate::daq::Measurement::with_type(
         &m.name,
         m.address,
@@ -4625,7 +4637,9 @@ pub async fn experiment_set_event(
     };
 
     if *device.daq_running.read().await {
-        return Json(json!({ "success": false, "error": "Cannot change event while DAQ is running" }));
+        return Json(
+            json!({ "success": false, "error": "Cannot change event while DAQ is running" }),
+        );
     }
 
     let mut daq_mgr = device.daq_manager.write().await;
@@ -4853,7 +4867,13 @@ pub async fn experiment_record_start(
     let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
     let safe_title = title
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
 
     // Ensure output directory exists
@@ -4893,7 +4913,13 @@ pub async fn experiment_record_start(
         let device_name = device.display_name_or_custom().await;
         let safe_device = device_name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>();
         let mf4_filename = if devices.iter().filter(|d| d.connected).count() > 1 {
             format!("{}_{}_{}.mf4", safe_title, safe_device, timestamp)
@@ -4959,11 +4985,7 @@ pub async fn experiment_record_stop(State(state): State<AppState>) -> impl IntoR
                 );
             }
             Err(e) => {
-                errors.push(format!(
-                    "{}: {}",
-                    device.display_name_or_custom().await,
-                    e
-                ));
+                errors.push(format!("{}: {}", device.display_name_or_custom().await, e));
             }
         }
     }
@@ -5286,12 +5308,8 @@ pub async fn experiment_checksum(State(state): State<AppState>) -> impl IntoResp
     }
 
     let all_passed = results.iter().all(|r| {
-        r.get("success")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-            && r.get("passed")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
+        r.get("success").and_then(|v| v.as_bool()).unwrap_or(false)
+            && r.get("passed").and_then(|v| v.as_bool()).unwrap_or(false)
     });
 
     Json(json!({
@@ -5485,17 +5503,19 @@ pub async fn experiment_dcm_export(
     let filename = format!("{}_{}.dcm", safe_title, timestamp);
 
     let headers = [
-        (
-            header::CONTENT_TYPE,
-            "application/octet-stream".to_string(),
-        ),
+        (header::CONTENT_TYPE, "application/octet-stream".to_string()),
         (
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{}\"", filename),
         ),
     ];
 
-    (StatusCode::OK, headers, Body::from(dcm_content.into_bytes())).into_response()
+    (
+        StatusCode::OK,
+        headers,
+        Body::from(dcm_content.into_bytes()),
+    )
+        .into_response()
 }
 
 // ── DCM helpers ──────────────────────────────────────────────────────────────
@@ -5532,7 +5552,9 @@ fn cal_value_to_dcm_f64_array(value: &CalibrationValue) -> Option<Vec<f64>> {
         CalibrationValue::I64Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
         CalibrationValue::F32Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
         CalibrationValue::F64Array(a) => Some(a.clone()),
-        CalibrationValue::BoolArray(a) => Some(a.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect()),
+        CalibrationValue::BoolArray(a) => {
+            Some(a.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect())
+        }
         _ => None,
     }
 }
@@ -5542,7 +5564,11 @@ fn cal_value_to_dcm_f64_array(value: &CalibrationValue) -> Option<Vec<f64>> {
 fn cal_value_to_dcm_f64_matrix(value: &CalibrationValue) -> Option<Vec<Vec<f64>>> {
     macro_rules! to_f64_matrix {
         ($m:expr) => {
-            Some($m.iter().map(|r| r.iter().map(|v| *v as f64).collect()).collect())
+            Some(
+                $m.iter()
+                    .map(|r| r.iter().map(|v| *v as f64).collect())
+                    .collect(),
+            )
         };
     }
     match value {
@@ -5554,15 +5580,26 @@ fn cal_value_to_dcm_f64_matrix(value: &CalibrationValue) -> Option<Vec<Vec<f64>>
         CalibrationValue::I16Matrix(m) => to_f64_matrix!(m),
         CalibrationValue::I32Matrix(m) => to_f64_matrix!(m),
         CalibrationValue::I64Matrix(m) => to_f64_matrix!(m),
-        CalibrationValue::F32Matrix(m) => Some(m.iter().map(|r| r.iter().map(|v| *v as f64).collect()).collect()),
+        CalibrationValue::F32Matrix(m) => Some(
+            m.iter()
+                .map(|r| r.iter().map(|v| *v as f64).collect())
+                .collect(),
+        ),
         CalibrationValue::F64Matrix(m) => Some(m.clone()),
-        CalibrationValue::BoolMatrix(m) => Some(m.iter().map(|r| r.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect()).collect()),
+        CalibrationValue::BoolMatrix(m) => Some(
+            m.iter()
+                .map(|r| r.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect())
+                .collect(),
+        ),
         _ => None,
     }
 }
 
 /// Generate the full text of a DCM (Konservierung Format 2.0) file using the `dcm_utils` crate.
-fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Vec<Vec<f64>>)]) -> String {
+fn generate_dcm(
+    _title: &str,
+    entries: &[(CalibrationParam, CalibrationValue, Vec<Vec<f64>>)],
+) -> String {
     use crate::a2l::CharacteristicType;
     use dcm_utils::block::Block;
     use dcm_utils::blocks::{FESTWERT, FESTWERTEBLOCK, GRUPPENKENNFELD, GRUPPENKENNLINIE};
@@ -5582,21 +5619,31 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Ve
                     return vals.clone();
                 }
             }
-            param.axis_info.get(axis_idx)
+            param
+                .axis_info
+                .get(axis_idx)
                 .and_then(|a| a.get_static_values())
                 .unwrap_or_else(|| (0..fallback_n).map(|i| i as f64).collect())
         };
 
         let block_opt: Option<Block> = match param.characteristic_type {
             CharacteristicType::Value => cal_value_to_dcm_f64(value).map(|v| {
-                Block::Constant(FESTWERT::from_f64(name.clone(), v, desc.clone(), unit.clone()))
+                Block::Constant(FESTWERT::from_f64(
+                    name.clone(),
+                    v,
+                    desc.clone(),
+                    unit.clone(),
+                ))
             }),
 
             CharacteristicType::Curve => cal_value_to_dcm_f64_array(value).map(|values| {
                 let n = values.len();
                 let axis_info = param.axis_info.first();
                 let axis = get_axis(0, n);
-                let axis_name = axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
+                let axis_name = axis_info
+                    .map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str()))
+                    .unwrap_or("")
+                    .to_string();
                 let unit_x = axis_info
                     .and_then(|a| a.unit.as_deref())
                     .unwrap_or("")
@@ -5615,8 +5662,14 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Ve
                 // X axis has x_count breakpoints; Y axis has y_count breakpoints
                 let x_axis = get_axis(0, x_count);
                 let y_axis = get_axis(1, y_count);
-                let x_name = x_axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
-                let y_name = y_axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
+                let x_name = x_axis_info
+                    .map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                let y_name = y_axis_info
+                    .map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str()))
+                    .unwrap_or("")
+                    .to_string();
                 let unit_x = x_axis_info
                     .and_then(|a| a.unit.as_deref())
                     .unwrap_or("")
@@ -5643,8 +5696,7 @@ fn generate_dcm(_title: &str, entries: &[(CalibrationParam, CalibrationValue, Ve
 
             CharacteristicType::ValBlk => {
                 let flat = cal_value_to_dcm_f64_array(value).or_else(|| {
-                    cal_value_to_dcm_f64_matrix(value)
-                        .map(|m| m.into_iter().flatten().collect())
+                    cal_value_to_dcm_f64_matrix(value).map(|m| m.into_iter().flatten().collect())
                 });
                 flat.map(|values| {
                     Block::ConstantBlock(FESTWERTEBLOCK::from_f64(
@@ -5777,7 +5829,8 @@ pub async fn experiment_daq_layout(State(state): State<AppState>) -> impl IntoRe
             let odt_pid = abs_pid;
             abs_pid += 1;
 
-            let odt_total_bytes = pid_bytes as usize + if ts_size > 0 { ts_size as usize } else { 0 } + data_bytes;
+            let odt_total_bytes =
+                pid_bytes as usize + if ts_size > 0 { ts_size as usize } else { 0 } + data_bytes;
 
             let odt = json!({
                 "odt_idx": 0,
@@ -5828,18 +5881,30 @@ pub async fn experiment_daq_layout(State(state): State<AppState>) -> impl IntoRe
 mod tests {
     use super::*;
     use crate::a2l::CharacteristicType;
-    use crate::calibration::{CalibrationParam, CalibrationValue, CalibrationType};
+    use crate::calibration::{CalibrationParam, CalibrationType, CalibrationValue};
 
     // ── cal_value_to_dcm_f64 ─────────────────────────────────────────────────
 
     #[test]
     fn test_dcm_f64_scalar_types() {
         assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::U8(42)), Some(42.0));
-        assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::I16(-100)), Some(-100.0));
+        assert_eq!(
+            cal_value_to_dcm_f64(&CalibrationValue::I16(-100)),
+            Some(-100.0)
+        );
         assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::F32(1.5)), Some(1.5));
-        assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::F64(3.14)), Some(3.14));
-        assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::Bool(true)), Some(1.0));
-        assert_eq!(cal_value_to_dcm_f64(&CalibrationValue::Bool(false)), Some(0.0));
+        assert_eq!(
+            cal_value_to_dcm_f64(&CalibrationValue::F64(3.14)),
+            Some(3.14)
+        );
+        assert_eq!(
+            cal_value_to_dcm_f64(&CalibrationValue::Bool(true)),
+            Some(1.0)
+        );
+        assert_eq!(
+            cal_value_to_dcm_f64(&CalibrationValue::Bool(false)),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -5900,7 +5965,10 @@ mod tests {
 
     #[test]
     fn test_dcm_f64_matrix_returns_none_for_non_matrices() {
-        assert_eq!(cal_value_to_dcm_f64_matrix(&CalibrationValue::F64(1.0)), None);
+        assert_eq!(
+            cal_value_to_dcm_f64_matrix(&CalibrationValue::F64(1.0)),
+            None
+        );
         assert_eq!(
             cal_value_to_dcm_f64_matrix(&CalibrationValue::F64Array(vec![1.0, 2.0])),
             None
@@ -5916,10 +5984,9 @@ mod tests {
     }
 
     fn array_param(name: &str, n: usize) -> CalibrationParam {
-        let mut p =
-            CalibrationParam::new(name, 0x2000, 0, CalibrationType::U8Array(n))
-                .with_description("test array")
-                .with_unit("km/h");
+        let mut p = CalibrationParam::new(name, 0x2000, 0, CalibrationType::U8Array(n))
+            .with_description("test array")
+            .with_unit("km/h");
         p.characteristic_type = CharacteristicType::ValBlk;
         p
     }
@@ -5944,7 +6011,11 @@ mod tests {
 
     #[test]
     fn test_generate_dcm_scalar() {
-        let entries = vec![(scalar_param("RPM_LIMIT"), CalibrationValue::F64(5500.0), vec![])];
+        let entries = vec![(
+            scalar_param("RPM_LIMIT"),
+            CalibrationValue::F64(5500.0),
+            vec![],
+        )];
         let dcm = generate_dcm("my_test", &entries);
 
         assert!(dcm.contains("KONSERVIERUNG_FORMAT 2.0"), "missing header");
@@ -5964,7 +6035,10 @@ mod tests {
         )];
         let dcm = generate_dcm("test", &entries);
 
-        assert!(dcm.contains("FESTWERTEBLOCK LOOKUP_TBL"), "missing FESTWERTEBLOCK");
+        assert!(
+            dcm.contains("FESTWERTEBLOCK LOOKUP_TBL"),
+            "missing FESTWERTEBLOCK"
+        );
         assert!(dcm.contains("km/h"), "missing unit");
     }
 
@@ -5977,7 +6051,10 @@ mod tests {
         )];
         let dcm = generate_dcm("test", &entries);
 
-        assert!(dcm.contains("GRUPPENKENNLINIE TEMP_CURVE"), "missing GRUPPENKENNLINIE");
+        assert!(
+            dcm.contains("GRUPPENKENNLINIE TEMP_CURVE"),
+            "missing GRUPPENKENNLINIE"
+        );
         assert!(dcm.contains("ST/X"), "missing X axis");
         assert!(dcm.contains("°C"), "missing unit");
     }
@@ -5991,7 +6068,10 @@ mod tests {
         )];
         let dcm = generate_dcm("test", &entries);
 
-        assert!(dcm.contains("GRUPPENKENNFELD PRESSURE_MAP"), "missing GRUPPENKENNFELD");
+        assert!(
+            dcm.contains("GRUPPENKENNFELD PRESSURE_MAP"),
+            "missing GRUPPENKENNFELD"
+        );
         assert!(dcm.contains("ST/X"), "missing X axis");
         assert!(dcm.contains("ST/Y"), "missing Y axis");
         assert!(dcm.contains("bar"), "missing unit");
@@ -6000,7 +6080,10 @@ mod tests {
     #[test]
     fn test_generate_dcm_empty() {
         let dcm = generate_dcm("empty_export", &[]);
-        assert!(dcm.contains("KONSERVIERUNG_FORMAT 2.0"), "header always present");
+        assert!(
+            dcm.contains("KONSERVIERUNG_FORMAT 2.0"),
+            "header always present"
+        );
     }
 
     /// Verify that a non-square MAP (X=3, Y=2) is written in DCM [Y][X] order so that
@@ -6033,7 +6116,11 @@ mod tests {
             .lines()
             .filter(|l| l.trim_start().starts_with("WERT"))
             .collect();
-        assert_eq!(wert_lines.len(), 2, "must have exactly 2 WERT lines (nrow=y_count=2)");
+        assert_eq!(
+            wert_lines.len(),
+            2,
+            "must have exactly 2 WERT lines (nrow=y_count=2)"
+        );
 
         let parse_wert = |line: &str| -> Vec<f64> {
             line.split_whitespace()
@@ -6044,7 +6131,11 @@ mod tests {
 
         let row0 = parse_wert(wert_lines[0]);
         let row1 = parse_wert(wert_lines[1]);
-        assert_eq!(row0.len(), 3, "each WERT row must have 3 values (ncol=x_count=3)");
+        assert_eq!(
+            row0.len(),
+            3,
+            "each WERT row must have 3 values (ncol=x_count=3)"
+        );
         assert_eq!(row1.len(), 3);
 
         // Y=0 row: x=0→1, x=1→3, x=2→5
@@ -6062,6 +6153,9 @@ mod tests {
             vec![],
         )];
         let dcm = generate_dcm("test", &entries);
-        assert!(!dcm.contains("FESTWERT BROKEN"), "should skip mismatched types");
+        assert!(
+            !dcm.contains("FESTWERT BROKEN"),
+            "should skip mismatched types"
+        );
     }
 }

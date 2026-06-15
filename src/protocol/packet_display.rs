@@ -8,7 +8,11 @@ use super::types::Response;
 
 /// Format bytes as space-separated uppercase hex.
 pub fn format_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Hex dump truncated to `max` bytes. Appends ` ... +N more` when truncated.
@@ -147,6 +151,9 @@ mod tests {
     #[test]
     fn test_describe_cto_response_error() {
         let resp = vec![0xFE, 0x20];
-        assert_eq!(describe_cto_response(&resp, Some(0xFF)), "ERR: Unknown command");
+        assert_eq!(
+            describe_cto_response(&resp, Some(0xFF)),
+            "ERR: Unknown command"
+        );
     }
 }

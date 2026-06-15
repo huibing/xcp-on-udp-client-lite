@@ -2715,8 +2715,10 @@ impl App {
         cycle_ms: f64,
     ) {
         // Build name→CompuMethod map for fast lookup
-        let compu_map: std::collections::HashMap<&str, &xcp_client::CompuMethod> =
-            all_measurements.iter().map(|m| (m.name.as_str(), &m.compu_method)).collect();
+        let compu_map: std::collections::HashMap<&str, &xcp_client::CompuMethod> = all_measurements
+            .iter()
+            .map(|m| (m.name.as_str(), &m.compu_method))
+            .collect();
 
         let format_value = |name: &str, v: f64| -> String {
             if let Some(cm) = compu_map.get(name).copied() {

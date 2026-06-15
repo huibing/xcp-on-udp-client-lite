@@ -295,7 +295,11 @@ pub(crate) fn read_axis_values_from_hex(hex: &HexImage, param: &CalibrationParam
                             slice[0] as i8 as f64
                         }
                         crate::a2l::A2lDataType::Bool | crate::a2l::A2lDataType::BoolArray(_) => {
-                            if slice[0] == 0 { 0.0 } else { 1.0 }
+                            if slice[0] == 0 {
+                                0.0
+                            } else {
+                                1.0
+                            }
                         }
                         crate::a2l::A2lDataType::U16 | crate::a2l::A2lDataType::U16Array(_) => {
                             u16::from_le_bytes([slice[0], slice[1]]) as f64
@@ -341,14 +345,18 @@ pub(crate) fn read_axis_values_from_hex(hex: &HexImage, param: &CalibrationParam
 }
 
 pub(crate) fn format_raw_hex(bytes: &[u8]) -> String {
-    bytes.iter()
+    bytes
+        .iter()
         .map(|byte| format!("{:02X}", byte))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 #[allow(dead_code)]
-pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -> serde_json::Value {
+pub(crate) fn calibration_value_to_json(
+    value: &CalibrationValue,
+    is_1d: bool,
+) -> serde_json::Value {
     match value {
         CalibrationValue::U8(v) => serde_json::json!([*v]),
         CalibrationValue::U16(v) => serde_json::json!([*v]),
@@ -362,7 +370,10 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
         CalibrationValue::F64(v) => serde_json::json!([format!("{:.6}", v)]),
         CalibrationValue::Bool(v) => serde_json::json!([*v]),
         CalibrationValue::U8Array(arr) => {
-            let row = arr.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>();
+            let row = arr
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>();
             if is_1d {
                 serde_json::json!(row)
             } else {
@@ -370,7 +381,10 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
             }
         }
         CalibrationValue::U16Array(arr) => {
-            let row = arr.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>();
+            let row = arr
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>();
             if is_1d {
                 serde_json::json!(row)
             } else {
@@ -378,7 +392,10 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
             }
         }
         CalibrationValue::U32Array(arr) => {
-            let row = arr.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>();
+            let row = arr
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>();
             if is_1d {
                 serde_json::json!(row)
             } else {
@@ -386,7 +403,10 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
             }
         }
         CalibrationValue::U64Array(arr) => {
-            let row = arr.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>();
+            let row = arr
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>();
             if is_1d {
                 serde_json::json!(row)
             } else {
@@ -394,7 +414,10 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
             }
         }
         CalibrationValue::I8Array(arr) => {
-            let row = arr.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>();
+            let row = arr
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>();
             if is_1d {
                 serde_json::json!(row)
             } else {
@@ -402,7 +425,10 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
             }
         }
         CalibrationValue::I16Array(arr) => {
-            let row = arr.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>();
+            let row = arr
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>();
             if is_1d {
                 serde_json::json!(row)
             } else {
@@ -410,7 +436,10 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
             }
         }
         CalibrationValue::I32Array(arr) => {
-            let row = arr.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>();
+            let row = arr
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>();
             if is_1d {
                 serde_json::json!(row)
             } else {
@@ -418,7 +447,10 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
             }
         }
         CalibrationValue::I64Array(arr) => {
-            let row = arr.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>();
+            let row = arr
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>();
             if is_1d {
                 serde_json::json!(row)
             } else {
@@ -448,7 +480,10 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
             }
         }
         CalibrationValue::BoolArray(arr) => {
-            let row = arr.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>();
+            let row = arr
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>();
             if is_1d {
                 serde_json::json!(row)
             } else {
@@ -457,35 +492,59 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
         }
         CalibrationValue::U8Matrix(mat) => serde_json::json!(mat
             .iter()
-            .map(|row| row.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>())
+            .map(|row| row
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>())
             .collect::<Vec<_>>()),
         CalibrationValue::U16Matrix(mat) => serde_json::json!(mat
             .iter()
-            .map(|row| row.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>())
+            .map(|row| row
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>())
             .collect::<Vec<_>>()),
         CalibrationValue::U32Matrix(mat) => serde_json::json!(mat
             .iter()
-            .map(|row| row.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>())
+            .map(|row| row
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>())
             .collect::<Vec<_>>()),
         CalibrationValue::U64Matrix(mat) => serde_json::json!(mat
             .iter()
-            .map(|row| row.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>())
+            .map(|row| row
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>())
             .collect::<Vec<_>>()),
         CalibrationValue::I8Matrix(mat) => serde_json::json!(mat
             .iter()
-            .map(|row| row.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>())
+            .map(|row| row
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>())
             .collect::<Vec<_>>()),
         CalibrationValue::I16Matrix(mat) => serde_json::json!(mat
             .iter()
-            .map(|row| row.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>())
+            .map(|row| row
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>())
             .collect::<Vec<_>>()),
         CalibrationValue::I32Matrix(mat) => serde_json::json!(mat
             .iter()
-            .map(|row| row.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>())
+            .map(|row| row
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>())
             .collect::<Vec<_>>()),
         CalibrationValue::I64Matrix(mat) => serde_json::json!(mat
             .iter()
-            .map(|row| row.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>())
+            .map(|row| row
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>())
             .collect::<Vec<_>>()),
         CalibrationValue::F32Matrix(mat) => serde_json::json!(mat
             .iter()
@@ -505,7 +564,10 @@ pub(crate) fn calibration_value_to_json(value: &CalibrationValue, is_1d: bool) -
             .collect::<Vec<_>>()),
         CalibrationValue::BoolMatrix(mat) => serde_json::json!(mat
             .iter()
-            .map(|row| row.iter().map(|v| serde_json::json!(*v)).collect::<Vec<_>>())
+            .map(|row| row
+                .iter()
+                .map(|v| serde_json::json!(*v))
+                .collect::<Vec<_>>())
             .collect::<Vec<_>>()),
         CalibrationValue::Ascii(s) => serde_json::json!([s]),
     }

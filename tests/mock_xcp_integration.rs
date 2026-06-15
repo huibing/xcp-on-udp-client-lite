@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
-use xcp_client::XcpClient;
 use xcp_client::protocol::Mta;
 use xcp_client::transport::TransportType;
+use xcp_client::XcpClient;
 
 use support::mock_slave::{
     build_frame, parse_frame, MockXcpSlaveServer, MOCK_EVENT_CHANNEL, MOCK_EVENT_NAME,
@@ -20,7 +20,9 @@ static PORT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn udp_server_speaks_xcp_on_udp_frames() {
     let _guard = PORT_LOCK.lock().await;
-    let server = MockXcpSlaveServer::start().await.expect("start mock server");
+    let server = MockXcpSlaveServer::start()
+        .await
+        .expect("start mock server");
 
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
@@ -46,7 +48,9 @@ async fn udp_server_speaks_xcp_on_udp_frames() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_connects_and_reads_identity() {
     let _guard = PORT_LOCK.lock().await;
-    let server = MockXcpSlaveServer::start().await.expect("start mock server");
+    let server = MockXcpSlaveServer::start()
+        .await
+        .expect("start mock server");
 
     let mut client = XcpClient::new();
     let slave_id = client
@@ -68,7 +72,9 @@ async fn client_connects_and_reads_identity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn calibration_pages_chunked_transfers_and_checksum_work() {
     let _guard = PORT_LOCK.lock().await;
-    let server = MockXcpSlaveServer::start().await.expect("start mock server");
+    let server = MockXcpSlaveServer::start()
+        .await
+        .expect("start mock server");
 
     let mut client = XcpClient::new();
     let slave_id = client
@@ -146,7 +152,9 @@ async fn calibration_pages_chunked_transfers_and_checksum_work() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daq_streaming_reaches_latest_sample_and_event_metadata() {
     let _guard = PORT_LOCK.lock().await;
-    let server = MockXcpSlaveServer::start().await.expect("start mock server");
+    let server = MockXcpSlaveServer::start()
+        .await
+        .expect("start mock server");
 
     let csv_path: PathBuf =
         std::env::temp_dir().join(format!("mock-xcp-{}.csv", std::process::id()));

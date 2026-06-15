@@ -1,11 +1,10 @@
 /// Compare sessions Tauri commands.
 ///
 /// Ports web/routes.rs compare_* handlers.
-
 use serde_json::{json, Value};
 use tauri::State;
 use xcp_client::web::compare::{
-    load_a2l_hex_source, load_dcm_source, ComparePresenceFilter, CompareSide, CompareSession,
+    load_a2l_hex_source, load_dcm_source, ComparePresenceFilter, CompareSession, CompareSide,
 };
 
 use crate::state::SharedState;
@@ -15,11 +14,7 @@ use crate::state::SharedState;
 pub async fn compare_sessions(state: State<'_, SharedState>) -> Result<Value, String> {
     let app = state.read().await;
     // Ensure at least one session exists
-    let sessions: Vec<Value> = app
-        .compare_sessions
-        .iter()
-        .map(|s| s.to_json())
-        .collect();
+    let sessions: Vec<Value> = app.compare_sessions.iter().map(|s| s.to_json()).collect();
     Ok(json!({ "success": true, "sessions": sessions }))
 }
 
@@ -102,7 +97,8 @@ pub async fn compare_load_source(
 
     let source = match source_type.as_str() {
         "a2l_hex" => {
-            let hex_path = hex_path.ok_or_else(|| "hex_path required for a2l_hex source".to_string())?;
+            let hex_path =
+                hex_path.ok_or_else(|| "hex_path required for a2l_hex source".to_string())?;
             let a2l_name = extract_filename(&file_path);
             let hex_name = extract_filename(&hex_path);
             let a2l_bytes = std::fs::read(&file_path)
@@ -183,8 +179,7 @@ pub async fn compare_variables(
     drop(app);
 
     let search_str = search.unwrap_or_default();
-    let presence_filter =
-        ComparePresenceFilter::from_str(presence.as_deref().unwrap_or("all"));
+    let presence_filter = ComparePresenceFilter::from_str(presence.as_deref().unwrap_or("all"));
     let offset = offset.unwrap_or(0);
     let limit = limit.unwrap_or(100);
 

@@ -3,7 +3,6 @@
 /// Ports web/routes.rs daq_* handlers.
 /// Live data is pushed to the frontend via tauri events ("daq-data") instead
 /// of HTTP polling.
-
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
@@ -90,10 +89,7 @@ pub async fn daq_start(
 }
 
 #[tauri::command]
-pub async fn daq_stop(
-    state: State<'_, SharedState>,
-    device_id: String,
-) -> Result<Value, String> {
+pub async fn daq_stop(state: State<'_, SharedState>, device_id: String) -> Result<Value, String> {
     let (slave_arc, daq_mgr_arc, daq_running_arc) = {
         let st = state.read().await;
         let dev = st
@@ -117,7 +113,10 @@ pub async fn daq_stop(
     {
         let slave_guard = slave_arc.lock().await;
         let daq_mgr = daq_mgr_arc.read().await;
-        daq_mgr.stop(&*slave_guard).await.map_err(|e| e.to_string())?;
+        daq_mgr
+            .stop(&*slave_guard)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     *daq_running_arc.write().await = false;
 
@@ -179,10 +178,7 @@ pub async fn daq_set_selection(
 }
 
 #[tauri::command]
-pub async fn daq_clear(
-    state: State<'_, SharedState>,
-    device_id: String,
-) -> Result<Value, String> {
+pub async fn daq_clear(state: State<'_, SharedState>, device_id: String) -> Result<Value, String> {
     let app = state.read().await;
     let dev = app
         .get_device(&device_id)
@@ -193,10 +189,7 @@ pub async fn daq_clear(
 }
 
 #[tauri::command]
-pub async fn daq_data(
-    state: State<'_, SharedState>,
-    device_id: String,
-) -> Result<Value, String> {
+pub async fn daq_data(state: State<'_, SharedState>, device_id: String) -> Result<Value, String> {
     let app = state.read().await;
     let dev = app
         .get_device(&device_id)

@@ -45,7 +45,9 @@ pub struct HexImage {
 impl HexImage {
     /// Create an empty HexImage (for building from uploaded data)
     pub fn new() -> Self {
-        Self { data: BTreeMap::new() }
+        Self {
+            data: BTreeMap::new(),
+        }
     }
 
     /// Insert raw bytes at `base_address`.
@@ -231,10 +233,7 @@ fn intel_hex_write_ela(output: &mut String, upper: u16) {
     let h = (upper >> 8) as u8;
     let l = upper as u8;
     // sum = len(2) + addr_H(0) + addr_L(0) + type(4) + data_H + data_L
-    let sum: u8 = 0x02u8
-        .wrapping_add(0x04)
-        .wrapping_add(h)
-        .wrapping_add(l);
+    let sum: u8 = 0x02u8.wrapping_add(0x04).wrapping_add(h).wrapping_add(l);
     let cs = (!sum).wrapping_add(1);
     output.push_str(&format!(":02000004{:02X}{:02X}{:02X}\n", h, l, cs));
 }
@@ -590,7 +589,10 @@ mod tests {
         let hex_str = img.to_intel_hex();
         let parsed = HexImage::from_str(&hex_str).unwrap();
         assert_eq!(parsed.total_bytes(), 4);
-        assert_eq!(parsed.extract_range(0x0000, 4, 0xFF), vec![0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(
+            parsed.extract_range(0x0000, 4, 0xFF),
+            vec![0x01, 0x02, 0x03, 0x04]
+        );
     }
 
     #[test]
@@ -600,7 +602,10 @@ mod tests {
         let hex_str = img.to_intel_hex();
         assert!(hex_str.contains(":02000004A038"));
         let parsed = HexImage::from_str(&hex_str).unwrap();
-        assert_eq!(parsed.extract_range(0xA038_0000, 4, 0xFF), vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(
+            parsed.extract_range(0xA038_0000, 4, 0xFF),
+            vec![0xDE, 0xAD, 0xBE, 0xEF]
+        );
     }
 
     #[test]

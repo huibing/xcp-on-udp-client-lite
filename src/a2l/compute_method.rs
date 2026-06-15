@@ -304,7 +304,11 @@ impl CompuMethodFactory {
                 if let Some(ref coeffs) = compu_method.coeffs_linear {
                     tracing::debug!(
                         "CompuMethod '{}': LINEAR a={} b={} → Linear{{factor={}, offset={}}}",
-                        compu_method.name, coeffs.a, coeffs.b, coeffs.a, coeffs.b
+                        compu_method.name,
+                        coeffs.a,
+                        coeffs.b,
+                        coeffs.a,
+                        coeffs.b
                     );
                     CompuMethod::linear(coeffs.a, coeffs.b)
                 } else {

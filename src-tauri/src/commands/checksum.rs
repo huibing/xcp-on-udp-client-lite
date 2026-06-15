@@ -2,7 +2,6 @@
 ///
 /// Ports web/routes.rs hex_load + checksum_verify.
 /// File selection uses tauri-plugin-dialog instead of multipart upload.
-
 use serde_json::{json, Value};
 use tauri::State;
 use xcp_client::hex::HexImage;
@@ -132,8 +131,7 @@ pub async fn checksum_verify(
         }
         let path = a2l_path.clone();
         tokio::task::spawn_blocking(move || {
-            xcp_client::A2lReader::load(&path)
-                .map(|reader| reader.get_memory_segments())
+            xcp_client::A2lReader::load(&path).map(|reader| reader.get_memory_segments())
         })
         .await
         .map_err(|e| format!("Task error: {}", e))?
@@ -151,10 +149,14 @@ pub async fn checksum_verify(
 
     // Run verification (XCP I/O — slave lock only, no state lock)
     let mut slave_guard = slave_arc.lock().await;
-    let report =
-        xcp_client::checksum::verify_segments(&mut slave_guard, &hex_image, &segments, max_block_size)
-            .await
-            .map_err(|e| format!("Verification error: {}", e))?;
+    let report = xcp_client::checksum::verify_segments(
+        &mut slave_guard,
+        &hex_image,
+        &segments,
+        max_block_size,
+    )
+    .await
+    .map_err(|e| format!("Verification error: {}", e))?;
     drop(slave_guard);
 
     // Store report

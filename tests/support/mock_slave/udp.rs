@@ -8,10 +8,10 @@ use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use xcp_client::protocol::{CommandCode, ErrorCode, Mta};
 
+use super::fixture::MOCK_SLAVE_ADDR;
 use super::fixture::{MockFixture, MOCK_EVENT_CHANNEL};
 use super::protocol::{build_frame, negative_response, parse_frame, positive_response};
 use super::state::MockXcpState;
-use super::fixture::MOCK_SLAVE_ADDR;
 
 #[derive(Debug)]
 pub struct MockXcpSlaveServer {
@@ -104,7 +104,9 @@ impl RuntimeState {
             x if x == CommandCode::GetId as u8 => Some(self.handle_get_id().await),
             x if x == CommandCode::SetMta as u8 => Some(self.handle_set_mta(&payload).await),
             x if x == CommandCode::Upload as u8 => Some(self.handle_upload(&payload).await),
-            x if x == CommandCode::ShortUpload as u8 => Some(self.handle_short_upload(&payload).await),
+            x if x == CommandCode::ShortUpload as u8 => {
+                Some(self.handle_short_upload(&payload).await)
+            }
             x if x == CommandCode::ShortDownload as u8 => {
                 Some(self.handle_short_download(&payload).await)
             }
@@ -115,8 +117,12 @@ impl RuntimeState {
             x if x == CommandCode::BuildChecksum as u8 => {
                 Some(self.handle_build_checksum(&payload).await)
             }
-            x if x == CommandCode::GetCalPage as u8 => Some(self.handle_get_cal_page(&payload).await),
-            x if x == CommandCode::SetCalPage as u8 => Some(self.handle_set_cal_page(&payload).await),
+            x if x == CommandCode::GetCalPage as u8 => {
+                Some(self.handle_get_cal_page(&payload).await)
+            }
+            x if x == CommandCode::SetCalPage as u8 => {
+                Some(self.handle_set_cal_page(&payload).await)
+            }
             x if x == CommandCode::GetDaqProcessorInfo as u8 => {
                 Some(self.handle_get_daq_processor_info().await)
             }
@@ -181,7 +187,10 @@ impl RuntimeState {
         }
         let extension = payload[3];
         let address = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-        self.state.lock().await.set_mta(Mta::new(address, extension));
+        self.state
+            .lock()
+            .await
+            .set_mta(Mta::new(address, extension));
         positive_response(&[])
     }
 
@@ -202,7 +211,12 @@ impl RuntimeState {
         let length = payload[1] as usize;
         let extension = payload[3];
         let address = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-        match self.state.lock().await.read_memory(Mta::new(address, extension), length) {
+        match self
+            .state
+            .lock()
+            .await
+            .read_memory(Mta::new(address, extension), length)
+        {
             Ok(data) => positive_response(&data),
             Err(_) => negative_response(ErrorCode::AccessDenied, &[]),
         }
@@ -315,15 +329,7 @@ impl RuntimeState {
     async fn handle_get_daq_resolution_info(&self) -> Vec<u8> {
         let state = self.state.lock().await;
         let ticks = state.fixture.timestamp_ticks.to_le_bytes();
-        positive_response(&[
-            1,
-            4,
-            1,
-            4,
-            state.fixture.timestamp_mode,
-            ticks[0],
-            ticks[1],
-        ])
+        positive_response(&[1, 4, 1, 4, state.fixture.timestamp_mode, ticks[0], ticks[1]])
     }
 
     async fn handle_get_daq_event_info(&self, payload: &[u8]) -> Vec<u8> {
@@ -420,10 +426,13 @@ impl RuntimeState {
         let event_channel = u16::from_le_bytes([payload[4], payload[5]]);
         let prescaler = payload[6];
         let priority = payload[7];
-        self.state
-            .lock()
-            .await
-            .set_daq_list_mode(daq_list, mode, event_channel, prescaler, priority);
+        self.state.lock().await.set_daq_list_mode(
+            daq_list,
+            mode,
+            event_channel,
+            prescaler,
+            priority,
+        );
         positive_response(&[])
     }
 

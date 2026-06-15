@@ -36,10 +36,14 @@ impl Mf4FileCache {
     /// Returns vtab (key→text) pairs for all Value2Text channels in the file.
     fn get_vtab_maps(&self, path: &str) -> HashMap<String, Vec<(f64, String)>> {
         let cache = self.inner.lock().unwrap();
-        let Some(mf4) = cache.get(path) else { return HashMap::new() };
+        let Some(mf4) = cache.get(path) else {
+            return HashMap::new();
+        };
         let mut result = HashMap::new();
         for name in mf4.get_channel_names() {
-            let Some(link) = mf4.get_channel_link(&name) else { continue };
+            let Some(link) = mf4.get_channel_link(&name) else {
+                continue;
+            };
             let cc_type = link.0.get_conversion().get_cc_type();
             if let CcType::Value2Text((keys, texts)) = cc_type {
                 let pairs: Vec<(f64, String)> = keys
@@ -90,7 +94,13 @@ pub(crate) fn resolve_records_dir(requested_dir: &Path, cwd: &Path) -> PathBuf {
 
 pub(crate) fn collect_mf4_files(dir: &Path) -> Result<Vec<Mf4RecordFile>, String> {
     let mut files = std::fs::read_dir(dir)
-        .map_err(|error| format!("Failed to read MF4 directory '{}': {}", dir.display(), error))?
+        .map_err(|error| {
+            format!(
+                "Failed to read MF4 directory '{}': {}",
+                dir.display(),
+                error
+            )
+        })?
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             let path = entry.path();
@@ -124,7 +134,8 @@ pub(crate) fn f64_values_to_le_bytes(values: &[f64]) -> Vec<u8> {
 
 #[tauri::command]
 pub async fn mf4_list_record_files(directory: Option<String>) -> Result<serde_json::Value, String> {
-    let cwd = std::env::current_dir().map_err(|error| format!("Failed to resolve cwd: {}", error))?;
+    let cwd =
+        std::env::current_dir().map_err(|error| format!("Failed to resolve cwd: {}", error))?;
     let requested = PathBuf::from(directory.unwrap_or_else(|| "records".to_string()));
     let resolved = resolve_records_dir(&requested, &cwd);
 
@@ -160,12 +171,11 @@ pub async fn mf4_open_file(
     } else {
         let load_path = path.clone();
         let parsed = tokio::task::spawn_blocking(move || {
-            Mf4Wrapper::new(load_path, Option::<&fn(f64)>::None)
-                .map_err(|error| error.to_string())
+            Mf4Wrapper::new(load_path, Option::<&fn(f64)>::None).map_err(|error| error.to_string())
         })
-            .await
-            .map_err(|error| format!("MF4 load task failed: {}", error))?
-            .map_err(|error| format!("Failed to open MF4 file: {}", error))?;
+        .await
+        .map_err(|error| format!("MF4 load task failed: {}", error))?
+        .map_err(|error| format!("Failed to open MF4 file: {}", error))?;
         let mut parsed_channels = parsed.get_channel_names();
         sort_channel_names(&mut parsed_channels);
         cache.insert(mf4_path.clone(), parsed);
@@ -365,8 +375,8 @@ pub async fn mf4_save_config(path: String, config: Mf4ViewerConfig) -> Result<()
 pub async fn mf4_load_config(path: String) -> Result<Mf4ViewerConfig, String> {
     let toml_str = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read config file '{}': {}", path, e))?;
-    let config: Mf4ViewerConfig = toml::from_str(&toml_str)
-        .map_err(|e| format!("Failed to parse config file: {}", e))?;
+    let config: Mf4ViewerConfig =
+        toml::from_str(&toml_str).map_err(|e| format!("Failed to parse config file: {}", e))?;
     Ok(config)
 }
 
@@ -437,7 +447,10 @@ mod tests {
 
         let files = collect_mf4_files(temp.path()).unwrap();
 
-        let names = files.iter().map(|file| file.name.clone()).collect::<Vec<_>>();
+        let names = files
+            .iter()
+            .map(|file| file.name.clone())
+            .collect::<Vec<_>>();
         assert_eq!(names, vec!["run_a.mf4", "run_b.MF4"]);
     }
 

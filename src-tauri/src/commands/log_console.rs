@@ -63,9 +63,7 @@ where
 
         let entry = LogEntry {
             id,
-            timestamp: chrono::Local::now()
-                .format("%H:%M:%S%.3f")
-                .to_string(),
+            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
             level: event.metadata().level().to_string(),
             target: event.metadata().target().to_string(),
             message: visitor.0,

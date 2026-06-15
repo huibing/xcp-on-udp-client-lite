@@ -2,7 +2,6 @@
 ///
 /// Wraps XcpClient and per-device managers without any HTTP/Axum dependency.
 /// Registered with Tauri via `.manage(Arc<RwLock<TauriAppState>>)`.
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -177,10 +176,7 @@ impl TauriAppState {
         let config = Self::load_config();
         let mut devices = Vec::new();
         for (i, dev) in config.devices.iter().enumerate() {
-            let id = dev
-                .id
-                .clone()
-                .unwrap_or_else(|| format!("device_{}", i));
+            let id = dev.id.clone().unwrap_or_else(|| format!("device_{}", i));
             let mut device = DeviceState::new_empty(id, dev.name.clone());
             device.address = dev.address.clone();
             if let Some(max_cto) = dev.max_cto {
@@ -237,10 +233,7 @@ impl TauriAppState {
             .map(|device| {
                 let mut table = toml::map::Map::new();
                 table.insert("id".into(), toml::Value::String(device.id.clone()));
-                table.insert(
-                    "name".into(),
-                    toml::Value::String(device.display_name()),
-                );
+                table.insert("name".into(), toml::Value::String(device.display_name()));
                 table.insert(
                     "address".into(),
                     toml::Value::String(device.address.clone()),
@@ -401,9 +394,7 @@ pub fn derive_working_hex_path(hex_path: &str) -> String {
     let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("firmware");
     let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("hex");
     let new_name = format!("{}_{}.{}", stem, "working", ext);
-    p.with_file_name(new_name)
-        .to_string_lossy()
-        .into_owned()
+    p.with_file_name(new_name).to_string_lossy().into_owned()
 }
 
 fn convert_characteristic(

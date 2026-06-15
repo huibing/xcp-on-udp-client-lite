@@ -4,7 +4,6 @@
 /// Supports uploading from reference page, working page, or both.
 ///
 /// Progress is reported via the Tauri event `upload-progress` (see `UploadProgressEvent`).
-
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{Emitter, State};
@@ -55,8 +54,7 @@ pub async fn upload_get_segments(
     // If CalibrationManager has no segments, try loading from A2L
     let segments = if segments.is_empty() && !a2l_path.is_empty() {
         tokio::task::spawn_blocking(move || {
-            xcp_client::A2lReader::load(&a2l_path)
-                .map(|reader| reader.get_memory_segments())
+            xcp_client::A2lReader::load(&a2l_path).map(|reader| reader.get_memory_segments())
         })
         .await
         .map_err(|e| format!("Task error: {}", e))?
@@ -147,11 +145,12 @@ pub async fn upload_memory(
                 .unwrap_or_default()
         };
         if a2l_path.is_empty() {
-            return Ok(json!({ "success": false, "error": "No A2L file loaded — cannot determine memory segments" }));
+            return Ok(
+                json!({ "success": false, "error": "No A2L file loaded — cannot determine memory segments" }),
+            );
         }
         tokio::task::spawn_blocking(move || {
-            xcp_client::A2lReader::load(&a2l_path)
-                .map(|reader| reader.get_memory_segments())
+            xcp_client::A2lReader::load(&a2l_path).map(|reader| reader.get_memory_segments())
         })
         .await
         .map_err(|e| format!("Task error: {}", e))?
@@ -171,7 +170,9 @@ pub async fn upload_memory(
         .collect();
 
     if selected.is_empty() {
-        return Ok(json!({ "success": false, "error": "All selected segment indices are out of range" }));
+        return Ok(
+            json!({ "success": false, "error": "All selected segment indices are out of range" }),
+        );
     }
 
     // Determine page sequence
@@ -184,7 +185,13 @@ pub async fn upload_memory(
     // Sanitize device name for use in filenames
     let safe_name: String = device_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     let output_path = std::path::Path::new(&output_folder);
@@ -233,30 +240,43 @@ pub async fn upload_memory(
         let mut image = HexImage::new();
 
         for (seg_idx, seg) in selected.iter().enumerate() {
-            let mta = Mta { address: seg.address, extension: 0 };
-            let (bytes_uploaded, status, message) =
-                match slave_guard.read_large_data(mta, seg.size as usize, None).await {
-                    Ok(data) => {
-                        let uploaded = data.len() as u64;
-                        image.add_data(seg.address, &data);
-                        tracing::info!(
-                            "upload_memory: segment '{}' — {} bytes from {} page",
-                            seg.name,
-                            data.len(),
-                            page_name
-                        );
-                        (uploaded, "uploading", format!("{} – {} bytes", seg.name, uploaded))
-                    }
-                    Err(e) => {
-                        let msg = format!("Segment '{}' upload failed: {}", seg.name, e);
-                        tracing::warn!("upload_memory: {}", msg);
-                        warnings.push(msg.clone());
-                        (0u64, "error", msg)
-                    }
-                };
+            let mta = Mta {
+                address: seg.address,
+                extension: 0,
+            };
+            let (bytes_uploaded, status, message) = match slave_guard
+                .read_large_data(mta, seg.size as usize, None)
+                .await
+            {
+                Ok(data) => {
+                    let uploaded = data.len() as u64;
+                    image.add_data(seg.address, &data);
+                    tracing::info!(
+                        "upload_memory: segment '{}' — {} bytes from {} page",
+                        seg.name,
+                        data.len(),
+                        page_name
+                    );
+                    (
+                        uploaded,
+                        "uploading",
+                        format!("{} – {} bytes", seg.name, uploaded),
+                    )
+                }
+                Err(e) => {
+                    let msg = format!("Segment '{}' upload failed: {}", seg.name, e);
+                    tracing::warn!("upload_memory: {}", msg);
+                    warnings.push(msg.clone());
+                    (0u64, "error", msg)
+                }
+            };
 
             steps_done += 1;
-            let fraction = if total_steps == 0 { 1.0 } else { steps_done as f32 / total_steps as f32 };
+            let fraction = if total_steps == 0 {
+                1.0
+            } else {
+                steps_done as f32 / total_steps as f32
+            };
 
             let _ = app_handle.emit(
                 "upload-progress",
@@ -278,7 +298,10 @@ pub async fn upload_memory(
         }
 
         if image.total_bytes() == 0 {
-            warnings.push(format!("No data uploaded for {} page — file skipped", page_name));
+            warnings.push(format!(
+                "No data uploaded for {} page — file skipped",
+                page_name
+            ));
             continue;
         }
 
@@ -324,9 +347,17 @@ pub async fn upload_memory(
             bytes_uploaded: 0,
             bytes_total,
             fraction: 1.0,
-            status: if files_written.is_empty() { "error" } else { "done" }.to_string(),
+            status: if files_written.is_empty() {
+                "error"
+            } else {
+                "done"
+            }
+            .to_string(),
             message: if files_written.is_empty() {
-                warnings.first().cloned().unwrap_or_else(|| "Upload failed".to_string())
+                warnings
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Upload failed".to_string())
             } else {
                 format!("Done — {} file(s) written", files_written.len())
             },

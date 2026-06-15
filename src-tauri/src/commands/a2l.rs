@@ -2,7 +2,6 @@
 ///
 /// Uses a file path (from the Tauri dialog plugin) instead of multipart upload
 /// and mirrors the web slave-management behavior.
-
 use serde_json::{json, Value};
 use tauri::State;
 use xcp_client::a2l::{A2lReader, A2lTransportConfig};
@@ -128,7 +127,11 @@ pub async fn load_a2l(
         let segments = cal_manager_arc.read().await.get_memory_segments().to_vec();
         xcp_guard.set_memory_segments(segments, Some(std::path::PathBuf::from(&file_path)));
         if let Err(error) = xcp_guard.update_segment_page_state().await {
-            tracing::warn!("Page state query failed after A2L reload for {}: {}", device_id, error);
+            tracing::warn!(
+                "Page state query failed after A2L reload for {}: {}",
+                device_id,
+                error
+            );
         }
     }
 

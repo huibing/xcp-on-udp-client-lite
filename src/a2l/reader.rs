@@ -958,7 +958,10 @@ impl A2lReader {
         module: &a2lfile::Module,
     ) -> Option<AxisInfo> {
         let name = axis_descr.input_quantity.clone();
-        let pts_ref_name = axis_descr.axis_pts_ref.as_ref().map(|r| r.axis_points.clone());
+        let pts_ref_name = axis_descr
+            .axis_pts_ref
+            .as_ref()
+            .map(|r| r.axis_points.clone());
         let num_points = axis_descr.max_axis_points as usize;
         let min = axis_descr.lower_limit;
         let max = axis_descr.upper_limit;

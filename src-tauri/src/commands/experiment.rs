@@ -1,13 +1,14 @@
 /// Experiment workflow Tauri commands.
 ///
 /// Ports web/routes.rs experiment_* handlers.
-
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 use xcp_client::slave::PageMode;
 
 use crate::commands::daq_live::spawn_live_daq_event_pump;
-use crate::commands::helpers::{bytes_to_calibration_value, read_axis_values_from_slave, read_axis_values_from_hex};
+use crate::commands::helpers::{
+    bytes_to_calibration_value, read_axis_values_from_hex, read_axis_values_from_slave,
+};
 use crate::state::SharedState;
 
 /// Return all measurements and calibration params across all devices.
@@ -90,12 +91,14 @@ pub async fn experiment_events(state: State<'_, SharedState>) -> Result<Value, S
         let events: Vec<Value> = daq_mgr
             .get_available_events()
             .iter()
-            .map(|e| json!({
-                "channel": e.channel,
-                "name": e.name,
-                "short_name": e.short_name,
-                "cycle_time_ms": e.cycle_time_ms(),
-            }))
+            .map(|e| {
+                json!({
+                    "channel": e.channel,
+                    "name": e.name,
+                    "short_name": e.short_name,
+                    "cycle_time_ms": e.cycle_time_ms(),
+                })
+            })
             .collect();
 
         devices.push(json!({
@@ -188,8 +191,8 @@ pub async fn experiment_set_event(
     event_channel: u16,
 ) -> Result<Value, String> {
     let app = state.read().await;
-    let dev = find_device(&app, &device_id)
-        .ok_or_else(|| format!("Device '{}' not found", device_id))?;
+    let dev =
+        find_device(&app, &device_id).ok_or_else(|| format!("Device '{}' not found", device_id))?;
 
     if *dev.daq_running.read().await {
         return Err("Cannot change event while DAQ is running — stop DAQ first".to_string());
@@ -222,7 +225,11 @@ pub async fn experiment_start(
     for (device_id_str, indices_val) in &selections {
         let indices: Vec<usize> = indices_val
             .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as usize))
+                    .collect()
+            })
             .unwrap_or_default();
         if indices.is_empty() {
             continue;
@@ -273,12 +280,12 @@ pub async fn experiment_start(
             }
             // Apply per-measurement event channel assignments if provided
             if let Some(events_map) = config.get("events").and_then(|v| v.as_object()) {
-                if let Some(dev_events) = events_map.get(device_id_str).and_then(|v| v.as_object()) {
+                if let Some(dev_events) = events_map.get(device_id_str).and_then(|v| v.as_object())
+                {
                     for (idx_str, ch_val) in dev_events {
-                        if let (Ok(idx), Some(ch)) = (
-                            idx_str.parse::<usize>(),
-                            ch_val.as_u64().map(|c| c as u16),
-                        ) {
+                        if let (Ok(idx), Some(ch)) =
+                            (idx_str.parse::<usize>(), ch_val.as_u64().map(|c| c as u16))
+                        {
                             daq_mgr.set_measurement_event(idx, ch);
                         }
                     }
@@ -537,8 +544,8 @@ pub async fn experiment_rename_slave(
         return Ok(json!({ "success": false, "error": "Name is required" }));
     }
     let app = state.read().await;
-    let dev = find_device(&app, &device_id)
-        .ok_or_else(|| format!("Device '{}' not found", device_id))?;
+    let dev =
+        find_device(&app, &device_id).ok_or_else(|| format!("Device '{}' not found", device_id))?;
     *dev.custom_name.write().await = Some(trimmed.clone());
     Ok(json!({ "success": true, "name": trimmed }))
 }
@@ -578,7 +585,9 @@ pub async fn experiment_checksum(
                 segments,
                 a2l_path,
                 dev.checksum_report.clone(),
-                dev.slave_id.map(|s| s.to_string()).unwrap_or_else(|| dev.id.clone()),
+                dev.slave_id
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| dev.id.clone()),
                 dev.display_name(),
             ));
         }
@@ -632,7 +641,9 @@ pub async fn experiment_checksum(
         }
 
         let mut slave_guard = slave_arc.lock().await;
-        match xcp_client::checksum::verify_segments(&mut slave_guard, &hex_image, &segments, None).await {
+        match xcp_client::checksum::verify_segments(&mut slave_guard, &hex_image, &segments, None)
+            .await
+        {
             Ok(report) => {
                 let passed = report.all_passed();
                 *report_arc.write().await = Some(report.clone());
@@ -665,7 +676,8 @@ pub async fn experiment_checksum(
     }
 
     let all_passed = results.iter().all(|r| {
-        r["success"].as_bool().unwrap_or(false) && r.get("passed").and_then(|v| v.as_bool()).unwrap_or(false)
+        r["success"].as_bool().unwrap_or(false)
+            && r.get("passed").and_then(|v| v.as_bool()).unwrap_or(false)
     });
 
     Ok(json!({
@@ -752,10 +764,10 @@ pub async fn experiment_dcm_export(
     state: State<'_, SharedState>,
     config: Value,
 ) -> Result<Value, String> {
-    use xcp_client::a2l::CharacteristicType;
-    use dcm_utils::{write_dcm_data, DcmData};
     use dcm_utils::block::Block;
     use dcm_utils::blocks::{FESTWERT, FESTWERTEBLOCK, GRUPPENKENNFELD, GRUPPENKENNLINIE};
+    use dcm_utils::{write_dcm_data, DcmData};
+    use xcp_client::a2l::CharacteristicType;
 
     let path = config
         .get("path")
@@ -769,10 +781,15 @@ pub async fn experiment_dcm_export(
         .unwrap_or("export")
         .to_string();
 
-    let filter_ids: Option<Vec<String>> = config
-        .get("device_ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+    let filter_ids: Option<Vec<String>> =
+        config
+            .get("device_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
 
     // Optional per-variable filter: [{device_id, name}]
     // If provided, only export those specific variables.
@@ -835,15 +852,30 @@ pub async fn experiment_dcm_export(
             let unit = param.unit.clone().unwrap_or_default();
 
             // Resolve axis values: static first, then XCP/HEX for Memory-type axes
-            let axis_values: Vec<Vec<f64>> = if param.axis_info.iter().all(|a| a.get_static_values().is_some()) {
-                param.axis_info.iter().map(|a| a.get_static_values().unwrap()).collect()
+            let axis_values: Vec<Vec<f64>> = if param
+                .axis_info
+                .iter()
+                .all(|a| a.get_static_values().is_some())
+            {
+                param
+                    .axis_info
+                    .iter()
+                    .map(|a| a.get_static_values().unwrap())
+                    .collect()
             } else if let Some(ref slave) = slave_opt {
                 let slave_guard = slave.lock().await;
                 read_axis_values_from_slave(&slave_guard, param).await
             } else if let Some(ref hex) = hex_opt {
                 read_axis_values_from_hex(hex, param)
             } else {
-                param.axis_info.iter().map(|a| a.get_static_values().unwrap_or_else(|| (0..a.num_points).map(|i| i as f64).collect())).collect()
+                param
+                    .axis_info
+                    .iter()
+                    .map(|a| {
+                        a.get_static_values()
+                            .unwrap_or_else(|| (0..a.num_points).map(|i| i as f64).collect())
+                    })
+                    .collect()
             };
 
             let get_axis = |axis_idx: usize, fallback_n: usize| -> Vec<f64> {
@@ -855,15 +887,26 @@ pub async fn experiment_dcm_export(
 
             let block_opt: Option<Block> = match param.characteristic_type {
                 CharacteristicType::Value => dcm_f64(&value).map(|v| {
-                    Block::Constant(FESTWERT::from_f64(name.clone(), v, desc.clone(), unit.clone()))
+                    Block::Constant(FESTWERT::from_f64(
+                        name.clone(),
+                        v,
+                        desc.clone(),
+                        unit.clone(),
+                    ))
                 }),
 
                 CharacteristicType::Curve => dcm_f64_array(&value).map(|values| {
                     let n = values.len();
                     let axis_info = param.axis_info.first();
                     let axis = get_axis(0, n);
-                    let axis_name = axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
-                    let unit_x = axis_info.and_then(|a| a.unit.as_deref()).unwrap_or("").to_string();
+                    let axis_name = axis_info
+                        .map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str()))
+                        .unwrap_or("")
+                        .to_string();
+                    let unit_x = axis_info
+                        .and_then(|a| a.unit.as_deref())
+                        .unwrap_or("")
+                        .to_string();
                     Block::Table(GRUPPENKENNLINIE::from_f64(
                         &name, &values, &desc, &unit, &unit_x, &axis_name, &axis,
                     ))
@@ -876,15 +919,34 @@ pub async fn experiment_dcm_export(
                     let y_axis_info = param.axis_info.get(1);
                     let x_axis = get_axis(0, x_count);
                     let y_axis = get_axis(1, y_count);
-                    let x_name = x_axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
-                    let y_name = y_axis_info.map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str())).unwrap_or("").to_string();
-                    let unit_x = x_axis_info.and_then(|a| a.unit.as_deref()).unwrap_or("").to_string();
-                    let unit_y = y_axis_info.and_then(|a| a.unit.as_deref()).unwrap_or("").to_string();
+                    let x_name = x_axis_info
+                        .map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str()))
+                        .unwrap_or("")
+                        .to_string();
+                    let y_name = y_axis_info
+                        .map(|a| a.pts_ref_name.as_deref().unwrap_or(a.name.as_str()))
+                        .unwrap_or("")
+                        .to_string();
+                    let unit_x = x_axis_info
+                        .and_then(|a| a.unit.as_deref())
+                        .unwrap_or("")
+                        .to_string();
+                    let unit_y = y_axis_info
+                        .and_then(|a| a.unit.as_deref())
+                        .unwrap_or("")
+                        .to_string();
                     let dcm_matrix: Vec<Vec<f64>> = (0..y_count)
-                        .map(|y| (0..x_count).map(|x| matrix.get(x).and_then(|r| r.get(y)).copied().unwrap_or(0.0)).collect())
+                        .map(|y| {
+                            (0..x_count)
+                                .map(|x| {
+                                    matrix.get(x).and_then(|r| r.get(y)).copied().unwrap_or(0.0)
+                                })
+                                .collect()
+                        })
                         .collect();
                     Block::Map(GRUPPENKENNFELD::from_f64(
-                        &name, dcm_matrix, x_axis, y_axis, &x_name, &y_name, &desc, &unit, &unit_x, &unit_y,
+                        &name, dcm_matrix, x_axis, y_axis, &x_name, &y_name, &desc, &unit, &unit_x,
+                        &unit_y,
                     ))
                 }),
 
@@ -893,7 +955,12 @@ pub async fn experiment_dcm_export(
                         dcm_f64_matrix(&value).map(|m| m.into_iter().flatten().collect())
                     });
                     flat.map(|values| {
-                        Block::ConstantBlock(FESTWERTEBLOCK::from_f64(name.clone(), values, desc.clone(), unit.clone()))
+                        Block::ConstantBlock(FESTWERTEBLOCK::from_f64(
+                            name.clone(),
+                            values,
+                            desc.clone(),
+                            unit.clone(),
+                        ))
                     })
                 }
 
@@ -910,7 +977,9 @@ pub async fn experiment_dcm_export(
     drop(app);
 
     if exported == 0 {
-        return Ok(json!({ "success": false, "error": "No cached calibration values to export. Read calibration values first." }));
+        return Ok(
+            json!({ "success": false, "error": "No cached calibration values to export. Read calibration values first." }),
+        );
     }
 
     #[cfg(debug_assertions)]
@@ -958,7 +1027,9 @@ fn dcm_f64_array(value: &xcp_client::calibration::CalibrationValue) -> Option<Ve
         CalibrationValue::I64Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
         CalibrationValue::F32Array(a) => Some(a.iter().map(|v| *v as f64).collect()),
         CalibrationValue::F64Array(a) => Some(a.clone()),
-        CalibrationValue::BoolArray(a) => Some(a.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect()),
+        CalibrationValue::BoolArray(a) => {
+            Some(a.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect())
+        }
         _ => None,
     }
 }
@@ -966,7 +1037,13 @@ fn dcm_f64_array(value: &xcp_client::calibration::CalibrationValue) -> Option<Ve
 fn dcm_f64_matrix(value: &xcp_client::calibration::CalibrationValue) -> Option<Vec<Vec<f64>>> {
     use xcp_client::calibration::CalibrationValue;
     macro_rules! to_f64_matrix {
-        ($m:expr) => { Some($m.iter().map(|r| r.iter().map(|v| *v as f64).collect()).collect()) };
+        ($m:expr) => {
+            Some(
+                $m.iter()
+                    .map(|r| r.iter().map(|v| *v as f64).collect())
+                    .collect(),
+            )
+        };
     }
     match value {
         CalibrationValue::U8Matrix(m) => to_f64_matrix!(m),
@@ -977,9 +1054,17 @@ fn dcm_f64_matrix(value: &xcp_client::calibration::CalibrationValue) -> Option<V
         CalibrationValue::I16Matrix(m) => to_f64_matrix!(m),
         CalibrationValue::I32Matrix(m) => to_f64_matrix!(m),
         CalibrationValue::I64Matrix(m) => to_f64_matrix!(m),
-        CalibrationValue::F32Matrix(m) => Some(m.iter().map(|r| r.iter().map(|v| *v as f64).collect()).collect()),
+        CalibrationValue::F32Matrix(m) => Some(
+            m.iter()
+                .map(|r| r.iter().map(|v| *v as f64).collect())
+                .collect(),
+        ),
         CalibrationValue::F64Matrix(m) => Some(m.clone()),
-        CalibrationValue::BoolMatrix(m) => Some(m.iter().map(|r| r.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect()).collect()),
+        CalibrationValue::BoolMatrix(m) => Some(
+            m.iter()
+                .map(|r| r.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect())
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -1051,7 +1136,10 @@ pub async fn experiment_cal_original(
     let formatted = value.format_scalar_str();
     drop(hex_guard);
 
-    cal_original_arc.write().await.insert(idx, formatted.clone());
+    cal_original_arc
+        .write()
+        .await
+        .insert(idx, formatted.clone());
 
     Ok(json!({ "success": true, "value": formatted }))
 }
@@ -1201,7 +1289,13 @@ fn find_device<'a>(
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -1218,8 +1312,8 @@ pub async fn write_text_file(path: String, content: String) -> Result<Value, Str
 /// Read a text file from the given absolute path and return its contents.
 #[tauri::command]
 pub async fn read_text_file(path: String) -> Result<Value, String> {
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read '{}': {}", path, e))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read '{}': {}", path, e))?;
     Ok(json!({ "success": true, "content": content }))
 }
 

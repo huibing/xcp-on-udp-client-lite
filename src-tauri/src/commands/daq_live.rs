@@ -125,7 +125,10 @@ mod tests {
         let _ = task.await;
 
         let payloads = emitter.payloads();
-        assert!(!payloads.is_empty(), "expected at least one daq-data payload");
+        assert!(
+            !payloads.is_empty(),
+            "expected at least one daq-data payload"
+        );
         assert_eq!(payloads[0]["device_id"], "slave-1");
         assert_eq!(payloads[0]["values"]["rpm"], 1234.0);
     }

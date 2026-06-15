@@ -11,8 +11,8 @@ use crate::daq::DaqManager;
 use crate::hex::HexImage;
 use crate::slave::{PageMode, SlaveId, SlaveInfo};
 use crate::transport::TransportType;
-use crate::web::compare::{CompareSession, CompareSide, CompareSource};
 use crate::variable::{DeviceVariable, VariableSearchManager};
+use crate::web::compare::{CompareSession, CompareSide, CompareSource};
 use crate::web::templates::TemplateEngine;
 use crate::XcpClient;
 use std::collections::HashMap;
@@ -543,11 +543,7 @@ impl AppState {
         session
     }
 
-    pub async fn rename_compare_session(
-        &self,
-        id: &str,
-        new_name: &str,
-    ) -> Option<CompareSession> {
+    pub async fn rename_compare_session(&self, id: &str, new_name: &str) -> Option<CompareSession> {
         let mut sessions = self.compare_sessions.write().await;
         let session = sessions.iter_mut().find(|session| session.id == id)?;
         session.name = new_name.trim().to_string();

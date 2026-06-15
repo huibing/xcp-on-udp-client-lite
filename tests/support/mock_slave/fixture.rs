@@ -55,7 +55,10 @@ impl Default for MockFixture {
         params_working_page[0..4].copy_from_slice(&100u32.to_le_bytes());
         params_working_page[4..8].copy_from_slice(&10_000u32.to_le_bytes());
         params_working_page[8..12].copy_from_slice(&[0, 1, 2, 3]);
-        for (idx, byte) in params_working_page[12..12 + PARAM_MATRIX_LEN].iter_mut().enumerate() {
+        for (idx, byte) in params_working_page[12..12 + PARAM_MATRIX_LEN]
+            .iter_mut()
+            .enumerate()
+        {
             *byte = idx as u8;
         }
         params_working_page[0x2C] = 1;

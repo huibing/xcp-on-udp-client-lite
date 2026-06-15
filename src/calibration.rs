@@ -461,9 +461,7 @@ impl CalibrationParam {
             .enum_options()
             .map(|opts| {
                 opts.iter()
-                    .map(|opt| {
-                        serde_json::json!({"raw": opt.raw_value, "text": opt.text_value})
-                    })
+                    .map(|opt| serde_json::json!({"raw": opt.raw_value, "text": opt.text_value}))
                     .collect()
             })
             .unwrap_or_default();
@@ -953,9 +951,15 @@ impl CalibrationManager {
                 ))
             }
             CalibrationType::Ascii(n) => {
-                let s = String::from_utf8_lossy(data.iter().take(*n).copied().collect::<Vec<u8>>().as_slice())
-                    .trim_end_matches('\0')
-                    .to_string();
+                let s = String::from_utf8_lossy(
+                    data.iter()
+                        .take(*n)
+                        .copied()
+                        .collect::<Vec<u8>>()
+                        .as_slice(),
+                )
+                .trim_end_matches('\0')
+                .to_string();
                 CalibrationValue::Ascii(s)
             }
         };
@@ -1500,7 +1504,9 @@ impl CalibrationManager {
                 let flat = flat.map_err(|_| "Invalid F32 value")?;
                 tracing::debug!(
                     "parse_value F32Matrix: rows={}, cols={}, flat values (first 16): {:?}",
-                    rows, cols, &flat[..flat.len().min(16)]
+                    rows,
+                    cols,
+                    &flat[..flat.len().min(16)]
                 );
                 let mut matrix = Vec::with_capacity(*rows);
                 for r in 0..*rows {
@@ -1540,9 +1546,7 @@ impl CalibrationManager {
                 }
                 Ok(CalibrationValue::BoolMatrix(matrix))
             }
-            CalibrationType::Ascii(_) => {
-                Ok(CalibrationValue::Ascii(input.to_string()))
-            }
+            CalibrationType::Ascii(_) => Ok(CalibrationValue::Ascii(input.to_string())),
         }
     }
 

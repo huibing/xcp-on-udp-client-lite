@@ -1,6 +1,8 @@
 use crate::calibration::{CalibrationManager, CalibrationParam, CalibrationValue};
 use crate::hex::HexImage;
-use crate::web::calibration_data::{format_raw_hex, read_axis_values_from_hex, read_calibration_from_hex};
+use crate::web::calibration_data::{
+    format_raw_hex, read_axis_values_from_hex, read_calibration_from_hex,
+};
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -213,8 +215,6 @@ impl Clone for CompareSource {
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct CompareVariable {
     pub name: String,
@@ -307,9 +307,16 @@ impl CompareSource {
         if let Some(lazy) = &self.hex_lazy {
             if let Some(param) = lazy.params.get(name) {
                 let value = read_calibration_from_hex(&lazy.hex, param).ok()?;
-                let raw_bytes = lazy.hex.extract_range(param.address, param.data_type.size() as u32, 0xFF);
+                let raw_bytes =
+                    lazy.hex
+                        .extract_range(param.address, param.data_type.size() as u32, 0xFF);
                 let axis_values = read_axis_values_from_hex(&lazy.hex, param);
-                return Some(make_compare_variable(param, value, format_raw_hex(&raw_bytes), axis_values));
+                return Some(make_compare_variable(
+                    param,
+                    value,
+                    format_raw_hex(&raw_bytes),
+                    axis_values,
+                ));
             }
         }
         None
@@ -383,7 +390,11 @@ impl CompareSession {
         }
 
         let search = search.trim().to_ascii_lowercase();
-        let selected = self.selected_variables.iter().cloned().collect::<BTreeSet<_>>();
+        let selected = self
+            .selected_variables
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let items = names
             .into_iter()
             .filter_map(|name| {
@@ -421,7 +432,11 @@ impl CompareSession {
             .collect::<Vec<_>>();
 
         let total = items.len();
-        let page = items.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+        let page = items
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
         json!({
             "total": total,
             "offset": offset,
@@ -519,75 +534,254 @@ fn atom_from_bool(value: bool) -> CompareAtom {
     CompareAtom::new(value.to_string(), None)
 }
 
-fn grid_from_calibration_value(param: &CalibrationParam, value: &CalibrationValue) -> CompareValueGrid {
+fn grid_from_calibration_value(
+    param: &CalibrationParam,
+    value: &CalibrationValue,
+) -> CompareValueGrid {
     match value {
-        CalibrationValue::U8(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_i64(*v as i64, param)]]),
-        CalibrationValue::U16(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_i64(*v as i64, param)]]),
-        CalibrationValue::U32(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_i64(*v as i64, param)]]),
-        CalibrationValue::U64(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_i64(*v as i64, param)]]),
-        CalibrationValue::I8(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_i64(*v as i64, param)]]),
-        CalibrationValue::I16(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_i64(*v as i64, param)]]),
-        CalibrationValue::I32(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_i64(*v as i64, param)]]),
-        CalibrationValue::I64(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_i64(*v, param)]]),
-        CalibrationValue::F32(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_f64(*v as f64)]]),
-        CalibrationValue::F64(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_f64(*v)]]),
-        CalibrationValue::Bool(v) => CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_bool(*v)]]),
-        CalibrationValue::U8Array(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_i64(*v as i64, param)).collect()]),
-        CalibrationValue::U16Array(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_i64(*v as i64, param)).collect()]),
-        CalibrationValue::U32Array(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_i64(*v as i64, param)).collect()]),
-        CalibrationValue::U64Array(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_i64(*v as i64, param)).collect()]),
-        CalibrationValue::I8Array(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_i64(*v as i64, param)).collect()]),
-        CalibrationValue::I16Array(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_i64(*v as i64, param)).collect()]),
-        CalibrationValue::I32Array(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_i64(*v as i64, param)).collect()]),
-        CalibrationValue::I64Array(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_i64(*v, param)).collect()]),
-        CalibrationValue::F32Array(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_f64(*v as f64)).collect()]),
-        CalibrationValue::F64Array(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_f64(*v)).collect()]),
-        CalibrationValue::BoolArray(values) => CompareValueGrid::new(CompareValueKind::Array, vec![values.iter().map(|v| atom_from_bool(*v)).collect()]),
+        CalibrationValue::U8(v) => CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![atom_from_i64(*v as i64, param)]],
+        ),
+        CalibrationValue::U16(v) => CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![atom_from_i64(*v as i64, param)]],
+        ),
+        CalibrationValue::U32(v) => CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![atom_from_i64(*v as i64, param)]],
+        ),
+        CalibrationValue::U64(v) => CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![atom_from_i64(*v as i64, param)]],
+        ),
+        CalibrationValue::I8(v) => CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![atom_from_i64(*v as i64, param)]],
+        ),
+        CalibrationValue::I16(v) => CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![atom_from_i64(*v as i64, param)]],
+        ),
+        CalibrationValue::I32(v) => CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![atom_from_i64(*v as i64, param)]],
+        ),
+        CalibrationValue::I64(v) => CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![atom_from_i64(*v, param)]],
+        ),
+        CalibrationValue::F32(v) => CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![atom_from_f64(*v as f64)]],
+        ),
+        CalibrationValue::F64(v) => {
+            CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_f64(*v)]])
+        }
+        CalibrationValue::Bool(v) => {
+            CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_bool(*v)]])
+        }
+        CalibrationValue::U8Array(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values
+                .iter()
+                .map(|v| atom_from_i64(*v as i64, param))
+                .collect()],
+        ),
+        CalibrationValue::U16Array(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values
+                .iter()
+                .map(|v| atom_from_i64(*v as i64, param))
+                .collect()],
+        ),
+        CalibrationValue::U32Array(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values
+                .iter()
+                .map(|v| atom_from_i64(*v as i64, param))
+                .collect()],
+        ),
+        CalibrationValue::U64Array(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values
+                .iter()
+                .map(|v| atom_from_i64(*v as i64, param))
+                .collect()],
+        ),
+        CalibrationValue::I8Array(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values
+                .iter()
+                .map(|v| atom_from_i64(*v as i64, param))
+                .collect()],
+        ),
+        CalibrationValue::I16Array(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values
+                .iter()
+                .map(|v| atom_from_i64(*v as i64, param))
+                .collect()],
+        ),
+        CalibrationValue::I32Array(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values
+                .iter()
+                .map(|v| atom_from_i64(*v as i64, param))
+                .collect()],
+        ),
+        CalibrationValue::I64Array(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values.iter().map(|v| atom_from_i64(*v, param)).collect()],
+        ),
+        CalibrationValue::F32Array(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values.iter().map(|v| atom_from_f64(*v as f64)).collect()],
+        ),
+        CalibrationValue::F64Array(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values.iter().map(|v| atom_from_f64(*v)).collect()],
+        ),
+        CalibrationValue::BoolArray(values) => CompareValueGrid::new(
+            CompareValueKind::Array,
+            vec![values.iter().map(|v| atom_from_bool(*v)).collect()],
+        ),
         // CalibrationValue::*Matrix stores values[x][y] (outer=X axis, inner=Y axis).
         // The display convention is cells[y][x] (outer=Y rows, inner=X columns), so we transpose.
         CalibrationValue::U8Matrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_i64(values[x][y] as i64, param)).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| {
+                        (0..xn)
+                            .map(|x| atom_from_i64(values[x][y] as i64, param))
+                            .collect()
+                    })
+                    .collect(),
+            )
         }
         CalibrationValue::U16Matrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_i64(values[x][y] as i64, param)).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| {
+                        (0..xn)
+                            .map(|x| atom_from_i64(values[x][y] as i64, param))
+                            .collect()
+                    })
+                    .collect(),
+            )
         }
         CalibrationValue::U32Matrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_i64(values[x][y] as i64, param)).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| {
+                        (0..xn)
+                            .map(|x| atom_from_i64(values[x][y] as i64, param))
+                            .collect()
+                    })
+                    .collect(),
+            )
         }
         CalibrationValue::U64Matrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_i64(values[x][y] as i64, param)).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| {
+                        (0..xn)
+                            .map(|x| atom_from_i64(values[x][y] as i64, param))
+                            .collect()
+                    })
+                    .collect(),
+            )
         }
         CalibrationValue::I8Matrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_i64(values[x][y] as i64, param)).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| {
+                        (0..xn)
+                            .map(|x| atom_from_i64(values[x][y] as i64, param))
+                            .collect()
+                    })
+                    .collect(),
+            )
         }
         CalibrationValue::I16Matrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_i64(values[x][y] as i64, param)).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| {
+                        (0..xn)
+                            .map(|x| atom_from_i64(values[x][y] as i64, param))
+                            .collect()
+                    })
+                    .collect(),
+            )
         }
         CalibrationValue::I32Matrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_i64(values[x][y] as i64, param)).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| {
+                        (0..xn)
+                            .map(|x| atom_from_i64(values[x][y] as i64, param))
+                            .collect()
+                    })
+                    .collect(),
+            )
         }
         CalibrationValue::I64Matrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_i64(values[x][y], param)).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| {
+                        (0..xn)
+                            .map(|x| atom_from_i64(values[x][y], param))
+                            .collect()
+                    })
+                    .collect(),
+            )
         }
         CalibrationValue::F32Matrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_f64(values[x][y] as f64)).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| {
+                        (0..xn)
+                            .map(|x| atom_from_f64(values[x][y] as f64))
+                            .collect()
+                    })
+                    .collect(),
+            )
         }
         CalibrationValue::F64Matrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_f64(values[x][y])).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| (0..xn).map(|x| atom_from_f64(values[x][y])).collect())
+                    .collect(),
+            )
         }
         CalibrationValue::BoolMatrix(values) => {
             let (xn, yn) = (values.len(), values.first().map(|r| r.len()).unwrap_or(0));
-            CompareValueGrid::new(CompareValueKind::Matrix, (0..yn).map(|y| (0..xn).map(|x| atom_from_bool(values[x][y])).collect()).collect())
+            CompareValueGrid::new(
+                CompareValueKind::Matrix,
+                (0..yn)
+                    .map(|y| (0..xn).map(|x| atom_from_bool(values[x][y])).collect())
+                    .collect(),
+            )
         }
         CalibrationValue::Ascii(s) => CompareValueGrid::new(
             CompareValueKind::Scalar,
@@ -598,9 +792,10 @@ fn grid_from_calibration_value(param: &CalibrationParam, value: &CalibrationValu
 
 fn grid_from_dcm_scalar(value: &DcmValue) -> Result<CompareValueGrid, String> {
     match value {
-        DcmValue::WERT(values) if values.len() == 1 => {
-            Ok(CompareValueGrid::new(CompareValueKind::Scalar, vec![vec![atom_from_f64(values[0])]]))
-        }
+        DcmValue::WERT(values) if values.len() == 1 => Ok(CompareValueGrid::new(
+            CompareValueKind::Scalar,
+            vec![vec![atom_from_f64(values[0])]],
+        )),
         DcmValue::TEXT(values) if values.len() == 1 => Ok(CompareValueGrid::new(
             CompareValueKind::Scalar,
             vec![vec![CompareAtom::new(values[0].clone(), None)]],
@@ -644,8 +839,16 @@ fn grid_from_dcm_map(map: &dcm_utils::blocks::GRUPPENKENNFELD) -> Result<Compare
                 DcmValue::TEXT(_) => None,
             })
             .collect();
-        let used_nrow = if dcm_rows.is_empty() { y_count } else { dcm_rows.len() };
-        let used_ncol = dcm_rows.first().map(|r| r.len()).filter(|&n| n > 0).unwrap_or(x_count);
+        let used_nrow = if dcm_rows.is_empty() {
+            y_count
+        } else {
+            dcm_rows.len()
+        };
+        let used_ncol = dcm_rows
+            .first()
+            .map(|r| r.len())
+            .filter(|&n| n > 0)
+            .unwrap_or(x_count);
         if dcm_rows.len() != y_count || used_ncol != x_count {
             tracing::warn!(
                 "DCM MAP '{}' declared {}×{} but only {}×{} values parsed; padding missing cells with 0",
@@ -678,12 +881,24 @@ fn grid_from_dcm_map(map: &dcm_utils::blocks::GRUPPENKENNFELD) -> Result<Compare
             DcmValue::WERT(_) => None,
         })
         .collect();
-    let used_nrow = if text_rows.is_empty() { y_count } else { text_rows.len() };
-    let used_ncol = text_rows.first().map(|r| r.len()).filter(|&n| n > 0).unwrap_or(x_count);
+    let used_nrow = if text_rows.is_empty() {
+        y_count
+    } else {
+        text_rows.len()
+    };
+    let used_ncol = text_rows
+        .first()
+        .map(|r| r.len())
+        .filter(|&n| n > 0)
+        .unwrap_or(x_count);
     if text_rows.len() != y_count || used_ncol != x_count {
         tracing::warn!(
             "DCM MAP '{}' text declared {}×{} but only {}×{} values parsed; padding with '?'",
-            map.name, x_count, y_count, text_rows.len(), used_ncol,
+            map.name,
+            x_count,
+            y_count,
+            text_rows.len(),
+            used_ncol,
         );
     }
     let mut cells = Vec::with_capacity(used_nrow);
@@ -729,10 +944,12 @@ fn make_compare_variable(
 
 fn write_temp_file(prefix: &str, filename: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     let temp_dir = std::env::temp_dir().join("xcp_client_compare");
-    std::fs::create_dir_all(&temp_dir).map_err(|error| format!("Failed to create temp dir: {}", error))?;
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|error| format!("Failed to create temp dir: {}", error))?;
     let safe_name = filename.replace(['/', '\\', ':'], "_");
     let path = temp_dir.join(format!("{}_{}_{}", prefix, uuid::Uuid::new_v4(), safe_name));
-    std::fs::write(&path, bytes).map_err(|error| format!("Failed to write temp file: {}", error))?;
+    std::fs::write(&path, bytes)
+        .map_err(|error| format!("Failed to write temp file: {}", error))?;
     Ok(path)
 }
 
@@ -751,7 +968,8 @@ pub fn load_a2l_hex_source(
         let cal_manager = CalibrationManager::from_a2l(&a2l_path)?;
         let hex_content = std::str::from_utf8(hex_bytes)
             .map_err(|error| format!("Invalid UTF-8 in HEX file: {}", error))?;
-        let hex = HexImage::from_str(hex_content).map_err(|error| format!("HEX parse error: {}", error))?;
+        let hex = HexImage::from_str(hex_content)
+            .map_err(|error| format!("HEX parse error: {}", error))?;
 
         // Build a name → param map for lazy value reading.
         let params: HashMap<String, CalibrationParam> = cal_manager
@@ -781,26 +999,17 @@ pub fn load_dcm_source(filename: &str, bytes: &[u8]) -> Result<CompareSource, St
             // Normalize DCM type names to A2L characteristic type equivalents
             // so type filtering works consistently across source kinds.
             let (type_name, value) = match block {
-                DcmBlock::Constant(value) => (
-                    "VALUE".to_string(),
-                    grid_from_dcm_scalar(&value.value)?,
-                ),
-                DcmBlock::ConstantBlock(value) => (
-                    "VAL_BLK".to_string(),
-                    grid_from_dcm_array(&value.value),
-                ),
-                DcmBlock::Table(value) => (
-                    "CURVE".to_string(),
-                    grid_from_dcm_array(&value.value),
-                ),
-                DcmBlock::Distribution(value) => (
-                    "AXIS".to_string(),
-                    grid_from_dcm_array(&value.value),
-                ),
-                DcmBlock::Map(value) => (
-                    "MAP".to_string(),
-                    grid_from_dcm_map(value)?,
-                ),
+                DcmBlock::Constant(value) => {
+                    ("VALUE".to_string(), grid_from_dcm_scalar(&value.value)?)
+                }
+                DcmBlock::ConstantBlock(value) => {
+                    ("VAL_BLK".to_string(), grid_from_dcm_array(&value.value))
+                }
+                DcmBlock::Table(value) => ("CURVE".to_string(), grid_from_dcm_array(&value.value)),
+                DcmBlock::Distribution(value) => {
+                    ("AXIS".to_string(), grid_from_dcm_array(&value.value))
+                }
+                DcmBlock::Map(value) => ("MAP".to_string(), grid_from_dcm_map(value)?),
             };
 
             variables.insert(
@@ -952,25 +1161,46 @@ mod tests {
         };
 
         let page = session.page_variables("", ComparePresenceFilter::RightOnly, None, 0, 50);
-        let items = page.get("items").and_then(|value| value.as_array()).unwrap();
+        let items = page
+            .get("items")
+            .and_then(|value| value.as_array())
+            .unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].get("name").and_then(|value| value.as_str()), Some("B"));
+        assert_eq!(
+            items[0].get("name").and_then(|value| value.as_str()),
+            Some("B")
+        );
 
         // Cal type filter: only VALUE variables
         let page = session.page_variables("", ComparePresenceFilter::All, Some("VALUE"), 0, 50);
-        let items = page.get("items").and_then(|value| value.as_array()).unwrap();
+        let items = page
+            .get("items")
+            .and_then(|value| value.as_array())
+            .unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].get("name").and_then(|value| value.as_str()), Some("A"));
+        assert_eq!(
+            items[0].get("name").and_then(|value| value.as_str()),
+            Some("A")
+        );
 
         // Cal type filter: only CURVE variables
         let page = session.page_variables("", ComparePresenceFilter::All, Some("CURVE"), 0, 50);
-        let items = page.get("items").and_then(|value| value.as_array()).unwrap();
+        let items = page
+            .get("items")
+            .and_then(|value| value.as_array())
+            .unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].get("name").and_then(|value| value.as_str()), Some("B"));
+        assert_eq!(
+            items[0].get("name").and_then(|value| value.as_str()),
+            Some("B")
+        );
 
         // Cal type filter: no MAP variables
         let page = session.page_variables("", ComparePresenceFilter::All, Some("MAP"), 0, 50);
-        let items = page.get("items").and_then(|value| value.as_array()).unwrap();
+        let items = page
+            .get("items")
+            .and_then(|value| value.as_array())
+            .unwrap();
         assert_eq!(items.len(), 0);
     }
 }

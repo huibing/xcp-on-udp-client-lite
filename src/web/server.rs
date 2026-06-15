@@ -62,7 +62,10 @@ impl WebServer {
             .route("/logout", get(routes::logout))
             .route("/compare", get(routes::compare_page))
             .route("/api/compare/sessions", get(routes::compare_sessions))
-            .route("/api/compare/sessions", post(routes::compare_create_session))
+            .route(
+                "/api/compare/sessions",
+                post(routes::compare_create_session),
+            )
             .route(
                 "/api/compare/sessions/:session_id/rename",
                 post(routes::compare_rename_session),
@@ -163,10 +166,16 @@ impl WebServer {
             // Experiment
             .route("/experiment", get(routes::experiment_page))
             .route("/experiment/help", get(routes::experiment_help_page))
-            .route("/api/experiment/variables", get(routes::experiment_variables))
+            .route(
+                "/api/experiment/variables",
+                get(routes::experiment_variables),
+            )
             .route("/api/experiment/events", get(routes::experiment_events))
             .route("/api/experiment/start", post(routes::experiment_start))
-            .route("/api/experiment/set-event", post(routes::experiment_set_event))
+            .route(
+                "/api/experiment/set-event",
+                post(routes::experiment_set_event),
+            )
             .route("/api/experiment/stop", post(routes::experiment_stop))
             .route(
                 "/api/experiment/record/start",
