@@ -3,10 +3,10 @@
 //!
 //! See `docs/superpowers/specs/2026-06-15-structural-measurements-design.md`.
 
-// All items here are wired into the flatten pipeline by Task 6; until then
-// most pub(super) symbols look unused outside this module's own tests. Keep a
-// single module-level allow rather than scattering attributes on every item.
-// Remove this once `reader.rs` calls `flatten_instance_measurements` (Task 6).
+// `TypedefTables::characteristics` is populated for Task 8 (structural
+// calibrations) but is not yet consumed by reader.rs. Keep a single
+// module-level allow rather than annotating individual fields. Remove once
+// Task 8 wires characteristic flattening into the reader.
 #![allow(dead_code)]
 
 use crate::a2l::reader::A2lMeasurement;

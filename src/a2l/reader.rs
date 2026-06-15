@@ -434,11 +434,33 @@ impl A2lReader {
         let mut measurements = Vec::new();
 
         for module in &self.file.project.module {
+            // Existing: parse flat MEASUREMENT blocks.
             for meas in &module.measurement {
                 if let Some(info) = self.parse_measurement(meas) {
                     measurements.push(info);
                 }
             }
+            // NEW: append synthetic entries from INSTANCE+TYPEDEF_STRUCTURE flattening.
+            // Insertion order is load-bearing: flat-parsed entries come first so they
+            // win on name collisions in any downstream lookup-by-name code.
+            let mut flattened = super::typedef_flatten::flatten_instance_measurements(module);
+            // Resolve unit via existing COMPU_METHOD lookup (typedef_flatten doesn't
+            // have access to the compu_method tables).
+            for m in &mut flattened {
+                m.unit = self.get_unit_for_conversion(&m.conversion_name);
+            }
+            // Drop any synthetic name that collides with a flat name; warn.
+            let flat_names: std::collections::HashSet<&str> =
+                measurements.iter().map(|m| m.name.as_str()).collect();
+            flattened.retain(|m| {
+                if flat_names.contains(m.name.as_str()) {
+                    tracing::warn!(name = %m.name, "structural measurement collides with flat MEASUREMENT, dropped");
+                    false
+                } else {
+                    true
+                }
+            });
+            measurements.extend(flattened);
         }
 
         measurements
@@ -2737,5 +2759,40 @@ mod tests {
         assert_eq!(identity_method.to_display(42), "42");
 
         println!("COMPU_VTAB parsing test passed!");
+    }
+
+    #[test]
+    fn reader_appends_structural_measurements() {
+        // Mirrors the spec example. Save to a temp file and load via A2lReader::load.
+        let src = r#"
+ASAP2_VERSION 1 71
+/begin PROJECT P "" /begin MODULE M ""
+  /begin MEASUREMENT counter "" ULONG NO_COMPU_METHOD 0 0 0 4294967295
+    ECU_ADDRESS 0xFFF0 ECU_ADDRESS_EXTENSION 2 READ_WRITE
+  /end MEASUREMENT
+  /begin TYPEDEF_MEASUREMENT input "" FLOAT32_IEEE NO_COMPU_METHOD 0 0 -1e30 1e30 /end TYPEDEF_MEASUREMENT
+  /begin TYPEDEF_MEASUREMENT output_linear "" FLOAT32_IEEE NO_COMPU_METHOD 0 0 -1e30 1e30 /end TYPEDEF_MEASUREMENT
+  /begin TYPEDEF_MEASUREMENT output_spline "" FLOAT32_IEEE NO_COMPU_METHOD 0 0 -1e30 1e30 /end TYPEDEF_MEASUREMENT
+  /begin TYPEDEF_STRUCTURE Lookup "" 12
+    /begin STRUCTURE_COMPONENT input         input         0 /end STRUCTURE_COMPONENT
+    /begin STRUCTURE_COMPONENT output_linear output_linear 4 /end STRUCTURE_COMPONENT
+    /begin STRUCTURE_COMPONENT output_spline output_spline 8 /end STRUCTURE_COMPONENT
+  /end TYPEDEF_STRUCTURE
+  /begin INSTANCE lookup "" Lookup 0xFFF4 ECU_ADDRESS_EXTENSION 2 /end INSTANCE
+/end MODULE /end PROJECT
+"#;
+        let tmp = std::env::temp_dir().join("xcp_struct_meas_test.a2l");
+        std::fs::write(&tmp, src).unwrap();
+        let reader = super::A2lReader::load(&tmp).unwrap();
+        let measurements = reader.get_measurements();
+        let names: std::collections::HashSet<_> =
+            measurements.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains("counter"), "flat measurement preserved");
+        assert!(names.contains("lookup.input"));
+        assert!(names.contains("lookup.output_linear"));
+        assert!(names.contains("lookup.output_spline"));
+        // Flat parsed first, synthetic appended.
+        assert_eq!(measurements[0].name, "counter");
+        std::fs::remove_file(&tmp).ok();
     }
 }
