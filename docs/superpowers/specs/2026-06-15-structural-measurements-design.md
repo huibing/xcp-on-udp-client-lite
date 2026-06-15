@@ -64,7 +64,7 @@ src/a2l/
 └── types.rs                    # unchanged
 ```
 
-**Public API:** `A2lReader::get_measurements()` and `A2lReader::get_characteristics()` return the same `Vec<A2lMeasurement>` / `Vec<A2lCharacteristic>` types as today, with synthetic entries appended after the parsed flat entries.
+**Public API:** `A2lReader::get_measurements()` and `A2lReader::get_characteristics()` return the same `Vec<A2lMeasurement>` / `Vec<A2lCharacteristic>` types as today, with synthetic entries appended **after** the parsed flat entries. This insertion order is load-bearing — it is what makes the "flat MEASUREMENT/CHARACTERISTIC wins on name collision" rule work without an explicit precedence check. Do not reorder this merge.
 
 **Build-once lookup tables per call:**
 - `HashMap<&str, &TypedefStructure>` — keyed by structure name
