@@ -133,6 +133,40 @@ fn matrix(b: BaseDt, r: usize, c: usize) -> A2lDataType {
     }
 }
 
+use std::collections::HashMap;
+
+/// Lookup tables built once per flatten call.
+#[allow(dead_code)]
+pub(super) struct TypedefTables<'a> {
+    pub structures: HashMap<&'a str, &'a a2lfile::TypedefStructure>,
+    pub measurements: HashMap<&'a str, &'a a2lfile::TypedefMeasurement>,
+    pub characteristics: HashMap<&'a str, &'a a2lfile::TypedefCharacteristic>,
+}
+
+impl<'a> TypedefTables<'a> {
+    #[allow(dead_code)]
+    pub(super) fn build(module: &'a a2lfile::Module) -> Self {
+        use a2lfile::A2lObjectName;
+        let mut structures = HashMap::with_capacity(module.typedef_structure.len());
+        for s in &module.typedef_structure {
+            structures.insert(s.get_name(), s);
+        }
+        let mut measurements = HashMap::with_capacity(module.typedef_measurement.len());
+        for m in &module.typedef_measurement {
+            measurements.insert(m.get_name(), m);
+        }
+        let mut characteristics = HashMap::with_capacity(module.typedef_characteristic.len());
+        for c in &module.typedef_characteristic {
+            characteristics.insert(c.get_name(), c);
+        }
+        Self {
+            structures,
+            measurements,
+            characteristics,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
