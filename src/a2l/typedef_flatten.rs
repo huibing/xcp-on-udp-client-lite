@@ -4,10 +4,12 @@
 //! See `docs/superpowers/specs/2026-06-15-structural-measurements-design.md`.
 
 // All items here are wired into the flatten pipeline by Task 6; until then
-// most symbols look unused. Keep a single module-level allow rather than
-// scattering attributes on every item.
+// most pub(super) symbols look unused outside this module's own tests. Keep a
+// single module-level allow rather than scattering attributes on every item.
+// Remove this once `reader.rs` calls `flatten_instance_measurements` (Task 6).
 #![allow(dead_code)]
 
+use crate::a2l::reader::A2lMeasurement;
 use crate::a2l::types::A2lDataType;
 use std::collections::HashMap;
 
@@ -184,10 +186,182 @@ impl<'a> TypedefTables<'a> {
     }
 }
 
+/// Flatten all INSTANCE blocks in the module whose type resolves to a
+/// TYPEDEF_STRUCTURE composed of TYPEDEF_MEASUREMENT components.
+///
+/// Returns synthetic A2lMeasurement entries with dotted names like
+/// `instance.component[.subcomponent...]`.
+///
+/// Components whose type is not a TYPEDEF_MEASUREMENT or TYPEDEF_STRUCTURE
+/// are skipped with a warning. Cycles are guarded at depth `MAX_DEPTH`.
+pub(super) fn flatten_instance_measurements(module: &a2lfile::Module) -> Vec<A2lMeasurement> {
+    use a2lfile::A2lObjectName;
+    let tables = TypedefTables::build(module);
+    let mut out = Vec::new();
+    for inst in &module.instance {
+        // Array-of-structs (INSTANCE with MATRIX_DIM) is a non-goal in this
+        // iteration. An absent MATRIX_DIM block (or one with empty dim_list)
+        // is treated as scalar.
+        if inst
+            .matrix_dim
+            .as_ref()
+            .is_some_and(|md| !md.dim_list.is_empty())
+        {
+            tracing::warn!(
+                instance = %inst.get_name(),
+                "INSTANCE with MATRIX_DIM (array-of-structs) is not supported, skipped",
+            );
+            continue;
+        }
+        if !inst.overwrite.is_empty() {
+            tracing::warn!(
+                instance = %inst.get_name(),
+                count = inst.overwrite.len(),
+                "INSTANCE OVERWRITE blocks ignored",
+            );
+        }
+        let ext = inst
+            .ecu_address_extension
+            .as_ref()
+            .map(|e| e.extension as u8)
+            .unwrap_or(0);
+        let inst_name = inst.get_name();
+        flatten_struct(
+            &tables,
+            inst.type_ref.as_str(),
+            inst_name,
+            &mut Vec::new(),
+            inst.start_address,
+            ext,
+            0,
+            &mut out,
+        );
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flatten_struct(
+    tables: &TypedefTables<'_>,
+    type_name: &str,
+    instance: &str,
+    path: &mut Vec<String>,
+    base_addr: u32,
+    ext: u8,
+    depth: usize,
+    out: &mut Vec<A2lMeasurement>,
+) {
+    if depth >= MAX_DEPTH {
+        tracing::warn!(
+            instance,
+            type_ref = type_name,
+            depth,
+            "max nesting depth reached - possible TYPEDEF_STRUCTURE cycle, stopping recursion",
+        );
+        return;
+    }
+    let Some(structure) = tables.structures.get(type_name) else {
+        if depth == 0 {
+            tracing::warn!(
+                instance,
+                type_ref = type_name,
+                "INSTANCE references unknown TYPEDEF_STRUCTURE",
+            );
+        } else {
+            tracing::warn!(
+                instance,
+                type_ref = type_name,
+                depth,
+                "nested STRUCTURE_COMPONENT references unknown TYPEDEF_STRUCTURE",
+            );
+        }
+        return;
+    };
+    for comp in &structure.structure_component {
+        let comp_addr = base_addr.wrapping_add(comp.address_offset);
+        let comp_type = comp.component_type.as_str();
+
+        // Try as nested struct first.
+        if tables.structures.contains_key(comp_type) {
+            path.push(comp.component_name.clone());
+            flatten_struct(
+                tables,
+                comp_type,
+                instance,
+                path,
+                comp_addr,
+                ext,
+                depth + 1,
+                out,
+            );
+            path.pop();
+            continue;
+        }
+
+        // Then as a TYPEDEF_MEASUREMENT leaf.
+        let Some(typedef_meas) = tables.measurements.get(comp_type) else {
+            tracing::warn!(
+                instance,
+                component = %comp.component_name,
+                type_ref = comp_type,
+                "STRUCTURE_COMPONENT type is not a known TYPEDEF_STRUCTURE or TYPEDEF_MEASUREMENT, skipped",
+            );
+            continue;
+        };
+
+        let Some(base) = BaseDt::from_a2lfile(&typedef_meas.datatype) else {
+            tracing::warn!(
+                instance,
+                component = %comp.component_name,
+                "unsupported A2L datatype on TYPEDEF_MEASUREMENT (e.g. FLOAT16_IEEE), skipped",
+            );
+            continue;
+        };
+
+        let matrix = matrix_dim_slice(&comp.matrix_dim);
+        let Some(data_type) = component_datatype(base, &matrix) else {
+            tracing::warn!(
+                instance,
+                component = %comp.component_name,
+                ?matrix,
+                "STRUCTURE_COMPONENT MATRIX_DIM not representable (3+ dims or zero dim), skipped",
+            );
+            continue;
+        };
+
+        path.push(comp.component_name.clone());
+        let leaf_path: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+        let name = build_path(instance, &leaf_path);
+        path.pop();
+
+        out.push(A2lMeasurement {
+            name,
+            description: typedef_meas.long_identifier.clone(),
+            address: comp_addr,
+            address_ext: ext,
+            data_type,
+            // unit is filled in by reader.rs (Task 6) - it has access to the
+            // COMPU_METHOD table to resolve `conversion_name` -> unit string.
+            unit: None,
+            min: typedef_meas.lower_limit,
+            max: typedef_meas.upper_limit,
+            conversion_name: typedef_meas.conversion.clone(),
+        });
+    }
+}
+
+/// Convert `Option<a2lfile::MatrixDim>` to a slice of `u16` dims.
+/// `None` and `Some` with empty `dim_list` both mean "no MATRIX_DIM" -> scalar.
+fn matrix_dim_slice(md: &Option<a2lfile::MatrixDim>) -> Vec<u16> {
+    match md {
+        Some(m) => m.dim_list.clone(),
+        None => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn build_path_flat() {
         assert_eq!(build_path("lookup", &["input"]), "lookup.input");
@@ -317,5 +491,71 @@ mod tests {
     #[test]
     fn max_depth_constant() {
         assert_eq!(MAX_DEPTH, 8);
+    }
+
+    // -------------------- Task 4: end-to-end flattening --------------------
+
+    /// Minimal A2L exercising the user's Lookup struct example: one INSTANCE
+    /// of a TYPEDEF_STRUCTURE with three FLOAT32 TYPEDEF_MEASUREMENT
+    /// components.
+    const SIMPLE_A2L: &str = r#"
+ASAP2_VERSION 1 71
+/begin PROJECT P "" /begin MODULE M ""
+  /begin TYPEDEF_MEASUREMENT input "" FLOAT32_IEEE NO_COMPU_METHOD 0 0 -1e30 1e30 /end TYPEDEF_MEASUREMENT
+  /begin TYPEDEF_MEASUREMENT output_linear "" FLOAT32_IEEE NO_COMPU_METHOD 0 0 -1e30 1e30 /end TYPEDEF_MEASUREMENT
+  /begin TYPEDEF_MEASUREMENT output_spline "" FLOAT32_IEEE NO_COMPU_METHOD 0 0 -1e30 1e30 /end TYPEDEF_MEASUREMENT
+  /begin TYPEDEF_STRUCTURE Lookup "" 12
+    /begin STRUCTURE_COMPONENT input         input         0 /end STRUCTURE_COMPONENT
+    /begin STRUCTURE_COMPONENT output_linear output_linear 4 /end STRUCTURE_COMPONENT
+    /begin STRUCTURE_COMPONENT output_spline output_spline 8 /end STRUCTURE_COMPONENT
+  /end TYPEDEF_STRUCTURE
+  /begin INSTANCE lookup "" Lookup 0xFFF4 ECU_ADDRESS_EXTENSION 2 /end INSTANCE
+/end MODULE /end PROJECT
+"#;
+
+    fn parse_a2l(src: &str) -> a2lfile::A2lFile {
+        let mut errors = Vec::new();
+        // strict_parsing=false: minimal fixtures may omit blocks the strict
+        // parser otherwise expects (e.g. HEADER). The non-strict path still
+        // accepts the structural elements we care about here.
+        a2lfile::load_from_string(src, None, &mut errors, false).unwrap_or_else(|e| {
+            panic!("a2l parse failed: {e:?}; log: {errors:?}");
+        })
+    }
+
+    #[test]
+    fn flatten_simple_struct_measurements() {
+        let f = parse_a2l(SIMPLE_A2L);
+        let module = &f.project.module[0];
+        let measurements = flatten_instance_measurements(module);
+        assert_eq!(measurements.len(), 3, "expected 3 leaf measurements");
+
+        let summary: Vec<_> = measurements
+            .iter()
+            .map(|m| (m.name.as_str(), m.address, m.address_ext))
+            .collect();
+        assert!(
+            summary.contains(&("lookup.input", 0xFFF4, 2)),
+            "missing lookup.input @ 0xFFF4 ext 2; got {summary:?}",
+        );
+        assert!(
+            summary.contains(&("lookup.output_linear", 0xFFF8, 2)),
+            "missing lookup.output_linear @ 0xFFF8 ext 2; got {summary:?}",
+        );
+        assert!(
+            summary.contains(&("lookup.output_spline", 0xFFFC, 2)),
+            "missing lookup.output_spline @ 0xFFFC ext 2; got {summary:?}",
+        );
+
+        for meas in &measurements {
+            assert!(
+                matches!(meas.data_type, A2lDataType::F32),
+                "expected F32, got {:?} for {}",
+                meas.data_type,
+                meas.name,
+            );
+            assert_eq!(meas.conversion_name, "NO_COMPU_METHOD");
+            assert_eq!(meas.unit, None, "unit is filled later by reader.rs");
+        }
     }
 }
