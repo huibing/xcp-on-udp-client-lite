@@ -2,7 +2,9 @@
 /// Used by calibration, a2l, and other command modules.
 
 use serde_json::{json, Value};
-use xcp_client::a2l::{A2lCharacteristic, A2lDataType, A2lMeasurement, A2lReader, AxisPointSource};
+use xcp_client::a2l::{
+    A2lCharacteristic, A2lDataType, A2lMeasurement, A2lReader, AxisInfo, AxisPointSource,
+};
 use xcp_client::calibration::{CalibrationParam, CalibrationType, CalibrationValue,
     matrix_to_flat};
 use xcp_client::daq::Measurement;
@@ -585,7 +587,8 @@ pub fn parse_axis_values(data: &[u8], data_type: &A2lDataType, num_points: usize
 // ─── A2L conversion helpers ───────────────────────────────────────────────────
 
 /// Read axis breakpoint values from a HEX image (offline mode).
-/// Falls back to static A2L values first, then reads from memory, then uses indices.
+/// Falls back to static A2L values first, then reads from HEX memory,
+/// then computes from A2L min/max, then uses indices.
 pub fn read_axis_values_from_hex(
     hex: &xcp_client::hex::HexImage,
     param: &CalibrationParam,
@@ -604,13 +607,37 @@ pub fn read_axis_values_from_hex(
         } = &axis.point_source
         {
             let element_size = scalar_data_type_size(data_type);
-            let raw = hex.extract_range(*address, (element_size * *num_points) as u32, 0xFF);
-            result.push(parse_axis_values(&raw, data_type, *num_points));
+            let total_size = (element_size * *num_points) as u32;
+            if hex.has_data_in_range(*address, total_size) {
+                let raw = hex.extract_range(*address, total_size, 0xFF);
+                let values = parse_axis_values(&raw, data_type, *num_points);
+                // NaN in axis breakpoints is invalid — fall back to min/max
+                if values.iter().any(|v| v.is_nan()) {
+                    result.push(axis_fallback_from_min_max(axis));
+                } else {
+                    result.push(values);
+                }
+            } else {
+                // HEX file doesn't cover this AXIS_PTS address — compute from A2L metadata
+                result.push(axis_fallback_from_min_max(axis));
+            }
         } else {
             result.push((0..axis.num_points).map(|i| i as f64).collect());
         }
     }
     result
+}
+
+/// Compute axis breakpoint values from A2L min/max limits via linear interpolation.
+fn axis_fallback_from_min_max(axis: &AxisInfo) -> Vec<f64> {
+    if axis.num_points <= 1 {
+        vec![axis.min]
+    } else {
+        let step = (axis.max - axis.min) / (axis.num_points - 1) as f64;
+        (0..axis.num_points)
+            .map(|i| axis.min + i as f64 * step)
+            .collect()
+    }
 }
 
 pub fn convert_characteristic(
