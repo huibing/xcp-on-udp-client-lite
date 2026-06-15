@@ -493,14 +493,24 @@
                   <!-- corner cell: Y-axis name for 2D, or empty for 1D -->
                   <th class="matrix-corner">{{ matrixTransposed ? "" : '' }}</th>
                   <th v-for="ci in matrixCols" :key="ci" class="matrix-col-hdr">
-                    {{ matrixXAxisValues[ci - 1] ?? (ci - 1) }}
+                    <input v-if="matrixXAxisWritable" class="matrix-cell axis-cell"
+                      :value="matrixXAxisValues[ci - 1] ?? (ci - 1)"
+                      :disabled="pageMode !== 'working'"
+                      @change="e => writeAxisPoint(0, ci - 1, e.target.value)" />
+                    <template v-else>{{ matrixXAxisValues[ci - 1] ?? (ci - 1) }}</template>
                   </th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="(row, ri) in matrixData" :key="ri">
                   <!-- row header: Y-axis value for 2D, index for 1D -->
-                  <td class="matrix-ri">{{ matrixTransposed ? (matrixYAxisValues[ri] ?? ri) : ri }}</td>
+                  <td class="matrix-ri">
+                    <input v-if="matrixTransposed && matrixYAxisWritable" class="matrix-cell axis-cell"
+                      :value="matrixYAxisValues[ri] ?? ri"
+                      :disabled="pageMode !== 'working'"
+                      @change="e => writeAxisPoint(1, ri, e.target.value)" />
+                    <template v-else>{{ matrixTransposed ? (matrixYAxisValues[ri] ?? ri) : ri }}</template>
+                  </td>
                   <td v-for="(cell, ci) in row" :key="ci">
                     <input class="matrix-cell"
                       v-model="matrixData[ri][ci]"
@@ -953,6 +963,8 @@ const matrixXAxisValues = ref([])  // X-axis physical values (column headers)
 const matrixYAxisValues = ref([])  // Y-axis physical values (row headers)
 const matrixXAxisName = ref('')
 const matrixYAxisName = ref('')
+const matrixXAxisWritable = ref(false) // true if X axis is AXIS_PTS_REF (Memory)
+const matrixYAxisWritable = ref(false) // true if Y axis is AXIS_PTS_REF (Memory)
 const matrixTransposed = ref(false) // true for 2D MAP (x/y transposed for display)
 
 // ── Checksum modal state ──────────────────────────────────────────────────────
@@ -1627,6 +1639,8 @@ async function showMatrix(v) {
   matrixYAxisValues.value = []
   matrixXAxisName.value = ''
   matrixYAxisName.value = ''
+  matrixXAxisWritable.value = false
+  matrixYAxisWritable.value = false
   try {
     const [readRes, detailRes] = await Promise.all([
       invoke('cal_read', { deviceId: configId(v), idx: v.idx }),
@@ -1639,6 +1653,8 @@ async function showMatrix(v) {
     matrixYAxisValues.value = axes[1]?.values ?? []
     matrixXAxisName.value = axes[0]?.pts_ref_name ?? 'X'
     matrixYAxisName.value = axes[1]?.pts_ref_name ?? 'Y'
+    matrixXAxisWritable.value = !!axes[0]?.writable
+    matrixYAxisWritable.value = !!axes[1]?.writable
 
     const val = readRes.display_value_data ?? readRes.value_data ?? readRes.value
     if (Array.isArray(val) && Array.isArray(val[0])) {
@@ -1722,6 +1738,52 @@ async function writeCell(ri, ci, val) {
       matrixCellOldValues[cellKey] = val
     } else {
       matrixMsg.value = res.error || 'Write failed'
+      matrixErr.value = true
+    }
+  } catch (e) {
+    matrixMsg.value = String(e)
+    matrixErr.value = true
+  }
+}
+
+async function writeAxisPoint(axis, point, val) {
+  if (!matrixTarget.value) return
+  const v = matrixTarget.value
+  matrixMsg.value = ''
+  matrixErr.value = false
+  const targetArr = axis === 0 ? matrixXAxisValues : matrixYAxisValues
+  const oldVal = targetArr.value[point] != null ? String(targetArr.value[point]) : '?'
+  try {
+    const res = await invoke('cal_write_axis_point', {
+      deviceId: configId(v), idx: v.idx, axis, point, value: val
+    })
+    if (res.success) {
+      targetArr.value[point] = val
+      const axisLabel = axis === 0 ? (matrixXAxisName.value || 'X') : (matrixYAxisName.value || 'Y')
+      matrixMsg.value = `Written ${axisLabel}[${point}] = ${val}`
+      const cpKey = `${configId(v)}:${v.name}`
+      changedParams[cpKey] = changedParams[cpKey] || { original_value: '', current_value: '' }
+      calHistory.value.push({
+        ts: Date.now(),
+        device_name: v.device_name,
+        var_name: v.name,
+        calType: v.calType || v.characteristic_type || 'VALUE',
+        kind: 'axis',
+        original: oldVal,
+        newVal: val,
+        element: {
+          axis,
+          point,
+          axisName: axisLabel,
+        },
+        deviceId: configId(v),
+        rawDeviceId: v.device_id,
+        idx: v.idx,
+        undoLoading: false,
+        undone: false,
+      })
+    } else {
+      matrixMsg.value = res.error || 'Axis write failed'
       matrixErr.value = true
     }
   } catch (e) {
@@ -3348,6 +3410,11 @@ onUnmounted(() => {
 }
 .matrix-cell:disabled { color: var(--exp-fg-dim3); }
 .matrix-cell:focus { outline: none; border-color: var(--exp-fg-bright); }
+.matrix-cell.axis-cell {
+  background: var(--exp-bg2);
+  font-weight: 600;
+  width: 64px;
+}
 .matrix-table td { padding: 2px; }
 
 /* ── Checksum results ─────────────────────────────────────────────────────── */

@@ -1,13 +1,12 @@
 /// Calibration Tauri commands.
 ///
 /// Ports web/routes.rs cal_* handlers.
-
 use serde_json::{json, Value};
 use tauri::State;
 use xcp_client::calibration::CalibrationValue;
 use xcp_client::protocol::Mta;
 use xcp_client::slave::PageMode;
-use xcp_client::CharacteristicType;
+use xcp_client::{a2l_type_to_calibration, AxisPointSource, CharacteristicType};
 
 use crate::commands::helpers::{
     bytes_to_calibration_value, cal_value_display_string, calibration_value_to_bytes,
@@ -74,9 +73,7 @@ pub async fn cal_read(
         };
 
         // Also grab slave handle for ECU fallback
-        let slave_arc_opt = dev
-            .slave_id
-            .and_then(|sid| app.client.get_slave(sid));
+        let slave_arc_opt = dev.slave_id.and_then(|sid| app.client.get_slave(sid));
 
         (param, hex_image_arc, cal_values_arc, slave_arc_opt, source)
     };
@@ -90,19 +87,22 @@ pub async fn cal_read(
                 return Ok(json!({ "success": false, "error": "Unknown parameter size" }));
             }
             let bytes = hex_image.extract_range(param.address, size, 0xFF);
-            if bytes.iter().all(|&b| b == 0xFF) && !hex_image.has_data_in_range(param.address, size) {
+            if bytes.iter().all(|&b| b == 0xFF) && !hex_image.has_data_in_range(param.address, size)
+            {
                 return Ok(json!({ "success": false, "error": "Address not found in HEX file" }));
             }
             let value = bytes_to_calibration_value(&bytes, &param.data_type)
                 .map_err(|e| format!("Decode error: {}", e))?;
             drop(hex_guard);
 
-            cal_values_arc.write().await.insert(param.name.clone(), value.clone());
+            cal_values_arc
+                .write()
+                .await
+                .insert(param.name.clone(), value.clone());
 
             let is_enum = param.is_enum();
             let raw_i64 = cal_value_to_raw_i64(&value);
-            let display_value: Option<String> =
-                raw_i64.map(|raw| param.format_value(raw));
+            let display_value: Option<String> = raw_i64.map(|raw| param.format_value(raw));
             tracing::debug!(
                 "cal_read [hex] '{}': data_type={:?} is_enum={} raw_i64={:?} value_format={:?} display_value={:?}",
                 param.name,
@@ -152,7 +152,10 @@ pub async fn cal_read(
         let value = bytes_to_calibration_value(&bytes, &param.data_type)
             .map_err(|e| format!("Decode error: {}", e))?;
 
-        cal_values_arc.write().await.insert(param.name.clone(), value.clone());
+        cal_values_arc
+            .write()
+            .await
+            .insert(param.name.clone(), value.clone());
 
         let is_enum = param.is_enum();
         let raw_i64 = cal_value_to_raw_i64(&value);
@@ -214,10 +217,14 @@ pub async fn cal_read_all(
     // Group item positions by device_id: device_id → [(item_pos, param_idx)]
     let mut by_device: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for (pos, (device_id, param_idx)) in parsed.iter().enumerate() {
-        by_device.entry(device_id.clone()).or_default().push((pos, *param_idx));
+        by_device
+            .entry(device_id.clone())
+            .or_default()
+            .push((pos, *param_idx));
     }
 
-    let mut results: Vec<Value> = vec![json!({ "success": false, "error": "not processed" }); parsed.len()];
+    let mut results: Vec<Value> =
+        vec![json!({ "success": false, "error": "not processed" }); parsed.len()];
 
     for (device_id, positions) in &by_device {
         // Snapshot params and Arc handles. No HexImage data is cloned.
@@ -242,9 +249,7 @@ pub async fn cal_read_all(
                 dev.hex_image.clone()
             };
 
-            let slave_arc_opt = dev
-                .slave_id
-                .and_then(|sid| app.client.get_slave(sid));
+            let slave_arc_opt = dev.slave_id.and_then(|sid| app.client.get_slave(sid));
 
             (params, hex_image_arc, cache_arc, slave_arc_opt)
         }; // state read lock released here
@@ -256,7 +261,8 @@ pub async fn cal_read_all(
                 let param = match param_opt {
                     Some(p) => p,
                     None => {
-                        results[*pos] = json!({ "success": false, "error": "Parameter index out of range" });
+                        results[*pos] =
+                            json!({ "success": false, "error": "Parameter index out of range" });
                         continue;
                     }
                 };
@@ -266,13 +272,18 @@ pub async fn cal_read_all(
                     continue;
                 }
                 let bytes = hex_image.extract_range(param.address, size, 0xFF);
-                if bytes.iter().all(|&b| b == 0xFF) && !hex_image.has_data_in_range(param.address, size) {
+                if bytes.iter().all(|&b| b == 0xFF)
+                    && !hex_image.has_data_in_range(param.address, size)
+                {
                     results[*pos] = json!({ "success": false, "name": param.name, "error": "Address not found in HEX file" });
                     continue;
                 }
                 match bytes_to_calibration_value(&bytes, &param.data_type) {
                     Ok(value) => {
-                        cache_arc.write().await.insert(param.name.clone(), value.clone());
+                        cache_arc
+                            .write()
+                            .await
+                            .insert(param.name.clone(), value.clone());
                         results[*pos] = json!({
                             "success": true,
                             "name": param.name,
@@ -296,7 +307,8 @@ pub async fn cal_read_all(
                 let param = match param_opt {
                     Some(p) => p,
                     None => {
-                        results[*pos] = json!({ "success": false, "error": "Parameter index out of range" });
+                        results[*pos] =
+                            json!({ "success": false, "error": "Parameter index out of range" });
                         continue;
                     }
                 };
@@ -309,7 +321,10 @@ pub async fn cal_read_all(
                 match guard.read_large_data(mta, size, None).await {
                     Ok(bytes) => match bytes_to_calibration_value(&bytes, &param.data_type) {
                         Ok(value) => {
-                            cache_arc.write().await.insert(param.name.clone(), value.clone());
+                            cache_arc
+                                .write()
+                                .await
+                                .insert(param.name.clone(), value.clone());
                             results[*pos] = json!({
                                 "success": true,
                                 "name": param.name,
@@ -318,7 +333,8 @@ pub async fn cal_read_all(
                             });
                         }
                         Err(e) => {
-                            results[*pos] = json!({ "success": false, "name": param.name, "error": e });
+                            results[*pos] =
+                                json!({ "success": false, "name": param.name, "error": e });
                         }
                     },
                     Err(e) => {
@@ -415,7 +431,9 @@ pub async fn cal_write(
             hex.add_data(param.address, &bytes);
             tracing::debug!(
                 "cal_write: patched working hex at 0x{:08X} ({} bytes) for '{}'",
-                param.address, bytes.len(), param.name
+                param.address,
+                bytes.len(),
+                param.name
             );
             if !working_hex_path.is_empty() {
                 Some(hex.to_intel_hex())
@@ -493,7 +511,145 @@ pub async fn cal_write_element(
             hex.add_data(element_param.address, &bytes);
             tracing::debug!(
                 "cal_write_element: patched working hex at 0x{:08X} ({} bytes) for '{}[{},{}]'",
-                element_param.address, bytes.len(), param.name, row, col
+                element_param.address,
+                bytes.len(),
+                param.name,
+                row,
+                col
+            );
+            if !working_hex_path.is_empty() {
+                Some(hex.to_intel_hex())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(hex_str) = hex_str_to_save {
+        let path = working_hex_path.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = std::fs::write(&path, hex_str) {
+                tracing::warn!("Failed to save working hex to '{}': {}", path, e);
+            } else {
+                tracing::debug!("Saved working hex to '{}'", path);
+            }
+        });
+    }
+
+    Ok(json!({ "success": true }))
+}
+
+/// Write a single axis breakpoint of a MAP/CURVE calibration parameter.
+///
+/// `axis` is 0 for the X axis, 1 for the Y axis. `point` is the breakpoint
+/// index along that axis. Only `AxisPointSource::Memory` (AXIS_PTS_REF) axes
+/// are writable; static A2L axes return an error.
+#[tauri::command]
+pub async fn cal_write_axis_point(
+    state: State<'_, SharedState>,
+    device_id: String,
+    idx: usize,
+    axis: usize,
+    point: usize,
+    value: String,
+) -> Result<Value, String> {
+    let (slave_arc, param, working_hex_arc, working_hex_path) = {
+        let app = state.read().await;
+        let dev = app
+            .get_device(&device_id)
+            .ok_or_else(|| format!("Device '{}' not found", device_id))?;
+        if !dev.connected {
+            return Ok(json!({ "success": false, "error": "Device not connected" }));
+        }
+        let sid = dev.slave_id.ok_or_else(|| "No slave ID".to_string())?;
+        let slave_arc = app
+            .client
+            .get_slave(sid)
+            .ok_or_else(|| "Slave not found".to_string())?;
+        let mgr = dev.cal_manager.read().await;
+        let param = mgr
+            .params()
+            .get(idx)
+            .ok_or_else(|| format!("Parameter index {} out of range", idx))?
+            .clone();
+        let working_hex_arc = dev.working_hex_image.clone();
+        let working_hex_path = dev.working_hex_path.clone();
+        (slave_arc, param, working_hex_arc, working_hex_path)
+    };
+
+    let axis_info = param
+        .axis_info
+        .get(axis)
+        .ok_or_else(|| format!("Axis index {} out of range", axis))?;
+
+    let (addr, addr_ext, a2l_type) = match &axis_info.point_source {
+        AxisPointSource::Memory {
+            address,
+            address_ext,
+            data_type,
+            num_points,
+        } => {
+            if point >= *num_points {
+                return Ok(json!({
+                    "success": false,
+                    "error": format!("Point index {} out of range (0..{})", point, num_points)
+                }));
+            }
+            (*address, *address_ext, data_type.clone())
+        }
+        _ => {
+            return Ok(json!({
+                "success": false,
+                "error": "Axis is not writable (static A2L axis)"
+            }));
+        }
+    };
+
+    let elem_cal_type = a2l_type_to_calibration(&a2l_type)
+        .ok_or_else(|| format!("Unsupported axis data type: {:?}", a2l_type))?;
+    let elem_size = match &elem_cal_type {
+        xcp_client::calibration::CalibrationType::U8
+        | xcp_client::calibration::CalibrationType::I8
+        | xcp_client::calibration::CalibrationType::Bool => 1u32,
+        xcp_client::calibration::CalibrationType::U16
+        | xcp_client::calibration::CalibrationType::I16 => 2,
+        xcp_client::calibration::CalibrationType::U32
+        | xcp_client::calibration::CalibrationType::I32
+        | xcp_client::calibration::CalibrationType::F32 => 4,
+        xcp_client::calibration::CalibrationType::U64
+        | xcp_client::calibration::CalibrationType::I64
+        | xcp_client::calibration::CalibrationType::F64 => 8,
+        _ => return Err(format!("Unsupported scalar axis type: {:?}", elem_cal_type)),
+    };
+
+    let element_address = addr + (point as u32) * elem_size;
+    let element_param = xcp_client::calibration::CalibrationParam::new(
+        &format!("{}.axis{}[{}]", param.name, axis, point),
+        element_address,
+        addr_ext,
+        elem_cal_type.clone(),
+    );
+
+    let raw = param.compu_method.to_raw(&value).unwrap_or(0i64);
+    let element_value = scalar_from_raw(raw, &elem_cal_type)?;
+    let bytes = calibration_value_to_bytes(&element_value, &element_param)?;
+
+    let xcp_guard = slave_arc.lock().await;
+    write_calibration_to_slave(&*xcp_guard, &element_param, &element_value).await?;
+    drop(xcp_guard);
+
+    let hex_str_to_save = {
+        let mut working_hex_guard = working_hex_arc.write().await;
+        if let Some(ref mut hex) = *working_hex_guard {
+            hex.add_data(element_address, &bytes);
+            tracing::debug!(
+                "cal_write_axis_point: patched working hex at 0x{:08X} ({} bytes) for '{}' axis {} point {}",
+                element_address,
+                bytes.len(),
+                param.name,
+                axis,
+                point
             );
             if !working_hex_path.is_empty() {
                 Some(hex.to_intel_hex())
@@ -609,6 +765,7 @@ pub async fn cal_detail(
                 "num_points": info.num_points,
                 "values": vals,
                 "pts_ref_name": info.pts_ref_name,
+                "writable": matches!(info.point_source, AxisPointSource::Memory { .. }),
             })
         })
         .collect();
@@ -774,10 +931,7 @@ fn parse_value_with_compu_method(
     }
 
     // Identical compute method: parse directly as integer
-    if matches!(
-        param.compu_method,
-        xcp_client::a2l::CompuMethod::Identical
-    ) {
+    if matches!(param.compu_method, xcp_client::a2l::CompuMethod::Identical) {
         return parse_json_value_to_cal(&param.data_type, json_val);
     }
 
@@ -785,9 +939,8 @@ fn parse_value_with_compu_method(
     let flat: Vec<String> = flatten_value_to_strings(json_val);
 
     // Convert each display string → raw i64 via inverse compu_method
-    let convert = |s: &str| -> Result<i64, String> {
-        param.compu_method.to_raw(s.trim_matches('"'))
-    };
+    let convert =
+        |s: &str| -> Result<i64, String> { param.compu_method.to_raw(s.trim_matches('"')) };
 
     Ok(match &param.data_type {
         CalibrationType::U8 => CalibrationValue::U8(convert(first_or_zero(&flat))? as u8),
@@ -803,27 +956,39 @@ fn parse_value_with_compu_method(
             return parse_json_value_to_cal(&param.data_type, json_val);
         }
         CalibrationType::U8Array(n) => CalibrationValue::U8Array(
-            flat.iter().take(*n).map(|s| convert(s).map(|v| v as u8))
+            flat.iter()
+                .take(*n)
+                .map(|s| convert(s).map(|v| v as u8))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         CalibrationType::U16Array(n) => CalibrationValue::U16Array(
-            flat.iter().take(*n).map(|s| convert(s).map(|v| v as u16))
+            flat.iter()
+                .take(*n)
+                .map(|s| convert(s).map(|v| v as u16))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         CalibrationType::U32Array(n) => CalibrationValue::U32Array(
-            flat.iter().take(*n).map(|s| convert(s).map(|v| v as u32))
+            flat.iter()
+                .take(*n)
+                .map(|s| convert(s).map(|v| v as u32))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         CalibrationType::I8Array(n) => CalibrationValue::I8Array(
-            flat.iter().take(*n).map(|s| convert(s).map(|v| v as i8))
+            flat.iter()
+                .take(*n)
+                .map(|s| convert(s).map(|v| v as i8))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         CalibrationType::I16Array(n) => CalibrationValue::I16Array(
-            flat.iter().take(*n).map(|s| convert(s).map(|v| v as i16))
+            flat.iter()
+                .take(*n)
+                .map(|s| convert(s).map(|v| v as i16))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         CalibrationType::I32Array(n) => CalibrationValue::I32Array(
-            flat.iter().take(*n).map(|s| convert(s).map(|v| v as i32))
+            flat.iter()
+                .take(*n)
+                .map(|s| convert(s).map(|v| v as i32))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         // For unsupported integer-array/matrix types, fall back to direct parse
@@ -903,9 +1068,7 @@ fn parse_json_value_to_cal(
         CalibrationType::I64 => CalibrationValue::I64(parse_i64(v0)?),
         CalibrationType::F32 => CalibrationValue::F32(parse_f64(v0)? as f32),
         CalibrationType::F64 => CalibrationValue::F64(parse_f64(v0)?),
-        CalibrationType::Bool => {
-            CalibrationValue::Bool(v0.to_lowercase() == "true" || v0 == "1")
-        }
+        CalibrationType::Bool => CalibrationValue::Bool(v0.to_lowercase() == "true" || v0 == "1"),
         CalibrationType::U8Array(n) => CalibrationValue::U8Array(
             flat.iter()
                 .take(*n)
@@ -930,9 +1093,7 @@ fn parse_json_value_to_cal(
                 .map(|s| parse_f64(s))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        CalibrationType::Ascii(_) => {
-            CalibrationValue::Ascii(v0.to_string())
-        }
+        CalibrationType::Ascii(_) => CalibrationValue::Ascii(v0.to_string()),
         _ => return Err(format!("Unsupported write type: {:?}", data_type)),
     })
 }
@@ -958,9 +1119,7 @@ fn element_write_param(
         CalibrationType::U64Matrix(_, _) | CalibrationType::U64Array(_) => {
             (CalibrationType::U64, 8)
         }
-        CalibrationType::I8Matrix(_, _) | CalibrationType::I8Array(_) => {
-            (CalibrationType::I8, 1)
-        }
+        CalibrationType::I8Matrix(_, _) | CalibrationType::I8Array(_) => (CalibrationType::I8, 1),
         CalibrationType::I16Matrix(_, _) | CalibrationType::I16Array(_) => {
             (CalibrationType::I16, 2)
         }

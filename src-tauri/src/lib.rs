@@ -3,8 +3,8 @@
 mod commands;
 mod state;
 
-use std::sync::Arc;
 use state::TauriAppState;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -98,6 +98,7 @@ pub fn run() {
             commands::calibration::cal_read_all,
             commands::calibration::cal_write,
             commands::calibration::cal_write_element,
+            commands::calibration::cal_write_axis_point,
             commands::calibration::cal_value,
             commands::calibration::cal_detail,
             commands::calibration::get_page_mode,
