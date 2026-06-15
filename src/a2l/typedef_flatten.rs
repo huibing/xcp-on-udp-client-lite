@@ -278,7 +278,16 @@ fn flatten_struct(
         return;
     };
     for comp in &structure.structure_component {
-        let comp_addr = base_addr.wrapping_add(comp.address_offset);
+        let Some(comp_addr) = base_addr.checked_add(comp.address_offset) else {
+            tracing::warn!(
+                instance,
+                component = %comp.component_name,
+                base_addr,
+                offset = comp.address_offset,
+                "STRUCTURE_COMPONENT address overflow, skipped"
+            );
+            continue;
+        };
         let comp_type = comp.component_type.as_str();
 
         // Try as nested struct first.
@@ -319,7 +328,7 @@ fn flatten_struct(
         };
 
         let matrix = matrix_dim_slice(&comp.matrix_dim);
-        let Some(data_type) = component_datatype(base, &matrix) else {
+        let Some(data_type) = component_datatype(base, matrix) else {
             tracing::warn!(
                 instance,
                 component = %comp.component_name,
@@ -352,11 +361,8 @@ fn flatten_struct(
 
 /// Convert `Option<a2lfile::MatrixDim>` to a slice of `u16` dims.
 /// `None` and `Some` with empty `dim_list` both mean "no MATRIX_DIM" -> scalar.
-fn matrix_dim_slice(md: &Option<a2lfile::MatrixDim>) -> Vec<u16> {
-    match md {
-        Some(m) => m.dim_list.clone(),
-        None => Vec::new(),
-    }
+fn matrix_dim_slice(md: &Option<a2lfile::MatrixDim>) -> &[u16] {
+    md.as_ref().map(|m| m.dim_list.as_slice()).unwrap_or(&[])
 }
 
 #[cfg(test)]
