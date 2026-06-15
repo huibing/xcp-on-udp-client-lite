@@ -3,12 +3,18 @@
 //!
 //! See `docs/superpowers/specs/2026-06-15-structural-measurements-design.md`.
 
+// All items here are wired into the flatten pipeline by Task 6; until then
+// most symbols look unused. Keep a single module-level allow rather than
+// scattering attributes on every item.
+#![allow(dead_code)]
+
+use crate::a2l::types::A2lDataType;
+use std::collections::HashMap;
+
 /// Maximum nesting depth before we declare a cycle and stop recursing.
-#[allow(dead_code)]
 const MAX_DEPTH: usize = 8;
 
 /// Builds a dotted path from an instance name and a chain of component names.
-#[allow(dead_code)]
 pub(super) fn build_path(instance: &str, components: &[&str]) -> String {
     let mut out = String::with_capacity(
         instance.len() + components.iter().map(|c| c.len() + 1).sum::<usize>(),
@@ -21,12 +27,15 @@ pub(super) fn build_path(instance: &str, components: &[&str]) -> String {
     out
 }
 
-use crate::a2l::types::A2lDataType;
-
 /// Base scalar data type of a TYPEDEF_MEASUREMENT/TYPEDEF_CHARACTERISTIC.
 /// Mirrors what `A2lReader::parse_datatype` produces — kept as a tiny enum so
 /// this module's tests don't need a2lfile types.
-#[allow(dead_code)]
+///
+/// Note: `A2lDataType::Bool` is intentionally NOT represented here. Bool is
+/// produced by `A2lReader` from RECORD_LAYOUT name heuristics ("BOOLEAN")
+/// in the flat MEASUREMENT/CHARACTERISTIC path, but `a2lfile::DataType` (the
+/// only source feeding `BaseDt`) has no Bool variant — TYPEDEF_*s carry a
+/// raw integer/float DataType, never a synthetic Bool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BaseDt {
     U8,
@@ -39,48 +48,63 @@ pub(super) enum BaseDt {
     I64,
     F32,
     F64,
-    Bool,
 }
 
 impl BaseDt {
-    #[allow(dead_code)]
+    /// Map an `a2lfile::DataType` to our internal `BaseDt`.
+    ///
+    /// Returns `None` for any variant we don't support (currently only
+    /// `Float16Ieee`). The match is **exhaustive** — if `a2lfile` ever adds a
+    /// new variant, this will fail to compile and force an explicit decision
+    /// here rather than silently dropping the component.
     pub(super) fn from_a2lfile(dt: &a2lfile::DataType) -> Option<Self> {
-        Some(match dt {
-            a2lfile::DataType::Ubyte => BaseDt::U8,
-            a2lfile::DataType::Uword => BaseDt::U16,
-            a2lfile::DataType::Ulong => BaseDt::U32,
-            a2lfile::DataType::AUint64 => BaseDt::U64,
-            a2lfile::DataType::Sbyte => BaseDt::I8,
-            a2lfile::DataType::Sword => BaseDt::I16,
-            a2lfile::DataType::Slong => BaseDt::I32,
-            a2lfile::DataType::AInt64 => BaseDt::I64,
-            a2lfile::DataType::Float32Ieee => BaseDt::F32,
-            a2lfile::DataType::Float64Ieee => BaseDt::F64,
-            _ => return None,
-        })
+        match dt {
+            a2lfile::DataType::Ubyte => Some(BaseDt::U8),
+            a2lfile::DataType::Uword => Some(BaseDt::U16),
+            a2lfile::DataType::Ulong => Some(BaseDt::U32),
+            a2lfile::DataType::AUint64 => Some(BaseDt::U64),
+            a2lfile::DataType::Sbyte => Some(BaseDt::I8),
+            a2lfile::DataType::Sword => Some(BaseDt::I16),
+            a2lfile::DataType::Slong => Some(BaseDt::I32),
+            a2lfile::DataType::AInt64 => Some(BaseDt::I64),
+            a2lfile::DataType::Float32Ieee => Some(BaseDt::F32),
+            a2lfile::DataType::Float64Ieee => Some(BaseDt::F64),
+            // Float16 has no IEEE 754 binary16 path in our pipeline; skip it.
+            a2lfile::DataType::Float16Ieee => None,
+        }
     }
 }
 
 /// Combines a base scalar type with `matrix_dim` to produce an `A2lDataType`.
 ///
-/// - `[]`, `[0]`, `[1]` → scalar
-/// - `[N]` (N > 1) → 1D array
-/// - `[R, C]` → 2D matrix (row-major, matches existing convention)
-/// - 3+ dims → `None` (caller should warn and skip)
-#[allow(dead_code)]
+/// Rule (consistent with how `A2lDataType` itself is shaped — scalar / 1D /
+/// 2D only):
+///
+/// - Any dim equal to `0` → `None` (caller should warn and skip)
+/// - `matrix_dim.len() > 2` → `None` (3+ dims not representable)
+/// - `[]` or all-`1` dims (`[1]`, `[1, 1]`) → scalar
+/// - `[N]` with `N > 1` → 1D `Array(N)`
+/// - `[N, 1]` or `[1, N]` with `N > 1` → 1D `Array(N)` (singleton dim squeezed)
+/// - `[R, C]` with `R > 1` AND `C > 1` → 2D `Matrix(R, C)`
 pub(super) fn component_datatype(base: BaseDt, matrix_dim: &[u16]) -> Option<A2lDataType> {
-    let n = matrix_dim.iter().filter(|&&d| d > 1).count();
-    match n {
-        0 => Some(scalar(base)),
-        1 => {
-            let len = matrix_dim.iter().copied().find(|&d| d > 1).unwrap() as usize;
-            Some(array(base, len))
-        }
-        2 if matrix_dim.len() == 2 => {
-            let r = matrix_dim[0] as usize;
-            let c = matrix_dim[1] as usize;
-            Some(matrix(base, r, c))
-        }
+    // Reject zero dims and >2D shapes outright.
+    if matrix_dim.contains(&0) {
+        return None;
+    }
+    if matrix_dim.len() > 2 {
+        return None;
+    }
+
+    match matrix_dim {
+        // Scalar cases.
+        [] | [1] | [1, 1] => Some(scalar(base)),
+        // Pure 1D array.
+        [n] => Some(array(base, *n as usize)),
+        // 2D shape with a squeezable singleton becomes 1D.
+        [n, 1] | [1, n] => Some(array(base, *n as usize)),
+        // True 2D matrix.
+        [r, c] => Some(matrix(base, *r as usize, *c as usize)),
+        // Unreachable: covered by the length guard above, but keep exhaustive.
         _ => None,
     }
 }
@@ -97,7 +121,6 @@ fn scalar(b: BaseDt) -> A2lDataType {
         BaseDt::I64 => A2lDataType::I64,
         BaseDt::F32 => A2lDataType::F32,
         BaseDt::F64 => A2lDataType::F64,
-        BaseDt::Bool => A2lDataType::Bool,
     }
 }
 
@@ -113,7 +136,6 @@ fn array(b: BaseDt, n: usize) -> A2lDataType {
         BaseDt::I64 => A2lDataType::I64Array(n),
         BaseDt::F32 => A2lDataType::F32Array(n),
         BaseDt::F64 => A2lDataType::F64Array(n),
-        BaseDt::Bool => A2lDataType::BoolArray(n),
     }
 }
 
@@ -129,22 +151,17 @@ fn matrix(b: BaseDt, r: usize, c: usize) -> A2lDataType {
         BaseDt::I64 => A2lDataType::I64Matrix(r, c),
         BaseDt::F32 => A2lDataType::F32Matrix(r, c),
         BaseDt::F64 => A2lDataType::F64Matrix(r, c),
-        BaseDt::Bool => A2lDataType::BoolMatrix(r, c),
     }
 }
 
-use std::collections::HashMap;
-
 /// Lookup tables built once per flatten call.
-#[allow(dead_code)]
 pub(super) struct TypedefTables<'a> {
-    pub structures: HashMap<&'a str, &'a a2lfile::TypedefStructure>,
-    pub measurements: HashMap<&'a str, &'a a2lfile::TypedefMeasurement>,
-    pub characteristics: HashMap<&'a str, &'a a2lfile::TypedefCharacteristic>,
+    pub(super) structures: HashMap<&'a str, &'a a2lfile::TypedefStructure>,
+    pub(super) measurements: HashMap<&'a str, &'a a2lfile::TypedefMeasurement>,
+    pub(super) characteristics: HashMap<&'a str, &'a a2lfile::TypedefCharacteristic>,
 }
 
 impl<'a> TypedefTables<'a> {
-    #[allow(dead_code)]
     pub(super) fn build(module: &'a a2lfile::Module) -> Self {
         use a2lfile::A2lObjectName;
         let mut structures = HashMap::with_capacity(module.typedef_structure.len());
@@ -187,14 +204,27 @@ mod tests {
     }
 
     #[test]
-    fn datatype_scalar() {
+    fn datatype_scalar_empty() {
         assert!(matches!(
             component_datatype(BaseDt::F32, &[]),
             Some(A2lDataType::F32)
         ));
+    }
+
+    #[test]
+    fn datatype_scalar_single_one() {
         assert!(matches!(
             component_datatype(BaseDt::U16, &[1]),
             Some(A2lDataType::U16)
+        ));
+    }
+
+    #[test]
+    fn datatype_scalar_one_one() {
+        // [1, 1] squeezes to scalar.
+        assert!(matches!(
+            component_datatype(BaseDt::I32, &[1, 1]),
+            Some(A2lDataType::I32)
         ));
     }
 
@@ -207,6 +237,24 @@ mod tests {
         assert!(matches!(
             component_datatype(BaseDt::U8, &[10]),
             Some(A2lDataType::U8Array(10))
+        ));
+    }
+
+    #[test]
+    fn datatype_n_by_one_squeezes_to_array() {
+        // [5, 1] squeezes the trailing singleton → 1D Array(5).
+        assert!(matches!(
+            component_datatype(BaseDt::U8, &[5, 1]),
+            Some(A2lDataType::U8Array(5))
+        ));
+    }
+
+    #[test]
+    fn datatype_one_by_n_squeezes_to_array() {
+        // [1, 5] squeezes the leading singleton → 1D Array(5).
+        assert!(matches!(
+            component_datatype(BaseDt::U8, &[1, 5]),
+            Some(A2lDataType::U8Array(5))
         ));
     }
 
@@ -224,10 +272,50 @@ mod tests {
     }
 
     #[test]
-    fn datatype_zero_dim_treated_as_scalar() {
-        assert!(matches!(
-            component_datatype(BaseDt::F32, &[0]),
-            Some(A2lDataType::F32)
-        ));
+    fn datatype_three_dim_with_singleton_still_unsupported() {
+        // [2, 3, 1] has only 2 effective dims, but len() > 2 so we reject.
+        // The flatten pipeline never sees real 3D shapes; rejecting keeps the
+        // contract simple.
+        assert!(component_datatype(BaseDt::F32, &[2, 3, 1]).is_none());
+    }
+
+    #[test]
+    fn datatype_zero_dim_rejected_1d() {
+        assert!(component_datatype(BaseDt::F32, &[0]).is_none());
+    }
+
+    #[test]
+    fn datatype_zero_dim_rejected_2d() {
+        // [3, 0] has a zero dim — nonsensical, reject.
+        assert!(component_datatype(BaseDt::F32, &[3, 0]).is_none());
+        assert!(component_datatype(BaseDt::F32, &[0, 3]).is_none());
+    }
+
+    #[test]
+    fn from_a2lfile_maps_known_types() {
+        assert_eq!(
+            BaseDt::from_a2lfile(&a2lfile::DataType::Ubyte),
+            Some(BaseDt::U8)
+        );
+        assert_eq!(
+            BaseDt::from_a2lfile(&a2lfile::DataType::Float64Ieee),
+            Some(BaseDt::F64)
+        );
+        assert_eq!(
+            BaseDt::from_a2lfile(&a2lfile::DataType::AInt64),
+            Some(BaseDt::I64)
+        );
+    }
+
+    #[test]
+    fn from_a2lfile_rejects_float16() {
+        assert_eq!(BaseDt::from_a2lfile(&a2lfile::DataType::Float16Ieee), None);
+    }
+
+    /// Ensure `MAX_DEPTH` keeps its documented value — the recursion guard in
+    /// Task 4/5 will rely on this.
+    #[test]
+    fn max_depth_constant() {
+        assert_eq!(MAX_DEPTH, 8);
     }
 }
