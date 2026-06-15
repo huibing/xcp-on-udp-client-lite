@@ -9,6 +9,8 @@ pub mod compute_method;
 pub mod reader;
 pub mod types;
 
+mod typedef_flatten;
+
 // Re-export commonly used types
 pub use compute_method::{CompuMethod, CompuMethodFactory, CompuVtabEntry};
 pub use reader::{
