@@ -564,4 +564,160 @@ ASAP2_VERSION 1 71
             assert_eq!(meas.unit, None, "unit is filled later by reader.rs");
         }
     }
+
+    // -------------------- Task 5: edge-case coverage --------------------
+
+    /// Nested TYPEDEF_STRUCTURE: Outer { foo: Inner @16, bar: f32val @32 } and
+    /// Inner { x: u16val @0, y: u16val @2 }. Asserts dotted paths and address
+    /// arithmetic compose correctly across nesting.
+    const NESTED_A2L: &str = r#"
+ASAP2_VERSION 1 71
+/begin PROJECT P "" /begin MODULE M ""
+  /begin TYPEDEF_MEASUREMENT u16val "" UWORD NO_COMPU_METHOD 0 0 0 65535 /end TYPEDEF_MEASUREMENT
+  /begin TYPEDEF_MEASUREMENT f32val "" FLOAT32_IEEE NO_COMPU_METHOD 0 0 -1e30 1e30 /end TYPEDEF_MEASUREMENT
+  /begin TYPEDEF_STRUCTURE Inner "" 4
+    /begin STRUCTURE_COMPONENT x u16val 0 /end STRUCTURE_COMPONENT
+    /begin STRUCTURE_COMPONENT y u16val 2 /end STRUCTURE_COMPONENT
+  /end TYPEDEF_STRUCTURE
+  /begin TYPEDEF_STRUCTURE Outer "" 36
+    /begin STRUCTURE_COMPONENT foo Inner  16 /end STRUCTURE_COMPONENT
+    /begin STRUCTURE_COMPONENT bar f32val 32 /end STRUCTURE_COMPONENT
+  /end TYPEDEF_STRUCTURE
+  /begin INSTANCE outer "" Outer 0x1000 /end INSTANCE
+/end MODULE /end PROJECT
+"#;
+
+    #[test]
+    fn flatten_nested_struct() {
+        let f = parse_a2l(NESTED_A2L);
+        let module = &f.project.module[0];
+        let measurements = flatten_instance_measurements(module);
+        assert_eq!(
+            measurements.len(),
+            3,
+            "expected 3 leaf measurements, got {measurements:?}",
+        );
+
+        let by_name: HashMap<&str, &A2lMeasurement> =
+            measurements.iter().map(|m| (m.name.as_str(), m)).collect();
+
+        let foo_x = by_name.get("outer.foo.x").expect("outer.foo.x missing");
+        assert_eq!(foo_x.address, 0x1010);
+        assert!(matches!(foo_x.data_type, A2lDataType::U16));
+
+        let foo_y = by_name.get("outer.foo.y").expect("outer.foo.y missing");
+        assert_eq!(foo_y.address, 0x1012);
+        assert!(matches!(foo_y.data_type, A2lDataType::U16));
+
+        let bar = by_name.get("outer.bar").expect("outer.bar missing");
+        assert_eq!(bar.address, 0x1020);
+        assert!(matches!(bar.data_type, A2lDataType::F32));
+    }
+
+    /// STRUCTURE_COMPONENT with MATRIX_DIM should produce a 1D array leaf via
+    /// `component_datatype`.
+    const ARRAY_A2L: &str = r#"
+ASAP2_VERSION 1 71
+/begin PROJECT P "" /begin MODULE M ""
+  /begin TYPEDEF_MEASUREMENT f32val "" FLOAT32_IEEE NO_COMPU_METHOD 0 0 -1e30 1e30 /end TYPEDEF_MEASUREMENT
+  /begin TYPEDEF_STRUCTURE Vec4 "" 16
+    /begin STRUCTURE_COMPONENT v f32val 0
+      MATRIX_DIM 4
+    /end STRUCTURE_COMPONENT
+  /end TYPEDEF_STRUCTURE
+  /begin INSTANCE vec4_inst "" Vec4 0x2000 /end INSTANCE
+/end MODULE /end PROJECT
+"#;
+
+    #[test]
+    fn flatten_array_component() {
+        let f = parse_a2l(ARRAY_A2L);
+        let module = &f.project.module[0];
+        let measurements = flatten_instance_measurements(module);
+        assert_eq!(measurements.len(), 1, "expected 1 leaf measurement");
+
+        let m = &measurements[0];
+        assert_eq!(m.name, "vec4_inst.v");
+        assert_eq!(m.address, 0x2000);
+        assert!(
+            matches!(m.data_type, A2lDataType::F32Array(4)),
+            "expected F32Array(4), got {:?}",
+            m.data_type,
+        );
+    }
+
+    /// Mixed struct: one good component + one bogus type reference. The bad
+    /// component is skipped with a warning; the good one is emitted.
+    const UNKNOWN_TYPE_A2L: &str = r#"
+ASAP2_VERSION 1 71
+/begin PROJECT P "" /begin MODULE M ""
+  /begin TYPEDEF_MEASUREMENT f32val "" FLOAT32_IEEE NO_COMPU_METHOD 0 0 -1e30 1e30 /end TYPEDEF_MEASUREMENT
+  /begin TYPEDEF_STRUCTURE Mixed "" 8
+    /begin STRUCTURE_COMPONENT good f32val     0 /end STRUCTURE_COMPONENT
+    /begin STRUCTURE_COMPONENT bad  Nonexistent 4 /end STRUCTURE_COMPONENT
+  /end TYPEDEF_STRUCTURE
+  /begin INSTANCE mixed "" Mixed 0x3000 /end INSTANCE
+/end MODULE /end PROJECT
+"#;
+
+    #[test]
+    fn flatten_unknown_type_skipped() {
+        let f = parse_a2l(UNKNOWN_TYPE_A2L);
+        let module = &f.project.module[0];
+        let measurements = flatten_instance_measurements(module);
+        assert_eq!(
+            measurements.len(),
+            1,
+            "expected only the good component to survive: {measurements:?}",
+        );
+        assert_eq!(measurements[0].name, "mixed.good");
+    }
+
+    /// INSTANCE with a TYPE name that doesn't resolve to any TYPEDEF_STRUCTURE.
+    /// The flattener must warn and produce no leaves.
+    const ORPHAN_INSTANCE_A2L: &str = r#"
+ASAP2_VERSION 1 71
+/begin PROJECT P "" /begin MODULE M ""
+  /begin INSTANCE orphan "" NoSuchType 0x4000 /end INSTANCE
+/end MODULE /end PROJECT
+"#;
+
+    #[test]
+    fn flatten_orphan_instance_skipped() {
+        let f = parse_a2l(ORPHAN_INSTANCE_A2L);
+        let module = &f.project.module[0];
+        let measurements = flatten_instance_measurements(module);
+        assert!(
+            measurements.is_empty(),
+            "expected no leaves for orphan INSTANCE: {measurements:?}",
+        );
+    }
+
+    /// Self-referential cycle: A.b is type B, B.a is type A. The cycle guard
+    /// must stop recursion at MAX_DEPTH and the test must complete promptly.
+    /// No leaves are produced because there's no TYPEDEF_MEASUREMENT in the
+    /// cycle; only nested structures.
+    const CYCLE_A2L: &str = r#"
+ASAP2_VERSION 1 71
+/begin PROJECT P "" /begin MODULE M ""
+  /begin TYPEDEF_STRUCTURE A "" 8
+    /begin STRUCTURE_COMPONENT b B 0 /end STRUCTURE_COMPONENT
+  /end TYPEDEF_STRUCTURE
+  /begin TYPEDEF_STRUCTURE B "" 8
+    /begin STRUCTURE_COMPONENT a A 0 /end STRUCTURE_COMPONENT
+  /end TYPEDEF_STRUCTURE
+  /begin INSTANCE root "" A 0x5000 /end INSTANCE
+/end MODULE /end PROJECT
+"#;
+
+    #[test]
+    fn flatten_cycle_guard_does_not_hang() {
+        let f = parse_a2l(CYCLE_A2L);
+        let module = &f.project.module[0];
+        let measurements = flatten_instance_measurements(module);
+        assert!(
+            measurements.is_empty(),
+            "cycle without leaf measurements should yield empty: {measurements:?}",
+        );
+    }
 }
