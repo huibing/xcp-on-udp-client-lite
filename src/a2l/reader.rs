@@ -470,11 +470,34 @@ impl A2lReader {
         let mut characteristics = Vec::new();
 
         for module in &self.file.project.module {
+            // Existing: parse flat CHARACTERISTIC blocks.
             for ch in &module.characteristic {
                 if let Some(info) = self.parse_characteristic(ch, module) {
                     characteristics.push(info);
                 }
             }
+            // NEW: append synthetic entries from INSTANCE+TYPEDEF_STRUCTURE+
+            // TYPEDEF_CHARACTERISTIC flattening. Insertion order is
+            // load-bearing: flat-parsed entries come first so they win on name
+            // collisions in any downstream lookup-by-name code.
+            let mut flattened = super::typedef_flatten::flatten_instance_characteristics(module);
+            // Resolve unit via existing COMPU_METHOD lookup (typedef_flatten
+            // doesn't have access to the compu_method tables).
+            for c in &mut flattened {
+                c.unit = self.get_unit_for_conversion(&c.conversion_name);
+            }
+            // Drop any synthetic name that collides with a flat name; warn.
+            let flat_names: HashSet<&str> =
+                characteristics.iter().map(|c| c.name.as_str()).collect();
+            flattened.retain(|c| {
+                if flat_names.contains(c.name.as_str()) {
+                    tracing::warn!(name = %c.name, "structural calibration collides with flat CHARACTERISTIC, dropped");
+                    false
+                } else {
+                    true
+                }
+            });
+            characteristics.extend(flattened);
         }
 
         characteristics
@@ -2798,6 +2821,42 @@ ASAP2_VERSION 1 71
         assert!(names.contains("lookup.output_spline"));
         // Flat parsed first, synthetic appended.
         assert_eq!(measurements[0].name, "counter");
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn reader_appends_structural_characteristics() {
+        let src = r#"
+ASAP2_VERSION 1 71
+/begin PROJECT P "" /begin MODULE M ""
+  /begin RECORD_LAYOUT __F32 FNC_VALUES 1 FLOAT32_IEEE ROW_DIR DIRECT /end RECORD_LAYOUT
+  /begin CHARACTERISTIC flat_gain "" VALUE 0x7000 __F32 0 NO_COMPU_METHOD -1e30 1e30 /end CHARACTERISTIC
+  /begin TYPEDEF_CHARACTERISTIC gain_t "" VALUE __F32 0 NO_COMPU_METHOD -1e30 1e30 /end TYPEDEF_CHARACTERISTIC
+  /begin TYPEDEF_CHARACTERISTIC offset_t "" VALUE __F32 0 NO_COMPU_METHOD -1e30 1e30 /end TYPEDEF_CHARACTERISTIC
+  /begin TYPEDEF_STRUCTURE Tuning "" 8
+    /begin STRUCTURE_COMPONENT gain   gain_t   0 /end STRUCTURE_COMPONENT
+    /begin STRUCTURE_COMPONENT offset offset_t 4 /end STRUCTURE_COMPONENT
+  /end TYPEDEF_STRUCTURE
+  /begin INSTANCE tuning "" Tuning 0x6000 /end INSTANCE
+/end MODULE /end PROJECT
+"#;
+        let tmp = std::env::temp_dir().join(format!(
+            "xcp_struct_cal_test_{}_{}.a2l",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, src).unwrap();
+        let reader = super::A2lReader::load(&tmp).unwrap();
+        let chars = reader.get_characteristics();
+        let names: HashSet<&str> = chars.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains("flat_gain"), "flat characteristic preserved");
+        assert!(names.contains("tuning.gain"));
+        assert!(names.contains("tuning.offset"));
+        // Flat first, synthetic appended.
+        assert_eq!(chars[0].name, "flat_gain");
         std::fs::remove_file(&tmp).ok();
     }
 }

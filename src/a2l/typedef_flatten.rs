@@ -3,14 +3,8 @@
 //!
 //! See `docs/superpowers/specs/2026-06-15-structural-measurements-design.md`.
 
-// `TypedefTables::characteristics` is populated for Task 8 (structural
-// calibrations) but is not yet consumed by reader.rs. Keep a single
-// module-level allow rather than annotating individual fields. Remove once
-// Task 8 wires characteristic flattening into the reader.
-#![allow(dead_code)]
-
-use crate::a2l::reader::A2lMeasurement;
-use crate::a2l::types::A2lDataType;
+use crate::a2l::reader::{A2lCharacteristic, A2lMeasurement};
+use crate::a2l::types::{A2lDataType, CharacteristicType, StorageOrder};
 use std::collections::HashMap;
 
 /// Maximum nesting depth before we declare a cycle and stop recursing.
@@ -363,6 +357,204 @@ fn flatten_struct(
 /// `None` and `Some` with empty `dim_list` both mean "no MATRIX_DIM" -> scalar.
 fn matrix_dim_slice(md: &Option<a2lfile::MatrixDim>) -> &[u16] {
     md.as_ref().map(|m| m.dim_list.as_slice()).unwrap_or(&[])
+}
+
+/// Resolve a TYPEDEF_CHARACTERISTIC's `record_layout` (deposit) name to its
+/// FNC_VALUES base datatype, mapped to our internal `BaseDt`.
+///
+/// Returns `None` if the record layout is missing, has no FNC_VALUES, or the
+/// datatype is unsupported (e.g. FLOAT16_IEEE).
+fn lookup_deposit_basetype(
+    typedef_char: &a2lfile::TypedefCharacteristic,
+    module: &a2lfile::Module,
+) -> Option<BaseDt> {
+    use a2lfile::A2lObjectName;
+    let rl = module
+        .record_layout
+        .iter()
+        .find(|rl| rl.get_name() == typedef_char.record_layout.as_str())?;
+    let fnc = rl.fnc_values.as_ref()?;
+    BaseDt::from_a2lfile(&fnc.datatype)
+}
+
+/// Flatten all INSTANCE blocks in the module whose type resolves to a
+/// TYPEDEF_STRUCTURE composed of TYPEDEF_CHARACTERISTIC components.
+///
+/// Returns synthetic A2lCharacteristic entries with dotted names like
+/// `instance.component[.subcomponent...]`.
+///
+/// Only VALUE-shaped components are supported in this iteration. CURVE/MAP
+/// inside structs are warned and skipped. Components whose type is not a
+/// TYPEDEF_CHARACTERISTIC or TYPEDEF_STRUCTURE are skipped with a warning.
+/// Cycles are guarded at depth `MAX_DEPTH`.
+pub(super) fn flatten_instance_characteristics(module: &a2lfile::Module) -> Vec<A2lCharacteristic> {
+    use a2lfile::A2lObjectName;
+    let tables = TypedefTables::build(module);
+    let mut out = Vec::new();
+    for inst in &module.instance {
+        // Array-of-structs (INSTANCE with MATRIX_DIM) is a non-goal; the
+        // measurement path already warns, so just skip silently here to avoid
+        // duplicate noise.
+        if inst
+            .matrix_dim
+            .as_ref()
+            .is_some_and(|md| !md.dim_list.is_empty())
+        {
+            continue;
+        }
+        let ext = inst
+            .ecu_address_extension
+            .as_ref()
+            .map(|e| e.extension as u8)
+            .unwrap_or(0);
+        let inst_name = inst.get_name();
+        flatten_struct_chars(
+            &tables,
+            inst.type_ref.as_str(),
+            inst_name,
+            &mut Vec::new(),
+            inst.start_address,
+            ext,
+            0,
+            module,
+            &mut out,
+        );
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flatten_struct_chars(
+    tables: &TypedefTables<'_>,
+    type_name: &str,
+    instance: &str,
+    path: &mut Vec<String>,
+    base_addr: u32,
+    ext: u8,
+    depth: usize,
+    module: &a2lfile::Module,
+    out: &mut Vec<A2lCharacteristic>,
+) {
+    if depth >= MAX_DEPTH {
+        tracing::warn!(
+            instance,
+            type_ref = type_name,
+            depth,
+            "max nesting depth reached - possible TYPEDEF_STRUCTURE cycle, stopping recursion (calibration path)",
+        );
+        return;
+    }
+    let Some(structure) = tables.structures.get(type_name) else {
+        // Only emit the top-level "INSTANCE references unknown TYPEDEF_STRUCTURE"
+        // warning at depth 0; the measurement path will already have warned for
+        // the same instance, so stay quiet for nested misses to avoid duplicate
+        // log spam.
+        return;
+    };
+    for comp in &structure.structure_component {
+        let Some(comp_addr) = base_addr.checked_add(comp.address_offset) else {
+            tracing::warn!(
+                instance,
+                component = %comp.component_name,
+                base_addr,
+                offset = comp.address_offset,
+                "STRUCTURE_COMPONENT address overflow, skipped (calibration path)"
+            );
+            continue;
+        };
+        let comp_type = comp.component_type.as_str();
+
+        // Try as nested struct first.
+        if tables.structures.contains_key(comp_type) {
+            path.push(comp.component_name.clone());
+            flatten_struct_chars(
+                tables,
+                comp_type,
+                instance,
+                path,
+                comp_addr,
+                ext,
+                depth + 1,
+                module,
+                out,
+            );
+            path.pop();
+            continue;
+        }
+
+        // Then as a TYPEDEF_CHARACTERISTIC leaf.
+        let Some(typedef_char) = tables.characteristics.get(comp_type) else {
+            // Could be a TYPEDEF_MEASUREMENT (handled by the measurement path)
+            // or genuinely unknown. The measurement flattener already warns for
+            // the unknown case; emit a debug-level note here only.
+            tracing::debug!(
+                instance,
+                component = %comp.component_name,
+                type_ref = comp_type,
+                "STRUCTURE_COMPONENT type is not a TYPEDEF_CHARACTERISTIC or nested TYPEDEF_STRUCTURE in calibration flattener, skipped",
+            );
+            continue;
+        };
+
+        // Only VALUE-shaped TYPEDEF_CHARACTERISTICs are supported in this
+        // iteration. CURVE/MAP/VAL_BLK/ASCII inside structs require axis
+        // descriptions and storage-order plumbing we haven't designed yet.
+        if !matches!(
+            typedef_char.characteristic_type,
+            a2lfile::CharacteristicType::Value
+        ) {
+            tracing::warn!(
+                instance,
+                component = %comp.component_name,
+                type_ref = comp_type,
+                kind = ?typedef_char.characteristic_type,
+                "non-VALUE TYPEDEF_CHARACTERISTIC inside structure not supported, skipped",
+            );
+            continue;
+        }
+
+        let Some(base) = lookup_deposit_basetype(typedef_char, module) else {
+            tracing::warn!(
+                instance,
+                component = %comp.component_name,
+                deposit = %typedef_char.record_layout,
+                "unable to resolve deposit RECORD_LAYOUT or unsupported FNC_VALUES datatype, skipped",
+            );
+            continue;
+        };
+
+        let matrix = matrix_dim_slice(&comp.matrix_dim);
+        let Some(data_type) = component_datatype(base, matrix) else {
+            tracing::warn!(
+                instance,
+                component = %comp.component_name,
+                ?matrix,
+                "STRUCTURE_COMPONENT MATRIX_DIM not representable (3+ dims or zero dim), skipped",
+            );
+            continue;
+        };
+
+        path.push(comp.component_name.clone());
+        let leaf_path: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+        let name = build_path(instance, &leaf_path);
+        path.pop();
+
+        out.push(A2lCharacteristic {
+            name,
+            description: typedef_char.long_identifier.clone(),
+            address: comp_addr,
+            address_ext: ext,
+            data_type,
+            // unit is filled in by reader.rs via get_unit_for_conversion.
+            unit: None,
+            min: typedef_char.lower_limit,
+            max: typedef_char.upper_limit,
+            characteristic_type: CharacteristicType::Value,
+            axis_info: Vec::new(),
+            storage_order: StorageOrder::default(),
+            conversion_name: typedef_char.conversion.clone(),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -719,5 +911,64 @@ ASAP2_VERSION 1 71
             measurements.is_empty(),
             "cycle without leaf measurements should yield empty: {measurements:?}",
         );
+    }
+
+    // -------------------- Task 8: structural calibrations --------------------
+
+    /// Minimal A2L exercising structural calibrations: one INSTANCE of a
+    /// TYPEDEF_STRUCTURE composed of two FLOAT32 TYPEDEF_CHARACTERISTIC
+    /// components.
+    const CAL_A2L: &str = r#"
+ASAP2_VERSION 1 71
+/begin PROJECT P "" /begin MODULE M ""
+  /begin RECORD_LAYOUT __F32 FNC_VALUES 1 FLOAT32_IEEE ROW_DIR DIRECT /end RECORD_LAYOUT
+  /begin TYPEDEF_CHARACTERISTIC gain_t "" VALUE __F32 0 NO_COMPU_METHOD -1e30 1e30 /end TYPEDEF_CHARACTERISTIC
+  /begin TYPEDEF_CHARACTERISTIC offset_t "" VALUE __F32 0 NO_COMPU_METHOD -1e30 1e30 /end TYPEDEF_CHARACTERISTIC
+  /begin TYPEDEF_STRUCTURE Tuning "" 8
+    /begin STRUCTURE_COMPONENT gain   gain_t   0 /end STRUCTURE_COMPONENT
+    /begin STRUCTURE_COMPONENT offset offset_t 4 /end STRUCTURE_COMPONENT
+  /end TYPEDEF_STRUCTURE
+  /begin INSTANCE tuning "" Tuning 0x6000 /end INSTANCE
+/end MODULE /end PROJECT
+"#;
+
+    #[test]
+    fn flatten_simple_struct_characteristics() {
+        let f = parse_a2l(CAL_A2L);
+        let module = &f.project.module[0];
+        let cs = flatten_instance_characteristics(module);
+        let names: Vec<_> = cs.iter().map(|c| (c.name.as_str(), c.address)).collect();
+        assert_eq!(cs.len(), 2, "expected 2 leaf characteristics, got {cs:?}");
+        assert!(
+            names.contains(&("tuning.gain", 0x6000)),
+            "missing tuning.gain @ 0x6000; got {names:?}",
+        );
+        assert!(
+            names.contains(&("tuning.offset", 0x6004)),
+            "missing tuning.offset @ 0x6004; got {names:?}",
+        );
+        for c in &cs {
+            assert!(
+                matches!(
+                    c.characteristic_type,
+                    crate::a2l::types::CharacteristicType::Value
+                ),
+                "expected VALUE, got {:?} for {}",
+                c.characteristic_type,
+                c.name,
+            );
+            assert!(
+                c.axis_info.is_empty(),
+                "axis_info should be empty for VALUE"
+            );
+            assert!(
+                matches!(c.data_type, A2lDataType::F32),
+                "expected F32, got {:?} for {}",
+                c.data_type,
+                c.name,
+            );
+            assert_eq!(c.conversion_name, "NO_COMPU_METHOD");
+            assert_eq!(c.unit, None, "unit is filled later by reader.rs");
+        }
     }
 }
