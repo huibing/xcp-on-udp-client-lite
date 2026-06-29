@@ -525,6 +525,9 @@
         </div>
         <div class="modal-footer">
           <span v-if="matrixMsg" class="modal-msg-inline" :class="matrixErr ? 'msg-err' : 'msg-ok'">{{ matrixMsg }}</span>
+          <button class="exp-btn" :disabled="matrixLoading || !matrixData.length"
+            title="Copy table (including axis headers) to clipboard as TSV"
+            @click="copyMatrixToClipboard">📋 Copy</button>
           <button class="exp-btn" @click="matrixTarget = null">Close</button>
         </div>
       </div>
@@ -1684,6 +1687,55 @@ async function showMatrix(v) {
     matrixErr.value = true
   } finally {
     matrixLoading.value = false
+  }
+}
+
+async function copyMatrixToClipboard() {
+  if (!matrixTarget.value || !matrixData.value.length) return
+  try {
+    const cols = matrixCols.value
+    const rows = matrixRows.value
+    const xName = matrixXAxisName.value || ''
+    const yName = matrixTransposed.value ? (matrixYAxisName.value || '') : ''
+    const xVals = matrixXAxisValues.value
+    const yVals = matrixYAxisValues.value
+
+    const lines = []
+    const header = []
+    header.push(yName)
+    for (let ci = 0; ci < cols; ci++) {
+      header.push(String(xVals[ci] ?? ci))
+    }
+    lines.push(header.join('\t'))
+
+    for (let ri = 0; ri < rows; ri++) {
+      const row = []
+      row.push(String(matrixTransposed.value ? (yVals[ri] ?? ri) : ri))
+      const dataRow = matrixData.value[ri] || []
+      for (let ci = 0; ci < cols; ci++) {
+        row.push(String(dataRow[ci] ?? ''))
+      }
+      lines.push(row.join('\t'))
+    }
+    const text = lines.join('\n')
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    matrixMsg.value = `Copied ${rows}×${cols} table to clipboard`
+    matrixErr.value = false
+  } catch (e) {
+    matrixMsg.value = `Copy failed: ${e}`
+    matrixErr.value = true
   }
 }
 

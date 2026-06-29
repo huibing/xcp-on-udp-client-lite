@@ -12,7 +12,21 @@ measurements = ["g_xcp_recv_cmd"]
 
 [[events]]
 channel = 1
-measurements = ["CDCInput_VehSpd", "CDCInput_VehM", "CDCInput_BrkP", "CDCInput_BdyYawRate", "CDCInput_BdyYawRatea"]
+measurements = [
+    "CDCInput_VehSpd",
+    "CDCInput_VehM",
+    "CDCInput_BrkP",
+    "CDCInput_BdyYawRate",
+    "CDCInput_BdyYawRatea",
+]
 
 [output]
 mf4 = "./records/recording1.mf4"
+
+[[devices]]
+id = "device_ca3396821d424173840a6d0edf042297"
+name = "ftm"
+address = "172.20.10.6:5555"
+a2l_path = 'E:\Temp\下载\Release_ZONE_FTM_AWD_P0389526_blanc_BL0190_RL234_NB_RC03_0N_260210174955\zc-blanc_front_c-target-xcp.a2l'
+hex_path = 'E:\Temp\下载\Release_ZONE_FTM_AWD_P0389526_blanc_BL0190_RL234_NB_RC03_0N_260210174955\zc-blanc_front_c-inca.hex'
+max_cto = 255
