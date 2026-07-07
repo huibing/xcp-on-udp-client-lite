@@ -2179,29 +2179,6 @@ mod tests {
     }
 
     #[test]
-    fn test_slave_event_clone() {
-        let id = SlaveId::new();
-        let info = SlaveInfo {
-            id,
-            name: "Test".to_string(),
-            transport_config: TransportConfig::Udp {
-                addr: "127.0.0.1:5555".to_string(),
-            },
-            slave_id_string: None,
-            connected: true,
-            connect_info: None,
-        };
-        let event = SlaveEvent::Connected { id, info };
-        let cloned = event.clone();
-        match (event, cloned) {
-            (SlaveEvent::Connected { id: id1, .. }, SlaveEvent::Connected { id: id2, .. }) => {
-                assert_eq!(id1.0, id2.0);
-            }
-            _ => panic!("Event type mismatch"),
-        }
-    }
-
-    #[test]
     fn test_slave_error_conversions() {
         // Test that SlaveError can be created from TransportError
         let transport_err = TransportError::Timeout;
@@ -2385,25 +2362,4 @@ mod tests {
         assert_eq!(chunks[3].1, 0); // no remaining after last packet
         assert_eq!(chunks[3].2, vec![18, 19]);
     }
-}
-
-/// Slave events (for UI updates and monitoring)
-#[derive(Debug, Clone)]
-pub enum SlaveEvent {
-    /// Slave connected
-    Connected { id: SlaveId, info: SlaveInfo },
-    /// Slave disconnected
-    Disconnected { id: SlaveId },
-    /// A2L file loaded
-    A2lLoaded {
-        id: SlaveId,
-        cal_count: usize,
-        meas_count: usize,
-    },
-    /// DAQ started
-    DaqStarted { id: SlaveId },
-    /// DAQ stopped
-    DaqStopped { id: SlaveId },
-    /// Error occurred
-    Error { id: SlaveId, error: String },
 }

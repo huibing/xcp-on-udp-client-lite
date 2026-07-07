@@ -3,14 +3,13 @@
 //! This version supports multiple XCP slave connections:
 //! - Each slave has its own transport, message router, and state
 //! - Provides backward-compatible single-slave API
-//! - Event system for monitoring slave state changes
 
 use crate::protocol::{ConnectInfo, ErrorCode, Mta};
-use crate::slave::{SlaveError, SlaveEvent, SlaveId, SlaveInfo, XcpSlave};
+use crate::slave::{SlaveError, SlaveId, SlaveInfo, XcpSlave};
 use crate::transport::{TransportConfig, TransportError};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 
 /// XCP Client Error
 #[derive(Debug, thiserror::Error)]
@@ -88,9 +87,6 @@ pub struct XcpClient {
 
     /// Current active slave ID (for backward compatibility)
     current_slave_id: Option<SlaveId>,
-
-    /// Event broadcast channel
-    pub(crate) event_tx: broadcast::Sender<SlaveEvent>,
 }
 
 /// Slave accessor for iteration
@@ -112,11 +108,9 @@ impl SlaveAccessor {
 impl XcpClient {
     /// Create a new XCP client
     pub fn new() -> Self {
-        let (event_tx, _) = broadcast::channel(100);
         Self {
             slaves: HashMap::new(),
             current_slave_id: None,
-            event_tx,
         }
     }
 
@@ -142,10 +136,6 @@ impl XcpClient {
             self.current_slave_id = Some(id);
         }
 
-        // Broadcast event
-        let info = slave_arc.lock().await.info.clone();
-        let _ = self.event_tx.send(SlaveEvent::Connected { id, info });
-
         tracing::info!("Connected to slave '{}' with ID {:?}", name_for_log, id);
 
         Ok(id)
@@ -168,9 +158,6 @@ impl XcpClient {
         if let Some(slave) = self.slaves.remove(&id) {
             let mut slave = slave.lock().await;
             slave.disconnect().await?;
-
-            // Broadcast event
-            let _ = self.event_tx.send(SlaveEvent::Disconnected { id });
 
             // Update current slave if needed
             if self.current_slave_id == Some(id) {
@@ -246,21 +233,7 @@ impl XcpClient {
         let mut slave = slave.lock().await;
         slave.load_a2l(path).map_err(|e| XcpError::ParseError(e))?;
 
-        // Broadcast event
-        let cal_count = slave.cal_manager.params().len();
-        let meas_count = slave.daq_manager.lock().await.available_count();
-        let _ = self.event_tx.send(SlaveEvent::A2lLoaded {
-            id,
-            cal_count,
-            meas_count,
-        });
-
         Ok(())
-    }
-
-    /// Subscribe to slave events
-    pub fn subscribe_events(&self) -> broadcast::Receiver<SlaveEvent> {
-        self.event_tx.subscribe()
     }
 
     /// Get number of connected slaves
@@ -643,39 +616,6 @@ mod tests {
     }
 
     #[test]
-    fn test_slave_event_variants() {
-        let id = SlaveId::new();
-        let info = SlaveInfo {
-            id,
-            name: "Test".to_string(),
-            transport_config: TransportConfig::Udp {
-                addr: "127.0.0.1:5555".to_string(),
-            },
-            slave_id_string: None,
-            connected: false,
-            connect_info: None,
-        };
-
-        // Test all event variants can be created
-        let _ = SlaveEvent::Connected {
-            id,
-            info: info.clone(),
-        };
-        let _ = SlaveEvent::Disconnected { id };
-        let _ = SlaveEvent::A2lLoaded {
-            id,
-            cal_count: 10,
-            meas_count: 20,
-        };
-        let _ = SlaveEvent::DaqStarted { id };
-        let _ = SlaveEvent::DaqStopped { id };
-        let _ = SlaveEvent::Error {
-            id,
-            error: "test".to_string(),
-        };
-    }
-
-    #[test]
     fn test_xcp_error_variants() {
         // Test error creation
         let err = XcpError::NotConnected;
@@ -687,33 +627,6 @@ mod tests {
         let err = XcpError::SlaveNotFound("test-id".to_string());
         assert!(err.to_string().contains("Slave not found"));
         assert!(err.to_string().contains("test-id"));
-    }
-
-    #[tokio::test]
-    async fn test_xcp_client_subscribe_events() {
-        let client = XcpClient::new();
-        let mut rx = client.subscribe_events();
-
-        // Send a test event
-        let id = SlaveId::new();
-        let info = SlaveInfo {
-            id,
-            name: "Test".to_string(),
-            transport_config: TransportConfig::Udp {
-                addr: "127.0.0.1:5555".to_string(),
-            },
-            slave_id_string: None,
-            connected: false,
-            connect_info: None,
-        };
-        let event = SlaveEvent::Connected { id, info };
-
-        // Should be able to send without error (though receiver may not get it due to timing)
-        let _ = client.event_tx.send(event);
-
-        // Try to receive (may or may not get the event depending on timing)
-        let result = tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await;
-        assert!(result.is_ok()); // Should not timeout
     }
 
     #[test]

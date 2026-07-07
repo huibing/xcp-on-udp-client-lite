@@ -29,8 +29,7 @@ pub use a2l::{
     XcpChecksum, XcpPage, XcpSegmentInfo,
 };
 pub use slave::{
-    CalibrationWriteError, PageMode, SegmentPageState, SlaveError, SlaveEvent, SlaveId, SlaveInfo,
-    XcpSlave,
+    CalibrationWriteError, PageMode, SegmentPageState, SlaveError, SlaveId, SlaveInfo, XcpSlave,
 };
 pub use variable::{
     DeviceVariable, VariableFilter, VariableSearchManager, VariableSummary, VariableType,
