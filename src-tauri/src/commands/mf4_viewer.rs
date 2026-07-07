@@ -288,8 +288,10 @@ pub struct Mf4ViewerConfig {
     #[serde(default)]
     pub channels_panel_open: bool,
     #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     pub view: Option<ViewConfig>,
     #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     pub groups: Vec<ChartGroupConfig>,
     #[serde(default)]
     pub file_offsets: HashMap<String, f64>,
@@ -388,8 +390,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        collect_mf4_files, f64_values_to_le_bytes, resolve_records_dir, sort_channel_names,
-        Mf4ViewerConfig,
+        collect_mf4_files, f64_values_to_le_bytes, resolve_records_dir, sort_channel_names
     };
 
     struct TempDir {

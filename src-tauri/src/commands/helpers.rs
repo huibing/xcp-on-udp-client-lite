@@ -405,7 +405,7 @@ pub fn bytes_to_calibration_value(
 }
 
 // ─── XCP slave read ───────────────────────────────────────────────────────────
-
+#[allow(dead_code)]
 pub async fn read_calibration_from_slave(
     slave: &XcpSlave,
     param: &CalibrationParam,

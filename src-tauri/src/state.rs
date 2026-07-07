@@ -358,6 +358,7 @@ impl TauriAppState {
         self.devices.iter_mut().find(|d| d.id == id)
     }
 
+    #[allow(dead_code)]
     pub fn current_device(&self) -> Option<&DeviceState> {
         self.current_device_id
             .as_deref()
@@ -367,6 +368,7 @@ impl TauriAppState {
         self.devices.iter().find(|d| d.slave_id == Some(sid))
     }
 
+    #[allow(dead_code)]
     pub fn find_device_by_slave_id_mut(&mut self, sid: SlaveId) -> Option<&mut DeviceState> {
         self.devices.iter_mut().find(|d| d.slave_id == Some(sid))
     }
