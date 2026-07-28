@@ -34,6 +34,7 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::{Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
 
@@ -2229,6 +2230,112 @@ impl DaqManager {
     /// Check if DAQ is running
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    /// Monitor stdin for a quit command ("q" followed by Enter).
+    ///
+    /// Reads stdin line by line. When a line containing exactly "q" (after trimming)
+    /// is received, this method:
+    /// 1. Stops recording (finalizes CSV and MF4 files)
+    /// 2. Stops the DAQ acquisition
+    ///
+    /// This is a blocking async method — it will not return until EOF or "q" is entered.
+    /// Callers typically spawn this in a background task.
+    pub async fn wait_stdin_quit(&self, slave: &XcpSlave) -> Result<(), String> {
+        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| format!("Failed to read stdin: {}", e))?;
+
+            if n == 0 {
+                // EOF
+                tracing::info!("stdin EOF reached, stopping DAQ...");
+                break;
+            }
+
+            let trimmed = line.trim();
+            if trimmed == "q" {
+                tracing::info!("Received quit command via stdin, stopping DAQ and saving files...");
+
+                // Stop recording first (finalizes CSV and MF4 files)
+                if self.recording.load(Ordering::SeqCst) {
+                    if let Err(e) = self.stop_recording().await {
+                        tracing::warn!("Error stopping recording during stdin quit: {}", e);
+                    }
+                }
+
+                // Stop DAQ
+                if self.running.load(Ordering::SeqCst) {
+                    if let Err(e) = self.stop(slave).await {
+                        tracing::warn!("Error stopping DAQ during stdin quit: {}", e);
+                    }
+                }
+
+                tracing::info!("DAQ stopped via stdin quit command");
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Spawn a background task to monitor stdin for quit command.
+    ///
+    /// When the user types "q" + Enter on stdin, the task stops recording
+    /// (saving MF4 file) and stops DAQ acquisition.
+    ///
+    /// Returns a `JoinHandle` that the caller can await or detach.
+    pub fn spawn_stdin_quit_monitor(
+        self: Arc<Self>,
+        slave: Arc<TokioMutex<XcpSlave>>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+            let mut line = String::new();
+
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => {
+                        tracing::info!("stdin EOF reached (spawned monitor)");
+                        break;
+                    }
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if trimmed == "q" {
+                            tracing::info!("Received quit command via stdin (spawned monitor), stopping DAQ...");
+
+                            // Stop recording first (finalizes CSV and MF4 files)
+                            if self.recording.load(Ordering::SeqCst) {
+                                if let Err(e) = self.stop_recording().await {
+                                    tracing::warn!("Error stopping recording during stdin quit: {}", e);
+                                }
+                            }
+
+                            // Stop DAQ
+                            if self.running.load(Ordering::SeqCst) {
+                                let guard = slave.lock().await;
+                                if let Err(e) = self.stop(&*guard).await {
+                                    tracing::warn!("Error stopping DAQ during stdin quit: {}", e);
+                                }
+                            }
+
+                            tracing::info!("DAQ stopped via stdin quit command (spawned monitor)");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to read stdin in spawned monitor: {}", e);
+                        break;
+                    }
+                }
+            }
+        })
     }
 
     /// Restart DAQ if selection changed

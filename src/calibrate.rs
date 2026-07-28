@@ -745,6 +745,8 @@ mod tests {
             dim: (x_size, y_size),
             x_axis: Vec::new(),
             y_axis: Vec::new(),
+            source_line: 100,
+            source_path: None
         }
     }
 

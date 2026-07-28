@@ -1,11 +1,13 @@
 //! Non-interactive DAQ recording CLI subcommand.
 //!
 //! Records XCP DAQ measurements to MF4 and/or CSV files.
-//! Runs until CTRL+C, then gracefully stops DAQ and saves output files.
+//! Runs until CTRL+C or the user enters "q" + Enter on stdin,
+//! then gracefully stops DAQ and saves output files.
 //!
 //! Usage: `cargo run -- daq-record --config daq_record.config.toml`
 
 use serde::Deserialize;
+use tokio::io::AsyncBufReadExt;
 use xcp_client::transport::TransportConfig;
 use xcp_client::{A2lReader, DaqManager, XcpClient};
 
@@ -246,12 +248,39 @@ pub async fn run_daq_record(config_path: &str) -> Result<(), Box<dyn std::error:
     }
     println!("  Recording... Press CTRL+C to stop.\n");
 
-    // Wait for CTRL+C
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|e| format!("Failed to listen for CTRL+C: {}", e))?;
+    // Create channel for stdin quit signal
+    let (quit_tx, quit_rx) = tokio::sync::oneshot::channel::<()>();
 
-    println!("\n\nCTRL+C received. Shutting down gracefully...");
+    // Spawn a background task to monitor stdin for "q"
+    tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    if line.trim() == "q" {
+                        let _ = quit_tx.send(());
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Wait for either CTRL+C or "q" on stdin
+    let quit_reason = tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            "CTRL+C"
+        }
+        _ = quit_rx => {
+            "q"
+        }
+    };
+
+    println!("\n\n{} received. Shutting down gracefully...", quit_reason);
 
     // Graceful shutdown: stop recording → stop DAQ → free DAQ → disconnect
     if daq_manager.is_recording() {
