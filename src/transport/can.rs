@@ -14,14 +14,19 @@
 //! frame to the XCP layer. Use one channel (or one transport) per XCP slave when
 //! multiple slaves share a bus, since frames are not demultiplexed by CAN ID here.
 //!
-//! Configuration:
-//! - `PCAN_BASIC_DLL` env var: path to `PCANBasic.dll`. May be the full file
-//!   path (e.g. `...\x64\PCANBasic.dll`) or just the directory containing it.
-//! - `PCAN_BITRATE` env var: bit rate selection. Accepts named classic rates
-//!   (`1M`, `500K`, `250K`, `125K`, `100K`), a raw BTR0/BTR1 code, or a full
-//!   CAN-FD bit rate string (contains `=`), in which case CAN-FD is used. When
-//!   unset, CAN-FD is attempted first with a default timing and the transport
-//!   falls back to classic CAN at 500k.
+//! Configuration is driven by [`CanTransportConfig`], which is normally built
+//! from the A2L `XCP_ON_CAN` block (nominal bit rate and optional CAN-FD data
+//! bit rate). The transport uses those values directly and never probes for a
+//! working bit rate on its own.
+//!
+//! Environment variables (optional):
+//! - `PCAN_BASIC_DLL`: path to `PCANBasic.dll`. May be the full file path
+//!   (e.g. `...\x64\PCANBasic.dll`) or just the directory containing it.
+//! - `PCAN_BITRATE`: used only when the config specifies no bit rate. Accepts
+//!   named classic rates (`1M`, `500K`, `250K`, `125K`, `100K`), a raw
+//!   BTR0/BTR1 code, or a full CAN-FD bit rate string (contains `=`).
+//! - `PCAN_FD_CLOCK`: CAN-FD controller clock in Hz used to derive timing from
+//!   bit rates (default 80 MHz).
 
 use super::transport::{Transport, TransportError, TransportType};
 use async_trait::async_trait;
@@ -47,10 +52,22 @@ const PCAN_MESSAGE_FD: u8 = 0x04;
 
 // Classic CAN bit rate timing codes.
 const PCAN_BAUD_1M: u16 = 0x0014;
+const PCAN_BAUD_800K: u16 = 0x0016;
 const PCAN_BAUD_500K: u16 = 0x001C;
 const PCAN_BAUD_250K: u16 = 0x011C;
 const PCAN_BAUD_125K: u16 = 0x031C;
 const PCAN_BAUD_100K: u16 = 0x432F;
+const PCAN_BAUD_95K: u16 = 0xC34E;
+const PCAN_BAUD_83K: u16 = 0x852B;
+const PCAN_BAUD_50K: u16 = 0x472F;
+const PCAN_BAUD_47K: u16 = 0x1414;
+const PCAN_BAUD_33K: u16 = 0x8B2F;
+const PCAN_BAUD_20K: u16 = 0x532F;
+const PCAN_BAUD_10K: u16 = 0x672F;
+const PCAN_BAUD_5K: u16 = 0x7F7F;
+
+/// Common default nominal bit rate in bit/s.
+const PCAN_BAUD_500K_BPS: u32 = 500_000;
 
 // Channel handles.
 const PCAN_USBBUS1: u16 = 0x51;
@@ -66,12 +83,13 @@ const PCAN_LANGUAGE_ENGLISH: u16 = 0x09;
 // Misc limits.
 const MAX_CAN_DATA: usize = 64;
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
-const DEFAULT_FD_BITRATE: &str =
-    "f_clock=80000000,nom_brp=10,nom_tseg1=5,nom_tseg2=2,nom_sjw=1,\
-     data_brp=4,data_tseg1=7,data_tseg2=2,data_sjw=1";
 
 const PCAN_DLL_ENV: &str = "PCAN_BASIC_DLL";
 const PCAN_BITRATE_ENV: &str = "PCAN_BITRATE";
+const PCAN_FD_CLOCK_ENV: &str = "PCAN_FD_CLOCK";
+
+/// Default CAN-FD controller clock used to derive timing from bit rates.
+const DEFAULT_FD_CLOCK_HZ: u64 = 80_000_000;
 
 /// Known DLL locations, tried after the environment override.
 const PCAN_DLL_FALLBACK_PATHS: &[&str] = &[
@@ -490,18 +508,137 @@ fn parse_bitrate(value: &str) -> Result<(Option<u16>, Option<String>), Transport
     }
 }
 
-fn resolve_bitrate() -> Result<BitrateChoice, TransportError> {
-    match std::env::var(PCAN_BITRATE_ENV) {
-        Ok(val) if !val.trim().is_empty() => {
-            let (classic, fd) = parse_bitrate(&val)?;
-            if let Some(fd_str) = fd {
-                Ok(BitrateChoice::Fd(fd_str))
-            } else {
-                Ok(BitrateChoice::Classic(classic.unwrap_or(PCAN_BAUD_500K)))
-            }
-        }
-        _ => Ok(BitrateChoice::Auto),
+/// Map a classic CAN bit rate (bit/s) to a PCAN BTR0/BTR1 timing code.
+pub fn baud_bps_to_code(bps: u32) -> Option<u16> {
+    Some(match bps {
+        1_000_000 => PCAN_BAUD_1M,
+        800_000 => PCAN_BAUD_800K,
+        500_000 => PCAN_BAUD_500K,
+        250_000 => PCAN_BAUD_250K,
+        125_000 => PCAN_BAUD_125K,
+        100_000 => PCAN_BAUD_100K,
+        95_238 | 95_000 => PCAN_BAUD_95K,
+        83_333 | 83_000 => PCAN_BAUD_83K,
+        50_000 => PCAN_BAUD_50K,
+        47_619 | 47_000 => PCAN_BAUD_47K,
+        33_333 | 33_000 => PCAN_BAUD_33K,
+        20_000 => PCAN_BAUD_20K,
+        10_000 => PCAN_BAUD_10K,
+        5_000 => PCAN_BAUD_5K,
+        _ => return None,
+    })
+}
+
+/// Derive CAN bit timing registers from a bit rate and controller clock.
+///
+/// Returns `(brp, tseg1, tseg2, sjw)` with a sample point near 80%.
+fn derive_timing(clock: u64, bitrate: u32) -> Option<(u32, u32, u32, u32)> {
+    if bitrate == 0 {
+        return None;
     }
+
+    const TARGET_TOTAL_TQ: u64 = 20;
+    let ideal_brp = (clock as f64 / (bitrate as f64 * TARGET_TOTAL_TQ as f64)).round() as u64;
+    let start = ideal_brp.max(1);
+
+    // Search outwards from the ideal prescaler for an exact divisor.
+    for delta in 0u64..64 {
+        let candidates = if delta == 0 {
+            vec![start]
+        } else {
+            vec![start + delta, start.saturating_sub(delta)]
+        };
+
+        for brp in candidates {
+            if brp == 0 {
+                continue;
+            }
+            let denom = brp * bitrate as u64;
+            if denom == 0 || clock % denom != 0 {
+                continue;
+            }
+            let total = clock / denom; // total time quanta including sync segment
+            if !(8..=385).contains(&total) {
+                continue;
+            }
+            let tseg2 = ((total as f64 * 0.2).round() as u64).clamp(1, 128);
+            let tseg1 = total.saturating_sub(1 + tseg2);
+            if tseg1 < 1 {
+                continue;
+            }
+            let sjw = tseg2.min(16);
+            return Some((brp as u32, tseg1 as u32, tseg2 as u32, sjw as u32));
+        }
+    }
+    None
+}
+
+/// Build a PCAN-Basic CAN-FD bit rate string from nominal/data bit rates.
+///
+/// The controller clock defaults to 80 MHz and can be overridden with the
+/// `PCAN_FD_CLOCK` environment variable.
+fn build_fd_bitrate_string(nominal_bps: u32, data_bps: u32) -> Result<String, TransportError> {
+    let clock = std::env::var(PCAN_FD_CLOCK_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_FD_CLOCK_HZ);
+
+    let (nom_brp, nom_tseg1, nom_tseg2, nom_sjw) =
+        derive_timing(clock, nominal_bps).ok_or_else(|| {
+            TransportError::InvalidAddress(format!(
+                "cannot derive CAN-FD nominal timing for {} bit/s (clock {} Hz)",
+                nominal_bps, clock
+            ))
+        })?;
+    let (data_brp, data_tseg1, data_tseg2, data_sjw) =
+        derive_timing(clock, data_bps).ok_or_else(|| {
+            TransportError::InvalidAddress(format!(
+                "cannot derive CAN-FD data timing for {} bit/s (clock {} Hz)",
+                data_bps, clock
+            ))
+        })?;
+
+    Ok(format!(
+        "f_clock={clock},nom_brp={nom_brp},nom_tseg1={nom_tseg1},nom_tseg2={nom_tseg2},\
+         nom_sjw={nom_sjw},data_brp={data_brp},data_tseg1={data_tseg1},data_tseg2={data_tseg2},\
+         data_sjw={data_sjw}"
+    ))
+}
+
+/// Decide how to initialize the channel from explicit config, falling back to
+/// the `PCAN_BITRATE` environment variable and finally classic 500k.
+fn resolve_init_choice(config: &CanTransportConfig) -> Result<BitrateChoice, TransportError> {
+    // 1. Explicit CAN-FD config (data-phase bit rate present).
+    if let Some(data_bps) = config.data_baudrate {
+        let nominal = config.baudrate.unwrap_or(PCAN_BAUD_500K_BPS);
+        return Ok(BitrateChoice::Fd(build_fd_bitrate_string(nominal, data_bps)?));
+    }
+
+    // 2. Explicit classic config.
+    if let Some(bps) = config.baudrate {
+        let code = baud_bps_to_code(bps).ok_or_else(|| {
+            TransportError::InvalidAddress(format!(
+                "Unsupported classic CAN bit rate {} bit/s",
+                bps
+            ))
+        })?;
+        return Ok(BitrateChoice::Classic(code));
+    }
+
+    // 3. Fall back to the PCAN_BITRATE environment variable.
+    if let Ok(val) = std::env::var(PCAN_BITRATE_ENV) {
+        if !val.trim().is_empty() {
+            let (classic, fd) = parse_bitrate(&val)?;
+            return Ok(if let Some(fd_str) = fd {
+                BitrateChoice::Fd(fd_str)
+            } else {
+                BitrateChoice::Classic(classic.unwrap_or(PCAN_BAUD_500K))
+            });
+        }
+    }
+
+    // 4. Nothing specified: default to classic 500k (no FD probing).
+    Ok(BitrateChoice::Classic(PCAN_BAUD_500K))
 }
 
 /// Bit rate selection derived from configuration/environment.
@@ -511,8 +648,43 @@ enum BitrateChoice {
     Classic(u16),
     /// Use CAN-FD with the given bit rate string.
     Fd(String),
-    /// Try CAN-FD first, then fall back to classic 500k.
-    Auto,
+}
+
+/// Configuration for establishing a PCAN CAN/CAN-FD transport.
+#[derive(Debug, Clone, Default)]
+pub struct CanTransportConfig {
+    /// PCAN channel handle/name, or `auto`.
+    pub channel: String,
+    /// CAN ID used by the master to send commands to the slave.
+    pub can_id: u32,
+    /// Nominal (arbitration-phase) bit rate in bit/s.
+    pub baudrate: Option<u32>,
+    /// CAN-FD data-phase bit rate in bit/s. `Some` selects CAN-FD mode.
+    pub data_baudrate: Option<u32>,
+}
+
+impl CanTransportConfig {
+    /// Create a config with a channel and command CAN ID but no bit rate.
+    pub fn new(channel: impl Into<String>, can_id: u32) -> Self {
+        Self {
+            channel: channel.into(),
+            can_id,
+            baudrate: None,
+            data_baudrate: None,
+        }
+    }
+
+    /// Set the nominal (arbitration-phase) bit rate in bit/s.
+    pub fn with_baudrate(mut self, bps: u32) -> Self {
+        self.baudrate = Some(bps);
+        self
+    }
+
+    /// Set the CAN-FD data-phase bit rate in bit/s (selects CAN-FD mode).
+    pub fn with_data_baudrate(mut self, bps: u32) -> Self {
+        self.data_baudrate = Some(bps);
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -546,83 +718,57 @@ pub struct CanTransport {
 }
 
 impl CanTransport {
-    /// Create a new CAN transport over PCAN.
+    /// Create a new CAN transport over PCAN from an explicit configuration.
     ///
-    /// # Arguments
-    /// * `channel` - PCAN channel handle/name, or `auto` to pick an attached device.
-    /// * `can_id`  - CAN ID used to send XCP commands to the slave.
-    pub async fn connect(channel: &str, can_id: u32) -> Result<Self, TransportError> {
+    /// The bit rate / CAN-FD mode is taken from [`CanTransportConfig`] (typically
+    /// derived from the A2L `XCP_ON_CAN` block). If neither `baudrate` nor
+    /// `data_baudrate` is set, the `PCAN_BITRATE` environment variable is used
+    /// and, failing that, classic CAN at 500k bit/s.
+    pub async fn connect(config: &CanTransportConfig) -> Result<Self, TransportError> {
         let api = Arc::new(PcanApi::load()?);
 
-        let handle = match parse_channel_handle(channel)? {
+        let handle = match parse_channel_handle(&config.channel)? {
             Some(h) => h,
             None => lookup_attached_channel(&api),
         };
 
-        let bitrate = resolve_bitrate()?;
-
-        // Determine which init strategies to attempt. "Auto" (the default)
-        // tries CAN-FD first and falls back to classic CAN.
-        let (try_fd, fd_bitrate, classic_baud, allow_classic_fallback) = match &bitrate {
-            BitrateChoice::Classic(baud) => (false, None, *baud, true),
-            BitrateChoice::Fd(fd_str) => (true, Some(fd_str.clone()), PCAN_BAUD_500K, false),
-            BitrateChoice::Auto => (true, None, PCAN_BAUD_500K, true),
-        };
-
+        let choice = resolve_init_choice(config)?;
         let mut fd = false;
-        let mut init_status = PCAN_ERROR_OK;
 
-        if try_fd {
-            let fd_str = fd_bitrate
-                .clone()
-                .unwrap_or_else(|| DEFAULT_FD_BITRATE.to_string());
-            match init_fd(&api, handle, &fd_str) {
+        match &choice {
+            BitrateChoice::Classic(baud) => {
+                let status = unsafe { (api.initialize)(handle, *baud, 0, 0, 0) };
+                if status != PCAN_ERROR_OK {
+                    let text = api.error_text(status);
+                    unsafe { (api.uninitialize)(handle) };
+                    return Err(TransportError::ConnectFailed(format!(
+                        "Failed to initialize PCAN channel {} (classic baud 0x{:04X}): {}",
+                        handle, baud, text
+                    )));
+                }
+                tracing::info!(
+                    "PCAN channel {} initialized in classic CAN mode (baud 0x{:04X})",
+                    handle,
+                    baud
+                );
+            }
+            BitrateChoice::Fd(bitrate) => match init_fd(&api, handle, bitrate) {
                 Ok(()) => {
                     fd = true;
-                    tracing::info!("PCAN channel {} initialized in CAN-FD mode", handle);
+                    tracing::info!(
+                        "PCAN channel {} initialized in CAN-FD mode ({})",
+                        handle,
+                        bitrate
+                    );
                 }
                 Err(status) => {
-                    if !allow_classic_fallback {
-                        return Err(TransportError::ConnectFailed(format!(
-                            "Failed to initialize PCAN channel {} in CAN-FD mode: {}",
-                            handle,
-                            api.error_text(status)
-                        )));
-                    }
-                    tracing::warn!(
-                        "CAN-FD init failed on channel {} ({}); falling back to classic CAN",
+                    return Err(TransportError::ConnectFailed(format!(
+                        "Failed to initialize PCAN channel {} in CAN-FD mode: {}",
                         handle,
                         api.error_text(status)
-                    );
-                    init_status = status;
+                    )));
                 }
-            }
-        }
-
-        if !fd {
-            // Classic CAN initialization.
-            let status = unsafe { (api.initialize)(handle, classic_baud, 0, 0, 0) };
-            if status != PCAN_ERROR_OK {
-                // If we already tried (and failed) FD, report both attempts.
-                let text = api.error_text(status);
-                unsafe { (api.uninitialize)(handle) };
-                return Err(TransportError::ConnectFailed(format!(
-                    "Failed to initialize PCAN channel {} (classic baud 0x{:04X}): {}{}",
-                    handle,
-                    classic_baud,
-                    text,
-                    if init_status != PCAN_ERROR_OK {
-                        format!(" (previous FD error: {})", api.error_text(init_status))
-                    } else {
-                        String::new()
-                    }
-                )));
-            }
-            tracing::info!(
-                "PCAN channel {} initialized in classic CAN mode (baud 0x{:04X})",
-                handle,
-                classic_baud
-            );
+            },
         }
 
         // Disable echo so our own transmitted frames are not routed back up.
@@ -632,10 +778,11 @@ impl CanTransport {
         let reader_stop = Arc::new(AtomicBool::new(false));
         let reader = spawn_reader(api.clone(), handle, fd, rx.clone(), reader_stop.clone());
 
+        let can_id = config.can_id;
         let extended = can_id > 0x7FF;
 
         Ok(Self {
-            channel: channel.to_string(),
+            channel: config.channel.clone(),
             handle,
             can_id,
             extended,
@@ -916,10 +1063,9 @@ fn lookup_attached_channel(api: &PcanApi) -> u16 {
 /// Create a CAN transport from configuration.
 #[allow(dead_code)]
 pub async fn create_can_transport(
-    channel: &str,
-    can_id: u32,
+    config: &CanTransportConfig,
 ) -> Result<CanTransport, TransportError> {
-    CanTransport::connect(channel, can_id).await
+    CanTransport::connect(config).await
 }
 
 #[cfg(test)]
@@ -1004,6 +1150,61 @@ mod tests {
         let c = expand_dll_candidate(r"E:\nonexistent\dir");
         assert_eq!(c.len(), 2);
         assert!(c[1].ends_with("PCANBasic.dll"));
+    }
+
+    #[test]
+    fn test_baud_bps_to_code() {
+        assert_eq!(baud_bps_to_code(1_000_000), Some(PCAN_BAUD_1M));
+        assert_eq!(baud_bps_to_code(500_000), Some(PCAN_BAUD_500K));
+        assert_eq!(baud_bps_to_code(250_000), Some(PCAN_BAUD_250K));
+        assert_eq!(baud_bps_to_code(125_000), Some(PCAN_BAUD_125K));
+        assert_eq!(baud_bps_to_code(100_000), Some(PCAN_BAUD_100K));
+        assert_eq!(baud_bps_to_code(123_456), None);
+    }
+
+    #[test]
+    fn test_derive_timing_exact() {
+        // 80 MHz / (20 * 500k) = brp 8, total 20 tq.
+        let (brp, tseg1, tseg2, sjw) = derive_timing(80_000_000, 500_000).unwrap();
+        assert_eq!(brp, 8);
+        assert_eq!(brp as u64 * 500_000 * (1 + tseg1 + tseg2) as u64, 80_000_000);
+        assert!(tseg1 >= 1 && tseg2 >= 1 && sjw >= 1);
+        assert_eq!(sjw, tseg2.min(16));
+    }
+
+    #[test]
+    fn test_derive_timing_rejects_zero() {
+        assert_eq!(derive_timing(80_000_000, 0), None);
+    }
+
+    #[test]
+    fn test_build_fd_bitrate_string() {
+        let s = build_fd_bitrate_string(500_000, 2_000_000).unwrap();
+        for key in [
+            "f_clock=80000000",
+            "nom_brp=",
+            "nom_tseg1=",
+            "nom_tseg2=",
+            "nom_sjw=",
+            "data_brp=",
+            "data_tseg1=",
+            "data_tseg2=",
+            "data_sjw=",
+        ] {
+            assert!(s.contains(key), "missing {} in {}", key, s);
+        }
+        assert!(!s.contains(' '), "unexpected whitespace in {}", s);
+    }
+
+    #[test]
+    fn test_can_transport_config_builders() {
+        let cfg = CanTransportConfig::new("auto", 0x123)
+            .with_baudrate(500_000)
+            .with_data_baudrate(2_000_000);
+        assert_eq!(cfg.channel, "auto");
+        assert_eq!(cfg.can_id, 0x123);
+        assert_eq!(cfg.baudrate, Some(500_000));
+        assert_eq!(cfg.data_baudrate, Some(2_000_000));
     }
 
     #[test]

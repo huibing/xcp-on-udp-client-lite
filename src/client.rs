@@ -579,6 +579,8 @@ mod tests {
         let config = TransportConfig::Can {
             channel: "can0".to_string(),
             can_id: 0x123,
+            baudrate: Some(500_000),
+            data_baudrate: None,
         };
         assert_eq!(
             config.transport_type(),

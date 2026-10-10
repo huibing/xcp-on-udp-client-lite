@@ -670,14 +670,25 @@ mod tests {
             A2lTransportConfig::Tcp {
                 addr: "127.0.0.1:6000".to_string(),
             },
-            A2lTransportConfig::Can { can_id: 0x321 },
+            A2lTransportConfig::Can {
+                can_id: 0x321,
+                baudrate: None,
+                data_baudrate: None,
+            },
         ]);
 
         let resolved = device
             .resolve_transport_config(None)
             .expect("auto mode should fall back by default priority");
 
-        assert_eq!(resolved, A2lTransportConfig::Can { can_id: 0x321 });
+        assert_eq!(
+            resolved,
+            A2lTransportConfig::Can {
+                can_id: 0x321,
+                baudrate: None,
+                data_baudrate: None,
+            }
+        );
     }
 
     #[test]

@@ -30,7 +30,16 @@ impl TransportType {
 pub enum TransportConfig {
     Udp { addr: String },
     Tcp { addr: String },
-    Can { channel: String, can_id: u32 },
+    Can {
+        channel: String,
+        can_id: u32,
+        /// Nominal (arbitration-phase) bit rate in bit/s, e.g. `500_000`.
+        #[serde(default)]
+        baudrate: Option<u32>,
+        /// CAN-FD data-phase bit rate in bit/s. `Some` selects CAN-FD mode.
+        #[serde(default)]
+        data_baudrate: Option<u32>,
+    },
 }
 
 impl TransportConfig {
@@ -47,7 +56,11 @@ impl TransportConfig {
         match self {
             TransportConfig::Udp { addr } => addr.clone(),
             TransportConfig::Tcp { addr } => addr.clone(),
-            TransportConfig::Can { channel, can_id } => {
+            TransportConfig::Can {
+                channel,
+                can_id,
+                ..
+            } => {
                 format!("{}:{:03X}", channel, can_id)
             }
         }
@@ -125,8 +138,19 @@ impl TransportFactory {
                 let transport = super::tcp::TcpTransport::connect(addr).await?;
                 Ok(Arc::new(transport))
             }
-            TransportConfig::Can { channel, can_id } => {
-                let transport = super::can::CanTransport::connect(channel, *can_id).await?;
+            TransportConfig::Can {
+                channel,
+                can_id,
+                baudrate,
+                data_baudrate,
+            } => {
+                let config = super::can::CanTransportConfig {
+                    channel: channel.clone(),
+                    can_id: *can_id,
+                    baudrate: *baudrate,
+                    data_baudrate: *data_baudrate,
+                };
+                let transport = super::can::CanTransport::connect(&config).await?;
                 Ok(Arc::new(transport))
             }
         }
@@ -158,6 +182,8 @@ mod tests {
         let config = TransportConfig::Can {
             channel: "can0".to_string(),
             can_id: 0x123,
+            baudrate: Some(500_000),
+            data_baudrate: None,
         };
         assert_eq!(config.transport_type(), TransportType::Can);
         assert_eq!(config.addr_string(), "can0:123");

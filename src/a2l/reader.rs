@@ -180,7 +180,14 @@ pub enum XcpChecksum {
 pub enum A2lTransportConfig {
     Udp { addr: String },
     Tcp { addr: String },
-    Can { can_id: u32 },
+    Can {
+        can_id: u32,
+        /// Nominal (arbitration-phase) bit rate in bit/s from `BAUDRATE`.
+        baudrate: Option<u32>,
+        /// CAN-FD data-phase bit rate in bit/s from
+        /// `CAN_FD_DATA_TRANSFER_BAUDRATE`; `Some` means CAN-FD.
+        data_baudrate: Option<u32>,
+    },
 }
 
 impl A2lTransportConfig {
@@ -195,7 +202,7 @@ impl A2lTransportConfig {
     pub fn endpoint(&self) -> String {
         match self {
             Self::Udp { addr } | Self::Tcp { addr } => addr.clone(),
-            Self::Can { can_id } => format!("0x{:X}", can_id),
+            Self::Can { can_id, .. } => format!("0x{:X}", can_id),
         }
     }
 
@@ -203,7 +210,19 @@ impl A2lTransportConfig {
         match self {
             Self::Udp { addr } => format!("UDP - {}", addr),
             Self::Tcp { addr } => format!("TCP - {}", addr),
-            Self::Can { can_id } => format!("CAN - 0x{:X}", can_id),
+            Self::Can {
+                can_id,
+                baudrate,
+                data_baudrate,
+            } => {
+                let mode = if data_baudrate.is_some() { "CAN-FD" } else { "CAN" };
+                let rate = match (baudrate, data_baudrate) {
+                    (Some(nom), Some(data)) => format!(" {}k/{}", nom / 1000, data),
+                    (Some(nom), None) => format!(" {}k", nom / 1000),
+                    _ => String::new(),
+                };
+                format!("{} - 0x{:X}{}", mode, can_id, rate)
+            }
         }
     }
 
@@ -211,9 +230,15 @@ impl A2lTransportConfig {
         match self {
             Self::Udp { addr } => TransportConfig::Udp { addr: addr.clone() },
             Self::Tcp { addr } => TransportConfig::Tcp { addr: addr.clone() },
-            Self::Can { can_id } => TransportConfig::Can {
+            Self::Can {
+                can_id,
+                baudrate,
+                data_baudrate,
+            } => TransportConfig::Can {
                 channel: "auto".to_string(),
                 can_id: *can_id,
+                baudrate: *baudrate,
+                data_baudrate: *data_baudrate,
             },
         }
     }
@@ -710,21 +735,38 @@ impl A2lReader {
         let clean = Self::strip_comments(block);
         let tokens = Self::tokenize_a2l(&clean);
 
-        for tag in ["CAN_ID_MASTER", "CAN_ID_SLAVE", "CAN_ID_BROADCAST"] {
-            if let Some(idx) = tokens
-                .iter()
-                .position(|token| token.eq_ignore_ascii_case(tag))
-            {
-                if let Some(value) = tokens
-                    .get(idx + 1)
-                    .and_then(|token| Self::parse_u32_token(token))
-                {
-                    return Some(A2lTransportConfig::Can { can_id: value });
-                }
-            }
-        }
+        // Prefer the master (CMD) identifier, then fall back to other tags.
+        let can_id = ["CAN_ID_MASTER", "CAN_ID_SLAVE", "CAN_ID_BROADCAST"]
+            .iter()
+            .find_map(|tag| Self::token_u32_after(&tokens, tag))?;
 
-        None
+        // BAUDRATE is the nominal/arbitration bit rate in bit/s.
+        let baudrate = Self::token_u32_after(&tokens, "BAUDRATE");
+
+        // Presence of a data-phase bit rate selects CAN-FD.
+        let data_baudrate = [
+            "CAN_FD_DATA_TRANSFER_BAUDRATE",
+            "CAN_FD_DATA_BAUDRATE",
+            "DATA_BAUDRATE",
+        ]
+        .iter()
+        .find_map(|tag| Self::token_u32_after(&tokens, tag));
+
+        Some(A2lTransportConfig::Can {
+            can_id,
+            baudrate,
+            data_baudrate,
+        })
+    }
+
+    /// Find the `u32` value that follows the first occurrence of `tag`.
+    fn token_u32_after(tokens: &[String], tag: &str) -> Option<u32> {
+        let idx = tokens
+            .iter()
+            .position(|token| token.eq_ignore_ascii_case(tag))?;
+        tokens
+            .get(idx + 1)
+            .and_then(|token| Self::parse_u32_token(token))
     }
 
     fn parse_u16_token(token: &str) -> Option<u16> {
@@ -2278,7 +2320,7 @@ mod tests {
         let raw = r#"
             /begin IF_DATA XCP
                 /begin XCP_ON_TCP_IP 0x104 6001 ADDRESS "192.168.0.10" /end XCP_ON_TCP_IP
-                /begin XCP_ON_CAN 0x104 CAN_ID_MASTER 0x123 CAN_ID_SLAVE 0x456 /end XCP_ON_CAN
+                /begin XCP_ON_CAN 0x104 CAN_ID_MASTER 0x123 CAN_ID_SLAVE 0x456 BAUDRATE 500000 /end XCP_ON_CAN
                 /begin XCP_ON_UDP_IP 0x104 5555 ADDRESS "169.254.1.20" /end XCP_ON_UDP_IP
             /end IF_DATA
         "#;
@@ -2291,11 +2333,39 @@ mod tests {
                 A2lTransportConfig::Udp {
                     addr: "169.254.1.20:5555".to_string(),
                 },
-                A2lTransportConfig::Can { can_id: 0x123 },
+                A2lTransportConfig::Can {
+                    can_id: 0x123,
+                    baudrate: Some(500_000),
+                    data_baudrate: None,
+                },
                 A2lTransportConfig::Tcp {
                     addr: "192.168.0.10:6001".to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn test_parse_can_fd_transport_config() {
+        let raw = r#"
+            /begin IF_DATA XCP
+                /begin XCP_ON_CAN 0x104
+                    CAN_ID_MASTER 0x123
+                    CAN_ID_SLAVE 0x456
+                    BAUDRATE 500000
+                    CAN_FD_DATA_TRANSFER_BAUDRATE 2000000
+                /end XCP_ON_CAN
+            /end IF_DATA
+        "#;
+
+        let configs = A2lReader::parse_transport_configs_from_raw(raw);
+        assert_eq!(
+            configs,
+            vec![A2lTransportConfig::Can {
+                can_id: 0x123,
+                baudrate: Some(500_000),
+                data_baudrate: Some(2_000_000),
+            }]
         );
     }
 

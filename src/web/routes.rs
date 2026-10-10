@@ -89,7 +89,7 @@ fn build_transport_options(device: &DeviceState) -> Vec<serde_json::Value> {
 fn display_device_address(config: &A2lTransportConfig) -> String {
     match config {
         A2lTransportConfig::Udp { addr } | A2lTransportConfig::Tcp { addr } => addr.clone(),
-        A2lTransportConfig::Can { can_id } => format!("CAN 0x{:X}", can_id),
+        A2lTransportConfig::Can { can_id, .. } => format!("CAN 0x{:X}", can_id),
     }
 }
 

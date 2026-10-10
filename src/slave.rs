@@ -2146,6 +2146,8 @@ mod tests {
             transport_config: TransportConfig::Can {
                 channel: "can0".to_string(),
                 can_id: 0x123,
+                baudrate: Some(500_000),
+                data_baudrate: None,
             },
             slave_id_string: None,
             connected: false,
