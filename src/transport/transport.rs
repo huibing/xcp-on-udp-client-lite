@@ -125,9 +125,10 @@ impl TransportFactory {
                 let transport = super::tcp::TcpTransport::connect(addr).await?;
                 Ok(Arc::new(transport))
             }
-            TransportConfig::Can { .. } => Err(TransportError::NotImplemented(
-                "CAN transport not yet implemented".to_string(),
-            )),
+            TransportConfig::Can { channel, can_id } => {
+                let transport = super::can::CanTransport::connect(channel, *can_id).await?;
+                Ok(Arc::new(transport))
+            }
         }
     }
 }
