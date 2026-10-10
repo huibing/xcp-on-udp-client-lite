@@ -581,6 +581,9 @@ mod tests {
             can_id: 0x123,
             baudrate: Some(500_000),
             data_baudrate: None,
+            slave_id: None,
+            daq_ids: Vec::new(),
+            max_dlc_required: false,
         };
         assert_eq!(
             config.transport_type(),

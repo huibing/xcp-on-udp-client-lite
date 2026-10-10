@@ -187,6 +187,12 @@ pub enum A2lTransportConfig {
         /// CAN-FD data-phase bit rate in bit/s from
         /// `CAN_FD_DATA_TRANSFER_BAUDRATE`; `Some` means CAN-FD.
         data_baudrate: Option<u32>,
+        /// Slave response CAN ID from `CAN_ID_SLAVE`.
+        slave_id: Option<u32>,
+        /// DAQ DTO CAN IDs from `DAQ_LIST_CAN_ID` (fixed mapping).
+        daq_ids: Vec<u32>,
+        /// True when `MAX_DLC_REQUIRED` is set.
+        max_dlc_required: bool,
     },
 }
 
@@ -214,6 +220,7 @@ impl A2lTransportConfig {
                 can_id,
                 baudrate,
                 data_baudrate,
+                ..
             } => {
                 let mode = if data_baudrate.is_some() { "CAN-FD" } else { "CAN" };
                 let rate = match (baudrate, data_baudrate) {
@@ -234,11 +241,17 @@ impl A2lTransportConfig {
                 can_id,
                 baudrate,
                 data_baudrate,
+                slave_id,
+                daq_ids,
+                max_dlc_required,
             } => TransportConfig::Can {
                 channel: "auto".to_string(),
                 can_id: *can_id,
                 baudrate: *baudrate,
                 data_baudrate: *data_baudrate,
+                slave_id: *slave_id,
+                daq_ids: daq_ids.clone(),
+                max_dlc_required: *max_dlc_required,
             },
         }
     }
@@ -752,11 +765,68 @@ impl A2lReader {
         .iter()
         .find_map(|tag| Self::token_u32_after(&tokens, tag));
 
+        // Slave response identifier used to filter incoming frames.
+        let slave_id = Self::token_u32_after(&tokens, "CAN_ID_SLAVE");
+
+        // DAQ DTO identifiers (only fixed mappings can be used for filtering).
+        let daq_ids = Self::parse_daq_list_can_ids(block);
+
+        // When set, command frames must be padded to the maximum DLC.
+        let max_dlc_required =
+            Self::token_bool_after(&tokens, "MAX_DLC_REQUIRED").unwrap_or(false);
+
         Some(A2lTransportConfig::Can {
             can_id,
             baudrate,
             data_baudrate,
+            slave_id,
+            daq_ids,
+            max_dlc_required,
         })
+    }
+
+    /// Parse the fixed DAQ DTO CAN IDs from `DAQ_LIST_CAN_ID` blocks.
+    ///
+    /// Returns only fixed mappings; if any list uses an incremental mapping the
+    /// result is empty (the IDs cannot be enumerated statically).
+    fn parse_daq_list_can_ids(block: &str) -> Vec<u32> {
+        let mut ids = Vec::new();
+        let mut incremental = false;
+
+        for daq_block in Self::extract_transport_block_contents(block, "DAQ_LIST_CAN_ID") {
+            let clean = Self::strip_comments(&daq_block);
+            let tokens = Self::tokenize_a2l(&clean);
+
+            let mut value = None;
+            for (i, token) in tokens.iter().enumerate() {
+                match token.to_ascii_uppercase().as_str() {
+                    "FIXED" => {
+                        value = tokens.get(i + 1).and_then(|v| Self::parse_u32_token(v));
+                        break;
+                    }
+                    "INCREMENTAL" => {
+                        incremental = true;
+                        value = tokens.get(i + 1).and_then(|v| Self::parse_u32_token(v));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            if value.is_none() {
+                // Fall back to the last numeric token in the block.
+                value = tokens.iter().rev().find_map(|t| Self::parse_u32_token(t));
+            }
+            if let Some(id) = value {
+                ids.push(id);
+            }
+        }
+
+        if incremental {
+            // Cannot enumerate incremental IDs statically; skip strict filtering.
+            ids.clear();
+        }
+        ids
     }
 
     /// Find the `u32` value that follows the first occurrence of `tag`.
@@ -767,6 +837,19 @@ impl A2lReader {
         tokens
             .get(idx + 1)
             .and_then(|token| Self::parse_u32_token(token))
+    }
+
+    /// Find the boolean value that follows the first occurrence of `tag`.
+    fn token_bool_after(tokens: &[String], tag: &str) -> Option<bool> {
+        let idx = tokens
+            .iter()
+            .position(|token| token.eq_ignore_ascii_case(tag))?;
+        let value = tokens.get(idx + 1)?;
+        match value.to_ascii_uppercase().as_str() {
+            "TRUE" => Some(true),
+            "FALSE" => Some(false),
+            _ => Self::parse_u32_token(value).map(|n| n != 0),
+        }
     }
 
     fn parse_u16_token(token: &str) -> Option<u16> {
@@ -2337,6 +2420,9 @@ mod tests {
                     can_id: 0x123,
                     baudrate: Some(500_000),
                     data_baudrate: None,
+                    slave_id: Some(0x456),
+                    daq_ids: Vec::new(),
+                    max_dlc_required: false,
                 },
                 A2lTransportConfig::Tcp {
                     addr: "192.168.0.10:6001".to_string(),
@@ -2354,6 +2440,9 @@ mod tests {
                     CAN_ID_SLAVE 0x456
                     BAUDRATE 500000
                     CAN_FD_DATA_TRANSFER_BAUDRATE 2000000
+                    MAX_DLC_REQUIRED 1
+                    /begin DAQ_LIST_CAN_ID 0x0000 FIXED 0x310 /end DAQ_LIST_CAN_ID
+                    /begin DAQ_LIST_CAN_ID 0x0001 FIXED 0x320 /end DAQ_LIST_CAN_ID
                 /end XCP_ON_CAN
             /end IF_DATA
         "#;
@@ -2365,6 +2454,9 @@ mod tests {
                 can_id: 0x123,
                 baudrate: Some(500_000),
                 data_baudrate: Some(2_000_000),
+                slave_id: Some(0x456),
+                daq_ids: vec![0x310, 0x320],
+                max_dlc_required: true,
             }]
         );
     }

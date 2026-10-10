@@ -1,10 +1,17 @@
 //! CAN Transport for XCP on CAN (PCAN / PEAK-System)
 //!
-//! XCP on CAN maps a single XCP packet into one CAN frame. The CAN identifier
-//! selects the direction/object:
-//! - Master → Slave commands are sent with the configured `can_id`.
+//! XCP on CAN maps a single XCP packet into one CAN frame. Unlike XCP on
+//! Ethernet (which prefixes each packet with a 4-byte LEN/COUNTER header),
+//! CAN carries no transport header: the CAN DLC is the packet length and the
+//! XCP packet starts at data byte 0. The CAN identifier selects the object:
+//! - Master → Slave commands are sent with the configured `can_id` (`CAN_ID_MASTER`).
 //! - Slave → Master responses/DAQ data arrive on other identifiers and are
 //!   forwarded to the XCP layer, which classifies packets by PID.
+//!
+//! Incoming frames are filtered by CAN ID: the master's own ID is always
+//! rejected, and when both `CAN_ID_SLAVE` and fixed `DAQ_LIST_CAN_ID` entries
+//! are declared, only those IDs are accepted. This keeps unrelated traffic on a
+//! shared bus from polluting the XCP stream.
 //!
 //! The transport talks to the PEAK-System PCAN-Basic driver (`PCANBasic.dll`)
 //! dynamically through `libloading`, so no import library is required at build
@@ -16,8 +23,9 @@
 //!
 //! Configuration is driven by [`CanTransportConfig`], which is normally built
 //! from the A2L `XCP_ON_CAN` block (nominal bit rate and optional CAN-FD data
-//! bit rate). The transport uses those values directly and never probes for a
-//! working bit rate on its own.
+//! bit rate, `CAN_ID_SLAVE`, `DAQ_LIST_CAN_ID`, `MAX_DLC_REQUIRED`). The
+//! transport uses those values directly and never probes for a working bit rate
+//! on its own.
 //!
 //! Environment variables (optional):
 //! - `PCAN_BASIC_DLL`: path to `PCANBasic.dll`. May be the full file path
@@ -31,7 +39,7 @@
 use super::transport::{Transport, TransportError, TransportType};
 use async_trait::async_trait;
 use libloading::{Library, Symbol};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -49,6 +57,8 @@ const PCAN_ERROR_ILLPARAMTYPE: u32 = 0x04000;
 const PCAN_MESSAGE_STANDARD: u8 = 0x00;
 const PCAN_MESSAGE_EXTENDED: u8 = 0x02;
 const PCAN_MESSAGE_FD: u8 = 0x04;
+const PCAN_MESSAGE_ERRFRAME: u8 = 0x40;
+const PCAN_MESSAGE_STATUS: u8 = 0x80;
 
 // Classic CAN bit rate timing codes.
 const PCAN_BAUD_1M: u16 = 0x0014;
@@ -222,8 +232,12 @@ impl PcanApi {
         }
     }
 
-    /// Read one frame from the channel. Returns `Ok(None)` when the queue is empty.
-    fn read_frame(&self, handle: u16, fd: bool) -> Result<Option<Vec<u8>>, u32> {
+    /// Read one frame from the channel.
+    ///
+    /// Returns `Ok(Some((can_id, payload)))` for a data frame and `Ok(None)`
+    /// when the receive queue is empty. Error/status frames are skipped
+    /// (reported as a frame with an empty payload).
+    fn read_frame(&self, handle: u16, fd: bool) -> Result<Option<(u32, Vec<u8>)>, u32> {
         unsafe {
             if fd {
                 let read_fd = match self.read_fd {
@@ -233,8 +247,11 @@ impl PcanApi {
                 let mut msg = TpcanMsgFd::default();
                 let status = read_fd(handle, &mut msg, std::ptr::null_mut());
                 if status == PCAN_ERROR_OK {
+                    if msg.msg_type & (PCAN_MESSAGE_STATUS | PCAN_MESSAGE_ERRFRAME) != 0 {
+                        return Ok(Some((msg.id, Vec::new())));
+                    }
                     let len = dlc_to_len(msg.dlc).min(msg.data.len());
-                    Ok(Some(msg.data[..len].to_vec()))
+                    Ok(Some((msg.id, msg.data[..len].to_vec())))
                 } else if status == PCAN_ERROR_QRCVEMPTY {
                     Ok(None)
                 } else {
@@ -244,8 +261,11 @@ impl PcanApi {
                 let mut msg = TpcanMsg::default();
                 let status = (self.read)(handle, &mut msg, std::ptr::null_mut());
                 if status == PCAN_ERROR_OK {
+                    if msg.msg_type & (PCAN_MESSAGE_STATUS | PCAN_MESSAGE_ERRFRAME) != 0 {
+                        return Ok(Some((msg.id, Vec::new())));
+                    }
                     let len = (msg.len as usize).min(msg.data.len());
-                    Ok(Some(msg.data[..len].to_vec()))
+                    Ok(Some((msg.id, msg.data[..len].to_vec())))
                 } else if status == PCAN_ERROR_QRCVEMPTY {
                     Ok(None)
                 } else {
@@ -655,12 +675,19 @@ enum BitrateChoice {
 pub struct CanTransportConfig {
     /// PCAN channel handle/name, or `auto`.
     pub channel: String,
-    /// CAN ID used by the master to send commands to the slave.
+    /// CAN ID used by the master to send commands to the slave (`CAN_ID_MASTER`).
     pub can_id: u32,
     /// Nominal (arbitration-phase) bit rate in bit/s.
     pub baudrate: Option<u32>,
     /// CAN-FD data-phase bit rate in bit/s. `Some` selects CAN-FD mode.
     pub data_baudrate: Option<u32>,
+    /// CAN ID the slave uses for responses (`CAN_ID_SLAVE`).
+    pub slave_id: Option<u32>,
+    /// CAN IDs used for DAQ DTO frames (`DAQ_LIST_CAN_ID`, fixed mapping).
+    pub daq_ids: Vec<u32>,
+    /// When true, master command frames are padded to the maximum DLC
+    /// (8 for classic CAN, 64 for CAN-FD) as required by `MAX_DLC_REQUIRED`.
+    pub max_dlc_required: bool,
 }
 
 impl CanTransportConfig {
@@ -671,6 +698,9 @@ impl CanTransportConfig {
             can_id,
             baudrate: None,
             data_baudrate: None,
+            slave_id: None,
+            daq_ids: Vec::new(),
+            max_dlc_required: false,
         }
     }
 
@@ -683,6 +713,24 @@ impl CanTransportConfig {
     /// Set the CAN-FD data-phase bit rate in bit/s (selects CAN-FD mode).
     pub fn with_data_baudrate(mut self, bps: u32) -> Self {
         self.data_baudrate = Some(bps);
+        self
+    }
+
+    /// Set the slave response CAN ID (`CAN_ID_SLAVE`).
+    pub fn with_slave_id(mut self, id: u32) -> Self {
+        self.slave_id = Some(id);
+        self
+    }
+
+    /// Set the DAQ DTO CAN IDs.
+    pub fn with_daq_ids(mut self, ids: Vec<u32>) -> Self {
+        self.daq_ids = ids;
+        self
+    }
+
+    /// Require command frames to be padded to the maximum DLC.
+    pub fn with_max_dlc_required(mut self, required: bool) -> Self {
+        self.max_dlc_required = required;
         self
     }
 }
@@ -703,6 +751,8 @@ pub struct CanTransport {
     extended: bool,
     /// True when CAN-FD framing is used.
     fd: bool,
+    /// Pad command frames to the maximum DLC (`MAX_DLC_REQUIRED`).
+    max_dlc_required: bool,
     /// Loaded PCAN-Basic API.
     api: Arc<PcanApi>,
     /// Command/response timeout.
@@ -776,7 +826,20 @@ impl CanTransport {
 
         let rx = Arc::new(Mutex::new(VecDeque::new()));
         let reader_stop = Arc::new(AtomicBool::new(false));
-        let reader = spawn_reader(api.clone(), handle, fd, rx.clone(), reader_stop.clone());
+        let filter = FrameFilter::from_config(config);
+        tracing::info!(
+            "PCAN receive filter: master=0x{:X}, {}",
+            config.can_id,
+            filter.describe()
+        );
+        let reader = spawn_reader(
+            api.clone(),
+            handle,
+            fd,
+            filter,
+            rx.clone(),
+            reader_stop.clone(),
+        );
 
         let can_id = config.can_id;
         let extended = can_id > 0x7FF;
@@ -787,6 +850,7 @@ impl CanTransport {
             can_id,
             extended,
             fd,
+            max_dlc_required: config.max_dlc_required,
             api,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             rx,
@@ -822,6 +886,10 @@ impl CanTransport {
     }
 
     /// Transmit a normalized XCP payload as a single CAN frame.
+    ///
+    /// Unlike XCP-on-Ethernet there is no length/counter header: the CAN DLC
+    /// carries the length and the XCP packet starts at data byte 0. When
+    /// `MAX_DLC_REQUIRED` is set the frame is padded to the maximum DLC.
     fn send_frame(&self, payload: &[u8]) -> Result<(), TransportError> {
         if payload.is_empty() {
             return Err(TransportError::SendFailed(
@@ -834,6 +902,22 @@ impl CanTransport {
                 payload.len()
             )));
         }
+
+        // `MAX_DLC_REQUIRED` requires fixed-size command frames; unused bytes
+        // are filled with 0x00 (max DLC is 8 for classic CAN, 64 for CAN-FD).
+        let padded = if self.max_dlc_required {
+            let target = if self.fd { 64 } else { 8 };
+            if payload.len() < target {
+                let mut buf = payload.to_vec();
+                buf.resize(target, 0x00);
+                Some(buf)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let payload = padded.as_deref().unwrap_or(payload);
 
         tracing::trace!(
             "Sending XCP-on-CAN frame: id=0x{:X}, fd={}, len={}, data=[{:02X?}]",
@@ -954,11 +1038,64 @@ impl Drop for CanTransport {
     }
 }
 
+/// Frame acceptance rule for the reader thread.
+///
+/// The master's own transmit ID is always rejected (echo suppression). When a
+/// concrete allow-list of response/DAQ IDs is known, only those IDs are
+/// accepted; otherwise every other ID is accepted (to avoid dropping DAQ data
+/// when the A2L does not declare `DAQ_LIST_CAN_ID`).
+struct FrameFilter {
+    master_id: u32,
+    allowed: Option<HashSet<u32>>,
+}
+
+impl FrameFilter {
+    fn from_config(config: &CanTransportConfig) -> Self {
+        // Only enforce a strict allow-list when both the response and DAQ IDs
+        // are known, so we never accidentally drop DAQ frames.
+        let allowed = match (config.slave_id, config.daq_ids.is_empty()) {
+            (Some(slave_id), false) => {
+                let mut set: HashSet<u32> = config.daq_ids.iter().copied().collect();
+                set.insert(slave_id);
+                Some(set)
+            }
+            _ => None,
+        };
+
+        Self {
+            master_id: config.can_id,
+            allowed,
+        }
+    }
+
+    fn accepts(&self, can_id: u32) -> bool {
+        if can_id == self.master_id {
+            return false;
+        }
+        match &self.allowed {
+            Some(set) => set.contains(&can_id),
+            None => true,
+        }
+    }
+
+    fn describe(&self) -> String {
+        match &self.allowed {
+            Some(set) => {
+                let mut ids: Vec<String> = set.iter().map(|id| format!("0x{:X}", id)).collect();
+                ids.sort();
+                format!("strict allow-list [{}]", ids.join(", "))
+            }
+            None => "accept all except master (DAQ IDs unknown)".to_string(),
+        }
+    }
+}
+
 /// Start the background thread that drains the PCAN receive queue.
 fn spawn_reader(
     api: Arc<PcanApi>,
     handle: u16,
     fd: bool,
+    filter: FrameFilter,
     rx: Arc<Mutex<VecDeque<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
@@ -970,11 +1107,20 @@ fn spawn_reader(
                 let mut received_any = false;
                 loop {
                     match api.read_frame(handle, fd) {
-                        Ok(Some(payload)) => {
-                            if !payload.is_empty() {
-                                rx.lock().unwrap().push_back(payload);
-                            }
+                        Ok(Some((can_id, payload))) => {
                             received_any = true;
+                            if payload.is_empty() {
+                                // Error/status frame: ignore.
+                                continue;
+                            }
+                            if !filter.accepts(can_id) {
+                                tracing::trace!(
+                                    "Ignoring CAN frame id=0x{:X} (filtered out)",
+                                    can_id
+                                );
+                                continue;
+                            }
+                            rx.lock().unwrap().push_back(payload);
                         }
                         Ok(None) => break,
                         Err(status) => {
@@ -1200,11 +1346,53 @@ mod tests {
     fn test_can_transport_config_builders() {
         let cfg = CanTransportConfig::new("auto", 0x123)
             .with_baudrate(500_000)
-            .with_data_baudrate(2_000_000);
+            .with_data_baudrate(2_000_000)
+            .with_slave_id(0x456)
+            .with_daq_ids(vec![0x310, 0x320])
+            .with_max_dlc_required(true);
         assert_eq!(cfg.channel, "auto");
         assert_eq!(cfg.can_id, 0x123);
         assert_eq!(cfg.baudrate, Some(500_000));
         assert_eq!(cfg.data_baudrate, Some(2_000_000));
+        assert_eq!(cfg.slave_id, Some(0x456));
+        assert_eq!(cfg.daq_ids, vec![0x310, 0x320]);
+        assert!(cfg.max_dlc_required);
+    }
+
+    #[test]
+    fn test_frame_filter_strict_when_ids_known() {
+        let cfg = CanTransportConfig {
+            channel: "auto".to_string(),
+            can_id: 0x123,
+            baudrate: None,
+            data_baudrate: None,
+            slave_id: Some(0x456),
+            daq_ids: vec![0x310, 0x320],
+            max_dlc_required: false,
+        };
+        let filter = FrameFilter::from_config(&cfg);
+        assert!(filter.accepts(0x456));
+        assert!(filter.accepts(0x310));
+        assert!(filter.accepts(0x320));
+        assert!(!filter.accepts(0x123)); // master / echo
+        assert!(!filter.accepts(0x999)); // unrelated bus traffic
+    }
+
+    #[test]
+    fn test_frame_filter_lenient_without_daq_ids() {
+        let cfg = CanTransportConfig {
+            channel: "auto".to_string(),
+            can_id: 0x123,
+            baudrate: None,
+            data_baudrate: None,
+            slave_id: Some(0x456),
+            daq_ids: Vec::new(),
+            max_dlc_required: false,
+        };
+        let filter = FrameFilter::from_config(&cfg);
+        assert!(filter.accepts(0x456));
+        assert!(filter.accepts(0x999)); // DAQ IDs unknown -> accept other IDs
+        assert!(!filter.accepts(0x123)); // master still rejected
     }
 
     #[test]

@@ -39,6 +39,15 @@ pub enum TransportConfig {
         /// CAN-FD data-phase bit rate in bit/s. `Some` selects CAN-FD mode.
         #[serde(default)]
         data_baudrate: Option<u32>,
+        /// Slave response CAN ID (`CAN_ID_SLAVE`).
+        #[serde(default)]
+        slave_id: Option<u32>,
+        /// DAQ DTO CAN IDs (`DAQ_LIST_CAN_ID`).
+        #[serde(default)]
+        daq_ids: Vec<u32>,
+        /// Pad command frames to the maximum DLC (`MAX_DLC_REQUIRED`).
+        #[serde(default)]
+        max_dlc_required: bool,
     },
 }
 
@@ -143,12 +152,18 @@ impl TransportFactory {
                 can_id,
                 baudrate,
                 data_baudrate,
+                slave_id,
+                daq_ids,
+                max_dlc_required,
             } => {
                 let config = super::can::CanTransportConfig {
                     channel: channel.clone(),
                     can_id: *can_id,
                     baudrate: *baudrate,
                     data_baudrate: *data_baudrate,
+                    slave_id: *slave_id,
+                    daq_ids: daq_ids.clone(),
+                    max_dlc_required: *max_dlc_required,
                 };
                 let transport = super::can::CanTransport::connect(&config).await?;
                 Ok(Arc::new(transport))
@@ -184,6 +199,9 @@ mod tests {
             can_id: 0x123,
             baudrate: Some(500_000),
             data_baudrate: None,
+            slave_id: Some(0x456),
+            daq_ids: vec![0x310],
+            max_dlc_required: false,
         };
         assert_eq!(config.transport_type(), TransportType::Can);
         assert_eq!(config.addr_string(), "can0:123");

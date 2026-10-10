@@ -674,6 +674,9 @@ mod tests {
                 can_id: 0x321,
                 baudrate: None,
                 data_baudrate: None,
+                slave_id: None,
+                daq_ids: Vec::new(),
+                max_dlc_required: false,
             },
         ]);
 
@@ -687,6 +690,9 @@ mod tests {
                 can_id: 0x321,
                 baudrate: None,
                 data_baudrate: None,
+                slave_id: None,
+                daq_ids: Vec::new(),
+                max_dlc_required: false,
             }
         );
     }
