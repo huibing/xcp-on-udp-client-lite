@@ -771,12 +771,14 @@ impl A2lReader {
         // Slave response identifier used to filter incoming frames.
         let slave_id = Self::token_u32_after(&tokens, "CAN_ID_SLAVE");
 
-        // DAQ DTO identifiers (only fixed mappings can be used for filtering).
-        let daq_ids = Self::parse_daq_list_can_ids(block);
+        // DAQ DTO identifiers. The slave may use a different CAN ID for DAQ
+        // data than for CMD responses; both `DAQ_LIST_CAN_ID` and
+        // `EVENT_CAN_ID_LIST` declare those IDs.
+        let daq_ids = Self::parse_daq_dto_ids(block);
 
         // When set, command frames must be padded to the maximum DLC.
-        let max_dlc_required =
-            Self::token_bool_after(&tokens, "MAX_DLC_REQUIRED").unwrap_or(false);
+        // `MAX_DLC_REQUIRED` is a bare flag (its value may be omitted).
+        let max_dlc_required = Self::token_flag(&tokens, "MAX_DLC_REQUIRED");
 
         Some(A2lTransportConfig::Can {
             can_id,
@@ -788,48 +790,65 @@ impl A2lReader {
         })
     }
 
-    /// Parse the fixed DAQ DTO CAN IDs from `DAQ_LIST_CAN_ID` blocks.
+    /// Collect the fixed DAQ DTO CAN IDs declared in the `XCP_ON_CAN` block.
     ///
-    /// Returns only fixed mappings; if any list uses an incremental mapping the
-    /// result is empty (the IDs cannot be enumerated statically).
-    fn parse_daq_list_can_ids(block: &str) -> Vec<u32> {
+    /// Sources:
+    /// - `DAQ_LIST_CAN_ID` (per DAQ list)
+    /// - `EVENT_CAN_ID_LIST` (per event; used when DAQ and CMD responses use
+    ///   different CAN IDs)
+    ///
+    /// Only fixed mappings are returned. If any entry is `VARIABLE` or
+    /// `INCREMENTAL` the IDs cannot be enumerated statically, so the result is
+    /// empty and the transport falls back to accepting all non-master IDs.
+    fn parse_daq_dto_ids(block: &str) -> Vec<u32> {
         let mut ids = Vec::new();
-        let mut incremental = false;
+        let mut incomplete = false;
 
-        for daq_block in Self::extract_transport_block_contents(block, "DAQ_LIST_CAN_ID") {
-            let clean = Self::strip_comments(&daq_block);
-            let tokens = Self::tokenize_a2l(&clean);
+        for tag in ["DAQ_LIST_CAN_ID", "EVENT_CAN_ID_LIST"] {
+            for daq_block in Self::extract_transport_block_contents(block, tag) {
+                let clean = Self::strip_comments(&daq_block);
+                let tokens = Self::tokenize_a2l(&clean);
 
-            let mut value = None;
-            for (i, token) in tokens.iter().enumerate() {
-                match token.to_ascii_uppercase().as_str() {
-                    "FIXED" => {
-                        value = tokens.get(i + 1).and_then(|v| Self::parse_u32_token(v));
-                        break;
+                let mut i = 0;
+                while i < tokens.len() {
+                    match tokens[i].to_ascii_uppercase().as_str() {
+                        "FIXED" => {
+                            if let Some(id) =
+                                tokens.get(i + 1).and_then(|t| Self::parse_u32_token(t))
+                            {
+                                ids.push(id);
+                            }
+                            i += 2;
+                        }
+                        "VARIABLE" | "INCREMENTAL" => {
+                            incomplete = true;
+                            i += 1;
+                        }
+                        _ => i += 1,
                     }
-                    "INCREMENTAL" => {
-                        incremental = true;
-                        value = tokens.get(i + 1).and_then(|v| Self::parse_u32_token(v));
-                        break;
-                    }
-                    _ => {}
                 }
             }
-
-            if value.is_none() {
-                // Fall back to the last numeric token in the block.
-                value = tokens.iter().rev().find_map(|t| Self::parse_u32_token(t));
-            }
-            if let Some(id) = value {
-                ids.push(id);
-            }
         }
 
-        if incremental {
-            // Cannot enumerate incremental IDs statically; skip strict filtering.
-            ids.clear();
+        if incomplete {
+            return Vec::new();
         }
+
+        ids.sort_unstable();
+        ids.dedup();
         ids
+    }
+
+    /// True when the bare flag `tag` is present, unless explicitly disabled
+    /// with a following `0`/`FALSE`.
+    fn token_flag(tokens: &[String], tag: &str) -> bool {
+        let Some(idx) = tokens.iter().position(|t| t.eq_ignore_ascii_case(tag)) else {
+            return false;
+        };
+        match tokens.get(idx + 1).map(|v| v.to_ascii_uppercase()) {
+            Some(value) if value == "FALSE" || value == "0" => false,
+            _ => true,
+        }
     }
 
     /// Find the `u32` value that follows the first occurrence of `tag`.
@@ -840,19 +859,6 @@ impl A2lReader {
         tokens
             .get(idx + 1)
             .and_then(|token| Self::parse_u32_token(token))
-    }
-
-    /// Find the boolean value that follows the first occurrence of `tag`.
-    fn token_bool_after(tokens: &[String], tag: &str) -> Option<bool> {
-        let idx = tokens
-            .iter()
-            .position(|token| token.eq_ignore_ascii_case(tag))?;
-        let value = tokens.get(idx + 1)?;
-        match value.to_ascii_uppercase().as_str() {
-            "TRUE" => Some(true),
-            "FALSE" => Some(false),
-            _ => Self::parse_u32_token(value).map(|n| n != 0),
-        }
     }
 
     fn parse_u16_token(token: &str) -> Option<u16> {
@@ -2460,6 +2466,76 @@ mod tests {
                 slave_id: Some(0x456),
                 daq_ids: vec![0x310, 0x320],
                 max_dlc_required: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_can_event_can_id_list_and_bare_max_dlc() {
+        // Mirrors a real A2L where CMD responses and DAQ data use different
+        // CAN IDs, declared via EVENT_CAN_ID_LIST, plus a bare
+        // MAX_DLC_REQUIRED flag.
+        let raw = r#"
+            /begin IF_DATA XCP
+                /begin XCP_ON_CAN
+                    0x0102
+                    CAN_ID_MASTER 0x7fb
+                    CAN_ID_SLAVE  0x7fc
+                    BAUDRATE      0x7a120
+                    MAX_DLC_REQUIRED
+                    /begin EVENT_CAN_ID_LIST
+                        0
+                        FIXED 0x7fd
+                    /end EVENT_CAN_ID_LIST
+                    /begin EVENT_CAN_ID_LIST
+                        1
+                        FIXED 0x7fd
+                    /end EVENT_CAN_ID_LIST
+                /end XCP_ON_CAN
+            /end IF_DATA
+        "#;
+
+        let configs = A2lReader::parse_transport_configs_from_raw(raw);
+        assert_eq!(
+            configs,
+            vec![A2lTransportConfig::Can {
+                can_id: 0x7fb,
+                baudrate: Some(0x7a120),
+                data_baudrate: None,
+                slave_id: Some(0x7fc),
+                daq_ids: vec![0x7fd],
+                max_dlc_required: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_can_variable_daq_ids_disable_filtering() {
+        // A VARIABLE DAQ mapping cannot be enumerated statically, so no
+        // strict filtering IDs are produced.
+        let raw = r#"
+            /begin IF_DATA XCP
+                /begin XCP_ON_CAN 0x0102
+                    CAN_ID_MASTER 0x123
+                    CAN_ID_SLAVE  0x124
+                    /begin DAQ_LIST_CAN_ID
+                        0
+                        VARIABLE
+                    /end DAQ_LIST_CAN_ID
+                /end XCP_ON_CAN
+            /end IF_DATA
+        "#;
+
+        let configs = A2lReader::parse_transport_configs_from_raw(raw);
+        assert_eq!(
+            configs,
+            vec![A2lTransportConfig::Can {
+                can_id: 0x123,
+                baudrate: None,
+                data_baudrate: None,
+                slave_id: Some(0x124),
+                daq_ids: Vec::new(),
+                max_dlc_required: false,
             }]
         );
     }

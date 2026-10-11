@@ -14,9 +14,11 @@
 //! abstraction and [`pcan`] for the PEAK-System PCAN-Basic driver.
 //!
 //! Incoming frames are filtered by CAN ID: the master's own ID is always
-//! rejected, and when both `CAN_ID_SLAVE` and fixed `DAQ_LIST_CAN_ID` entries
-//! are declared, only those IDs are accepted. This keeps unrelated traffic on a
-//! shared bus from polluting the XCP stream.
+//! rejected, and when both `CAN_ID_SLAVE` and fixed DAQ DTO IDs are declared,
+//! only those IDs are accepted. DAQ DTO IDs come from `DAQ_LIST_CAN_ID` and/or
+//! `EVENT_CAN_ID_LIST` — the latter is how a slave declares that DAQ data uses a
+//! different CAN ID than the command responses. This keeps unrelated traffic on
+//! a shared bus from polluting the XCP stream.
 
 mod device;
 mod pcan;
@@ -413,7 +415,7 @@ fn map_device_error(error: CanDeviceError) -> TransportError {
 /// The master's own transmit ID is always rejected (echo suppression). When a
 /// concrete allow-list of response/DAQ IDs is known, only those IDs are
 /// accepted; otherwise every other ID is accepted (to avoid dropping DAQ data
-/// when the A2L does not declare `DAQ_LIST_CAN_ID`).
+/// when the A2L does not declare fixed DAQ/event CAN IDs).
 struct FrameFilter {
     master_id: u32,
     allowed: Option<HashSet<u32>>,
