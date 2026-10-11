@@ -83,6 +83,7 @@ pub fn run() {
             commands::log_console::console_logs_clear,
             // Device management
             commands::device::list_devices,
+            commands::device::list_can_devices,
             commands::device::add_device,
             commands::device::ensure_devices_registered,
             commands::device::connect_device,

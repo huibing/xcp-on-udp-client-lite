@@ -31,7 +31,16 @@ pub enum TransportConfig {
     Udp { addr: String },
     Tcp { addr: String },
     Can {
+        /// CAN driver id (e.g. `"pcan"`); `None` uses the default driver.
+        #[serde(default)]
+        driver: Option<String>,
         channel: String,
+        /// Stable device id (takes precedence over `channel` when set).
+        #[serde(default)]
+        device_id: Option<String>,
+        /// Controller index within the device (used with `device_id`).
+        #[serde(default)]
+        controller: Option<u8>,
         can_id: u32,
         /// Nominal (arbitration-phase) bit rate in bit/s, e.g. `500_000`.
         #[serde(default)]
@@ -148,7 +157,10 @@ impl TransportFactory {
                 Ok(Arc::new(transport))
             }
             TransportConfig::Can {
+                driver,
                 channel,
+                device_id,
+                controller,
                 can_id,
                 baudrate,
                 data_baudrate,
@@ -157,7 +169,10 @@ impl TransportFactory {
                 max_dlc_required,
             } => {
                 let config = super::can::CanTransportConfig {
+                    driver: driver.clone(),
                     channel: channel.clone(),
+                    device_id: device_id.clone(),
+                    controller: *controller,
                     can_id: *can_id,
                     baudrate: *baudrate,
                     data_baudrate: *data_baudrate,
@@ -195,7 +210,10 @@ mod tests {
     #[test]
     fn test_transport_config_can() {
         let config = TransportConfig::Can {
+            driver: Some("pcan".to_string()),
             channel: "can0".to_string(),
+            device_id: None,
+            controller: None,
             can_id: 0x123,
             baudrate: Some(500_000),
             data_baudrate: None,

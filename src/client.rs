@@ -577,7 +577,10 @@ mod tests {
     #[test]
     fn test_transport_config_can_creation() {
         let config = TransportConfig::Can {
+            driver: None,
             channel: "can0".to_string(),
+            device_id: None,
+            controller: None,
             can_id: 0x123,
             baudrate: Some(500_000),
             data_baudrate: None,

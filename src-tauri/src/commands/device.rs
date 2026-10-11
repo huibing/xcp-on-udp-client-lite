@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use tauri::State;
-use xcp_client::transport::TransportType;
+use xcp_client::transport::{TransportConfig, TransportType};
 
 use crate::state::{DeviceState, SharedState};
 
@@ -40,6 +40,128 @@ fn transport_option_value(transport_type: TransportType) -> &'static str {
         TransportType::Can => "can",
         TransportType::Tcp => "tcp",
     }
+}
+
+/// Parsed CAN selection token from the UI.
+#[derive(Debug, Default)]
+struct CanSelection {
+    driver: Option<String>,
+    device_id: Option<String>,
+    controller: Option<u8>,
+    channel: Option<String>,
+}
+
+/// Parse a CAN selection token.
+///
+/// Supported forms:
+/// - `driver:device_id:controller` (structured, produced by `selection_value()`)
+/// - `driver:channel` (legacy channel name)
+/// - `channel` (channel name only, default driver)
+/// - empty / `auto` (driver auto-selection)
+fn parse_can_selection(value: &str) -> CanSelection {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("auto") {
+        return CanSelection::default();
+    }
+
+    let parts: Vec<&str> = value.split(':').collect();
+    match parts.as_slice() {
+        [driver, device_id, controller]
+            if !driver.trim().is_empty()
+                && !device_id.trim().is_empty()
+                && controller.trim().parse::<u8>().is_ok() =>
+        {
+            CanSelection {
+                driver: Some(driver.trim().to_string()),
+                device_id: Some(device_id.trim().to_string()),
+                controller: controller.trim().parse::<u8>().ok(),
+                channel: None,
+            }
+        }
+        [driver, channel]
+            if !driver.trim().is_empty() && !channel.trim().is_empty() =>
+        {
+            CanSelection {
+                driver: Some(driver.trim().to_string()),
+                channel: Some(channel.trim().to_string()),
+                ..Default::default()
+            }
+        }
+        [channel] if !channel.trim().is_empty() => CanSelection {
+            channel: Some(channel.trim().to_string()),
+            ..Default::default()
+        },
+        _ => CanSelection::default(),
+    }
+}
+
+/// Apply a user-selected CAN device/channel to a resolved transport config.
+///
+/// A structured selection (`driver:device_id:controller`) pins the device by its
+/// stable id and clears any channel name so the driver resolves it at open time.
+fn apply_can_selection(config: &mut TransportConfig, selection: Option<&str>) {
+    let Some(selection) = selection.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if let TransportConfig::Can {
+        driver,
+        channel,
+        device_id,
+        controller,
+        ..
+    } = config
+    {
+        let parsed = parse_can_selection(selection);
+        if let Some(name) = parsed.driver {
+            *driver = Some(name);
+        }
+        if let Some(id) = parsed.device_id {
+            *device_id = Some(id);
+            *controller = parsed.controller;
+            // Device id takes precedence; avoid a stale channel name.
+            *channel = "auto".to_string();
+        } else if let Some(name) = parsed.channel {
+            *channel = name;
+        }
+    }
+}
+
+/// List the CAN devices available through the compiled-in drivers.
+#[tauri::command]
+pub async fn list_can_devices() -> Result<Value, String> {
+    let drivers: Vec<Value> = xcp_client::transport::drivers()
+        .iter()
+        .map(|driver| {
+            json!({
+                "name": driver.name(),
+                "description": driver.description(),
+            })
+        })
+        .collect();
+
+    let devices: Vec<Value> = xcp_client::transport::list_can_devices()
+        .iter()
+        .map(|device| {
+            json!({
+                "driver": device.driver,
+                "device_id": device.device_id,
+                "device_type": device.device_type,
+                "controller": device.controller,
+                "channel": device.channel,
+                "name": device.name,
+                "label": device.display_label(),
+                "available": device.available,
+                "fd_capable": device.fd_capable,
+                "value": device.selection_value(),
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "success": true,
+        "drivers": drivers,
+        "devices": devices,
+    }))
 }
 
 fn build_transport_options(device: &DeviceState) -> Vec<Value> {
@@ -273,6 +395,7 @@ pub async fn connect_device(
     state: State<'_, SharedState>,
     device_id: String,
     transport_protocol: Option<String>,
+    can_device: Option<String>,
 ) -> Result<Value, String> {
     let requested_transport = match parse_transport_type(transport_protocol.as_deref()) {
         Ok(value) => value,
@@ -284,7 +407,7 @@ pub async fn connect_device(
         }
     };
 
-    let (dev_name, dev_a2l_path, transport_config, already_connected) = {
+    let (dev_name, dev_a2l_path, transport_label, xcp_transport_config, already_connected) = {
         let app = state.read().await;
         let dev = app
             .get_device(&device_id)
@@ -298,10 +421,13 @@ pub async fn connect_device(
                 }));
             }
         };
+        let mut xcp_config = transport.to_transport_config();
+        apply_can_selection(&mut xcp_config, can_device.as_deref());
         (
             dev.name.clone(),
             dev.a2l_path.clone(),
-            transport,
+            transport.display_label(),
+            xcp_config,
             dev.connected,
         )
     };
@@ -323,7 +449,7 @@ pub async fn connect_device(
         app.client
             .connect_slave(
                 &dev_name,
-                transport_config.clone().to_transport_config(),
+                xcp_transport_config,
                 Some(packet_log.clone()),
             )
             .await
@@ -393,7 +519,7 @@ pub async fn connect_device(
         "message": format!(
             "Connected to {} via {}",
             dev_name,
-            transport_config.display_label()
+            transport_label
         ),
     }))
 }
@@ -540,6 +666,7 @@ pub async fn rename_device(
 pub async fn connect_all_devices(
     state: State<'_, SharedState>,
     transport_protocols: Option<HashMap<String, String>>,
+    can_devices: Option<HashMap<String, String>>,
 ) -> Result<Value, String> {
     let device_ids: Vec<String> = {
         let app = state.read().await;
@@ -551,12 +678,14 @@ pub async fn connect_all_devices(
     };
 
     let transport_protocols = transport_protocols.unwrap_or_default();
+    let can_devices = can_devices.unwrap_or_default();
     let mut connected_count = 0usize;
     let mut failed_devices = Vec::new();
 
     for id in device_ids {
         let protocol = transport_protocols.get(&id).cloned();
-        match connect_device(state.clone(), id.clone(), protocol).await {
+        let can_device = can_devices.get(&id).cloned();
+        match connect_device(state.clone(), id.clone(), protocol, can_device).await {
             Ok(result) if result["success"].as_bool().unwrap_or(false) => {
                 connected_count += 1;
             }

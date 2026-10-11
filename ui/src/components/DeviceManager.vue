@@ -140,6 +140,25 @@
             </option>
           </select>
 
+          <select
+            v-if="!device.connected && canSelectorVisible(device)"
+            v-model="canSelections[device.id]"
+            class="sel"
+            title="CAN device / channel"
+          >
+            <option value="">Auto (first available CAN channel)</option>
+            <option
+              v-for="canDevice in canDevices"
+              :key="`${device.id}-${canDevice.value}`"
+              :value="canDevice.value"
+            >
+              {{ canOptionLabel(canDevice) }}
+            </option>
+            <option v-if="!canDevices.length" value="" disabled>
+              No CAN devices found
+            </option>
+          </select>
+
           <button
             v-if="device.connected"
             type="button"
@@ -289,6 +308,8 @@ const busyKey = ref('')
 const showAddModal = ref(false)
 const newSlaveName = ref('')
 const transportSelections = reactive({})
+const canSelections = reactive({})
+const canDevices = ref([])
 const renameDrafts = reactive({})
 const toast = reactive({ message: '', kind: 'info' })
 let toastTimer = null
@@ -350,6 +371,7 @@ function singlePath(result) {
 function syncDeviceDrafts() {
   const nextSelections = {}
   const nextNames = {}
+  const nextCanSelections = {}
 
   for (const device of devices.value) {
     const options = device.transport_options ?? []
@@ -357,6 +379,7 @@ function syncDeviceDrafts() {
     const hasCurrent = options.some(option => option.value === currentSelection)
     nextSelections[device.id] = hasCurrent ? currentSelection : (options[0]?.value ?? '')
     nextNames[device.id] = renameDrafts[device.id] ?? device.name
+    nextCanSelections[device.id] = canSelections[device.id] ?? ''
   }
 
   for (const key of Object.keys(transportSelections)) delete transportSelections[key]
@@ -364,6 +387,32 @@ function syncDeviceDrafts() {
 
   for (const key of Object.keys(renameDrafts)) delete renameDrafts[key]
   for (const [key, value] of Object.entries(nextNames)) renameDrafts[key] = value
+
+  for (const key of Object.keys(canSelections)) delete canSelections[key]
+  for (const [key, value] of Object.entries(nextCanSelections)) canSelections[key] = value
+}
+
+async function refreshCanDevices() {
+  try {
+    const result = await invoke('list_can_devices')
+    canDevices.value = result.devices ?? []
+  } catch (error) {
+    canDevices.value = []
+    console.warn('Failed to list CAN devices', error)
+  }
+}
+
+function canSelectorVisible(device) {
+  const options = device.transport_options ?? []
+  const hasCan = options.some(option => option.value === 'can')
+  return hasCan && transportSelections[device.id] === 'can'
+}
+
+function canOptionLabel(canDevice) {
+  const fd = canDevice.fd_capable ? ' [FD]' : ''
+  const state = canDevice.available ? '' : ' (in use)'
+  const base = canDevice.label || `${canDevice.name} \u00b7 ${canDevice.channel}`
+  return `${base}${fd}${state}`
 }
 
 async function refresh() {
@@ -440,7 +489,8 @@ async function connectDevice(device) {
   try {
     const result = await invoke('connect_device', {
       deviceId: device.id,
-      transportProtocol: transportSelections[device.id] || ''
+      transportProtocol: transportSelections[device.id] || '',
+      canDevice: canSelections[device.id] || ''
     })
     if (!result.success) {
       showToast(result.error || 'Connect failed', 'error')
@@ -475,14 +525,20 @@ async function disconnectDevice(device) {
 
 async function connectAll() {
   const protocolMap = {}
+  const canMap = {}
   for (const device of devices.value) {
     const value = transportSelections[device.id]
     if (value) protocolMap[device.id] = value
+    const canValue = canSelections[device.id]
+    if (canValue) canMap[device.id] = canValue
   }
 
   setBusy('connect-all')
   try {
-    const result = await invoke('connect_all_devices', { transportProtocols: protocolMap })
+    const result = await invoke('connect_all_devices', {
+      transportProtocols: protocolMap,
+      canDevices: canMap
+    })
     await refresh()
     showToast(result.message || 'Connect all finished', result.success ? 'success' : 'error')
   } catch (error) {
@@ -710,7 +766,10 @@ async function startUpload() {
   }
 }
 
-onMounted(refresh)
+onMounted(() => {
+  refresh()
+  refreshCanDevices()
+})
 </script>
 
 <style scoped>

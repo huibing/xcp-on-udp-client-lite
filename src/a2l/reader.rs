@@ -245,7 +245,10 @@ impl A2lTransportConfig {
                 daq_ids,
                 max_dlc_required,
             } => TransportConfig::Can {
+                driver: None,
                 channel: "auto".to_string(),
+                device_id: None,
+                controller: None,
                 can_id: *can_id,
                 baudrate: *baudrate,
                 data_baudrate: *data_baudrate,
