@@ -239,6 +239,55 @@ Tauri / Vue：
 
 ---
 
+## 10. DAQ 与 CMD 响应用不同的 CAN ID（`EVENT_CAN_ID_LIST`）
+
+**原始问题**
+
+> xcp can transport 还有一点特殊  下位机有可能daq和cmd的响应用不同的can id；这个信息可以在a2l中读取到 EVENT_CAN_ID_LIST @zc-blanc_rear_c-target-xcp.a2l 中有； 在接收can message时需要考虑这点
+
+**最终答案**
+
+已处理。真实 A2L（`zc-blanc_rear_c-target-xcp.a2l`）的 `XCP_ON_CAN` 中：
+
+```
+CAN_ID_MASTER 0x7fb      /* CMD/STIM (CRO) */
+CAN_ID_SLAVE  0x7fc      /* RES/ERR/EV (DTO) */
+BAUDRATE      0x7a120
+MAX_DLC_REQUIRED         /* 裸标签，无值 */
+/begin EVENT_CAN_ID_LIST
+  0
+  FIXED 0x7fd            /* DAQ 走独立的 CAN ID */
+/end EVENT_CAN_ID_LIST
+... /* 事件 0..8 均为 FIXED 0x7fd */
+/begin CAN_FD
+  MAX_DLC 0x40
+  CAN_FD_DATA_TRANSFER_BAUDRATE 0x1e8480
+/end CAN_FD
+```
+
+改动：
+
+1. `src/a2l/reader.rs`：DAQ DTO CAN ID 现在同时收集 `DAQ_LIST_CAN_ID` 与 **`EVENT_CAN_ID_LIST`** 里的 `FIXED` 值，去重合并进 `daq_ids`；若出现 `VARIABLE`/`INCREMENTAL`（运行时才能确定）则返回空，传输层退化为“接收除 master 外全部”，避免误丢 DAQ。
+2. `MAX_DLC_REQUIRED` 改为**裸标志识别**（出现即 true，除非显式跟 `0`/`FALSE`）——之前要求后面必须有值，导致该 A2L 漏判。
+3. `src/transport/can/mod.rs`：接收白名单 = `{CAN_ID_SLAVE} ∪ {DAQ/EVENT ids}`，即同时接收命令响应 ID 与 DAQ 专用 ID，并丢弃 master 自己发送的 ID。
+
+实测解析结果：
+
+```
+Can {
+  can_id: 0x7fb,                 // CAN_ID_MASTER
+  baudrate: Some(500000),
+  data_baudrate: Some(2000000),  // CAN-FD
+  slave_id: Some(0x7fc),         // CAN_ID_SLAVE
+  daq_ids: [0x7fd],              // EVENT_CAN_ID_LIST FIXED
+  max_dlc_required: true,
+}
+```
+
+→ 接收白名单 `{0x7fc, 0x7fd}`：`0x7fc` 收命令响应，`0x7fd` 收 DAQ；master `0x7fb` 被丢弃。
+
+---
+
 ## 相关提交
 
 | 提交 | 内容 |
@@ -247,3 +296,4 @@ Tauri / Vue：
 | `2422086` | feat(transport): 从 A2L 传递波特率与 CAN-FD 模式到 PCAN |
 | `cf10fc9` | feat(transport): 按 CAN ID 过滤并处理 MAX_DLC_REQUIRED |
 | `5f2fe01` | refactor(transport): 拆分 CAN 设备驱动与传输层，新增设备级选择 |
+| `465845e` | feat(a2l): 支持 DAQ 使用独立 CAN ID（EVENT_CAN_ID_LIST） |

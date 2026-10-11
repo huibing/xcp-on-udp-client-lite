@@ -16,7 +16,8 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 - **Web UI**: Browser-based interface with multi-slave management
 - **Desktop App (Tauri)**: Native cross-platform GUI with Experiment and Compare workflows
 - **TUI**: Interactive terminal UI for single-device debugging
-- **Transport Abstraction**: UDP and TCP support with CAN reserved for future extension
+- **Transport Abstraction**: UDP, TCP and CAN (XCP-on-CAN over PEAK-System PCAN-Basic) with a pluggable CAN device-driver layer
+- **CAN Device Discovery**: Enumerate CAN adapters/channels and pick one (by stable device id) from the desktop UI
 
 ## Supported Data Types
 
@@ -46,7 +47,10 @@ lib.rs → client.rs (XcpClient - Multi-Slave Manager)
     │       ├── transport.rs   # Transport trait and factory
     │       ├── udp.rs         # UDP transport (XCP-on-UDP/IP)
     │       ├── tcp.rs         # TCP transport (XCP-on-TCP/IP)
-    │       └── can.rs         # CAN transport (reserved)
+    │       └── can/           # XCP-on-CAN transport + device drivers
+    │           ├── mod.rs     #   CanTransport (framing, ID filtering, MAX_DLC)
+    │           ├── device.rs  #   CanDevice/CanDriver traits + registry
+    │           └── pcan.rs    #   PEAK-System PCAN-Basic driver
     │
     ├── slave.rs           # XcpSlave - Individual slave context
     ├── calibration.rs     # Calibration parameter management
@@ -155,25 +159,55 @@ TCP support is intentionally left as a follow-up extension for the mock server.
 
 ### Transport Configuration
 
-The transport abstraction currently supports:
+The transport abstraction supports:
 
-- **UDP**: datagram-based XCP-on-Ethernet transport
-- **TCP**: stream-based XCP-on-Ethernet transport with the same 16-bit `LEN` and 16-bit packet counter header as UDP
-- **CAN**: reserved skeleton only
+- **UDP**: datagram-based XCP-on-Ethernet transport (4-byte `LEN` + packet counter header)
+- **TCP**: stream-based XCP-on-Ethernet transport with the same `LEN`/counter header as UDP
+- **CAN**: XCP-on-CAN with a pluggable CAN device-driver layer. One XCP packet maps to
+  one CAN frame; there is **no** `LEN`/`COUNTER` header (the CAN DLC is the length and the
+  XCP packet starts at data byte 0). Classic CAN and CAN-FD are supported.
 
-Library code can select the transport explicitly:
+CAN configuration is normally derived from the A2L `XCP_ON_CAN` block (`BAUDRATE`,
+`CAN_FD_DATA_TRANSFER_BAUDRATE`, `CAN_ID_SLAVE`, `DAQ_LIST_CAN_ID`,
+`EVENT_CAN_ID_LIST`, `MAX_DLC_REQUIRED`) and can be overridden from the desktop UI by
+picking a specific adapter/channel.
 
 ```rust
-use xcp_client::transport::TransportConfig;
+use xcp_client::transport::{list_can_devices, TransportConfig};
 
-let udp = TransportConfig::Udp {
-    addr: "127.0.0.1:5555".to_string(),
+// Ethernet
+let udp = TransportConfig::Udp { addr: "127.0.0.1:5555".to_string() };
+let tcp = TransportConfig::Tcp { addr: "127.0.0.1:5555".to_string() };
+
+// CAN (XCP-on-CAN over PCAN)
+let can = TransportConfig::Can {
+    driver: Some("pcan".to_string()),   // None = default driver ("pcan")
+    channel: "auto".to_string(),        // or e.g. "PCAN_USBBUS1"
+    device_id: None,                    // Some("3") pins a stable device id
+    controller: None,
+    can_id: 0x7fb,                      // CAN_ID_MASTER
+    baudrate: Some(500_000),
+    data_baudrate: Some(2_000_000),     // Some = CAN-FD
+    slave_id: Some(0x7fc),              // CAN_ID_SLAVE
+    daq_ids: vec![0x7fd],               // DAQ/EVENT DTO CAN IDs
+    max_dlc_required: true,
 };
 
-let tcp = TransportConfig::Tcp {
-    addr: "127.0.0.1:5555".to_string(),
-};
+// Enumerate attached CAN channels (driver + device_id + controller + channel)
+for dev in list_can_devices() {
+    println!("{}", dev.display_label());
+}
 ```
+
+CAN environment variables:
+
+- `PCAN_BASIC_DLL` — path to `PCANBasic.dll` (either the file or its directory)
+- `PCAN_BITRATE` — fallback bit rate used only when the config declares none
+- `PCAN_FD_CLOCK` — CAN-FD controller clock in Hz used to derive timing (default 80 MHz)
+
+See [`PCAN_CAN_QA.md`](PCAN_CAN_QA.md) for the CAN/PCAN design Q&A and
+[`src/transport/can/device.rs`](src/transport/can/device.rs) for how to add a new
+CAN device driver.
 
 ### Run Web UI
 
@@ -477,6 +511,9 @@ Full device management:
 - Load an Intel HEX file for checksum verification
 - Rename devices, remove devices
 - Connect / disconnect individual devices
+- Choose the transport protocol (Auto / UDP / TCP / CAN)
+- When CAN is selected, pick a specific CAN adapter/channel from the enumerated list
+  (defaults to the first available channel; selection is pinned by stable device id)
 
 #### Experiment
 
@@ -584,12 +621,13 @@ const unlisten = await listen('daq-data', (event) => {
 | Module | Command | Rust signature summary |
 |--------|---------|------------------------|
 | **device** | `list_devices` | `() → { devices: [...] }` |
+| | `list_can_devices` | `() → { drivers: [...], devices: [...] }` |
 | | `add_device` | `(name, address?) → { device_id }` |
-| | `connect_device` | `(device_id, transport_protocol?) → { success }` |
+| | `connect_device` | `(device_id, transport_protocol?, can_device?) → { success }` |
 | | `disconnect_device` | `(device_id) → { success }` |
 | | `remove_device` | `(device_id) → { success }` |
 | | `rename_device` | `(device_id, name) → { success }` |
-| | `connect_all_devices` | `(transport_protocols?) → { connected }` |
+| | `connect_all_devices` | `(transport_protocols?, can_devices?) → { connected }` |
 | **a2l** | `load_a2l` | `(device_id, file_path) → { success, cal_count, meas_count }` |
 | **calibration** | `cal_available` | `() → { params: [...] }` |
 | | `cal_read` | `(device_id, idx) → { value, display }` |
@@ -783,6 +821,7 @@ Each slave maintains independent:
 | toml | 0.8 | TOML config file parsing |
 | uuid | 1.6 | Slave ID generation |
 | async-trait | 0.1 | Transport abstraction |
+| libloading | 0.8 | Dynamic `PCANBasic.dll` loading for the PCAN CAN driver |
 
 ### Tauri Desktop App (`src-tauri`)
 
@@ -812,7 +851,8 @@ cargo test test_name -- --nocapture
 
 ### Test Coverage
 
-- **Transport Layer**: UDP transport, TCP transport, message routing
+- **Transport Layer**: UDP transport, TCP transport, CAN transport (framing, ID filtering, DLC conversion), message routing
+- **CAN Drivers**: PCAN channel/handle parsing, bit-rate/timing conversion, device enumeration, driver registry
 - **Protocol Layer**: Command builders, response parsers
 - **Slave Management**: Multi-slave connection, state management
 - **Calibration**: Parameter read/write, A2L parsing
@@ -846,7 +886,7 @@ cargo test test_name -- --nocapture
 │   ├── daq_record.rs    # CLI daq-record subcommand
 │   ├── a2l/             # A2L file support
 │   ├── protocol/        # XCP protocol implementation
-│   ├── transport/       # Transport abstraction
+│   ├── transport/       # Transport abstraction (UDP/TCP/CAN + CAN device drivers)
 │   ├── tui/             # Terminal UI (single-device)
 │   └── web/             # Web UI (multi-device)
 ├── src-tauri/           # Tauri desktop app backend
@@ -875,6 +915,17 @@ This project is provided as-is for educational and development purposes.
 Contributions are welcome! Please feel free to submit pull requests.
 
 ## Recent Changes
+
+### v0.5.0 - CAN / PCAN Transport
+
+- ✅ **XCP-on-CAN Transport**: One XCP packet per CAN frame, no `LEN`/`COUNTER` header (DLC = length)
+  - CAN ID receive filtering: accepts `CAN_ID_SLAVE` plus DAQ DTO IDs from `DAQ_LIST_CAN_ID` / `EVENT_CAN_ID_LIST`, always rejects the master's own ID
+  - `MAX_DLC_REQUIRED` padding; classic CAN and CAN-FD (timing derived from bit rates)
+- ✅ **CAN Device Driver Abstraction**: `CanDevice`/`CanDriver` traits with a registry; `pcan.rs` implements PEAK-System PCAN-Basic (dynamic `PCANBasic.dll` loading via `libloading`)
+- ✅ **A2L-driven CAN config**: bitrate, CAN-FD data bitrate, `CAN_ID_SLAVE`, `DAQ_LIST_CAN_ID`, `EVENT_CAN_ID_LIST`, `MAX_DLC_REQUIRED`
+- ✅ **Device-level selection**: enumerate attached channels, choose by stable `device_id`/controller (resolved via `CAN_LookUpChannel`)
+- ✅ **Tauri/Vue**: `list_can_devices` command and a CAN device/channel dropdown on the Devices page
+- 📄 Design Q&A in [`PCAN_CAN_QA.md`](PCAN_CAN_QA.md)
 
 ### v0.4.0 - CLI Subcommands & Checksum Verification
 
