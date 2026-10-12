@@ -131,6 +131,25 @@ pub trait Transport: Send + Sync {
     /// Try to receive one normalized XCP payload packet with timeout
     async fn try_recv_packet(&self, timeout_ms: u64) -> Result<Option<Vec<u8>>, TransportError>;
 
+    /// Receive one normalized XCP payload packet together with an optional
+    /// hardware/device reception timestamp in microseconds since the device
+    /// clock epoch (e.g. a PCAN USB frame timestamp). Transports without
+    /// hardware timestamping return `None`. The default delegates to
+    /// [`recv_packet`](Self::recv_packet).
+    async fn recv_packet_ts(&self) -> Result<(Vec<u8>, Option<u64>), TransportError> {
+        Ok((self.recv_packet().await?, None))
+    }
+
+    /// Try to receive one packet with an optional device timestamp, with
+    /// timeout. The default delegates to
+    /// [`try_recv_packet`](Self::try_recv_packet).
+    async fn try_recv_packet_ts(
+        &self,
+        timeout_ms: u64,
+    ) -> Result<Option<(Vec<u8>, Option<u64>)>, TransportError> {
+        Ok(self.try_recv_packet(timeout_ms).await?.map(|p| (p, None)))
+    }
+
     /// Close the connection
     async fn close(&self) -> Result<(), TransportError>;
 

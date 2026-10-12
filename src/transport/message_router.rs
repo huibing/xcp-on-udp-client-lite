@@ -29,10 +29,14 @@ pub struct XcpMessage {
     pub packet_type: PacketType,
     pub pid: u8,
     pub payload: Vec<u8>,
+    /// Hardware/device reception timestamp in microseconds since the device
+    /// clock epoch, when the transport provides one (e.g. PCAN USB frames).
+    /// `None` for transports without hardware timestamping.
+    pub device_timestamp_us: Option<u64>,
 }
 
 impl XcpMessage {
-    fn from_payload(payload: Vec<u8>) -> Option<Self> {
+    fn from_payload(payload: Vec<u8>, device_timestamp_us: Option<u64>) -> Option<Self> {
         if payload.is_empty() {
             return None;
         }
@@ -52,6 +56,7 @@ impl XcpMessage {
             packet_type,
             pid,
             payload,
+            device_timestamp_us,
         })
     }
 }
@@ -127,11 +132,15 @@ impl MessageRouter {
 
             while running.load(std::sync::atomic::Ordering::SeqCst) {
                 // Receive one normalized XCP payload packet from transport
-                match transport.recv_packet().await {
-                    Ok(payload) => {
-                        tracing::trace!("Received XCP payload packet: {} bytes", payload.len());
+                match transport.recv_packet_ts().await {
+                    Ok((payload, device_ts)) => {
+                        tracing::trace!(
+                            "Received XCP payload packet: {} bytes (device_ts_us={:?})",
+                            payload.len(),
+                            device_ts
+                        );
 
-                        let Some(msg) = XcpMessage::from_payload(payload) else {
+                        let Some(msg) = XcpMessage::from_payload(payload, device_ts) else {
                             tracing::warn!("Received empty XCP payload packet from transport");
                             continue;
                         };
@@ -215,23 +224,26 @@ mod tests {
 
     #[test]
     fn test_packet_type_detection_from_payload() {
-        let cto = XcpMessage::from_payload(vec![0xFF, 0x00, 0x01, 0x02]).unwrap();
+        let cto = XcpMessage::from_payload(vec![0xFF, 0x00, 0x01, 0x02], None).unwrap();
         assert_eq!(cto.packet_type, PacketType::Cto);
         assert_eq!(cto.pid, 0xFF);
         assert_eq!(cto.payload, vec![0xFF, 0x00, 0x01, 0x02]);
+        assert_eq!(cto.device_timestamp_us, None);
 
-        let dto = XcpMessage::from_payload(vec![0xC0, 0x01, 0x02, 0x03, 0x04]).unwrap();
+        let dto = XcpMessage::from_payload(vec![0xC0, 0x01, 0x02, 0x03, 0x04], Some(12345))
+            .unwrap();
         assert_eq!(dto.packet_type, PacketType::Dto);
         assert_eq!(dto.pid, 0xC0);
         assert_eq!(dto.payload, vec![0xC0, 0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(dto.device_timestamp_us, Some(12345));
 
-        let boundary = XcpMessage::from_payload(vec![0xFB, 0x01, 0x02]).unwrap();
+        let boundary = XcpMessage::from_payload(vec![0xFB, 0x01, 0x02], None).unwrap();
         assert_eq!(boundary.packet_type, PacketType::Dto);
         assert_eq!(boundary.pid, 0xFB);
     }
 
     #[test]
     fn test_empty_payload_is_rejected() {
-        assert!(XcpMessage::from_payload(Vec::new()).is_none());
+        assert!(XcpMessage::from_payload(Vec::new(), None).is_none());
     }
 }

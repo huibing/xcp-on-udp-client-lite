@@ -439,6 +439,16 @@ impl TimestampTracker {
     }
 }
 
+/// Compute elapsed seconds from a PCAN device reception timestamp
+/// (microseconds since device init) relative to a baseline captured on the
+/// first recorded frame. Uses wrapping subtraction so a device-clock wrap
+/// (every ~49 days of `millis`) still yields a sane forward delta within a
+/// single recording session.
+fn device_ts_elapsed(ts_us: u64, baseline_us: Option<u64>) -> f64 {
+    let base = baseline_us.unwrap_or(ts_us);
+    (ts_us.wrapping_sub(base)) as f64 / 1_000_000.0
+}
+
 /// DAQ Manager - implements Dynamic DAQ
 #[derive(Clone)]
 pub struct DaqManager {
@@ -507,6 +517,10 @@ pub struct DaqManager {
     recording_ts_tracker: Arc<RwLock<Option<TimestampTracker>>>,
     /// Recording start instant (fallback when slave has no timestamps)
     recording_start_instant: Arc<RwLock<Option<std::time::Instant>>>,
+    /// Recording start device timestamp baseline (PCAN hardware clock, µs),
+    /// captured from the first recorded DTO packet. Used as a high-accuracy
+    /// fallback when the slave does not provide its own DAQ timestamps.
+    recording_start_device_ts_us: Arc<RwLock<Option<u64>>>,
     /// Measurement info for MDF4 channel setup (name, unit)
     recording_measurement_info: Arc<RwLock<Vec<(String, Option<String>)>>>,
 
@@ -560,6 +574,7 @@ impl DaqManager {
             mf4_cg_id: Arc::new(TokioMutex::new(None)),
             recording_ts_tracker: Arc::new(RwLock::new(None)),
             recording_start_instant: Arc::new(RwLock::new(None)),
+            recording_start_device_ts_us: Arc::new(RwLock::new(None)),
             recording_measurement_info: Arc::new(RwLock::new(Vec::new())),
             packet_log: None,
             slave_name: String::new(),
@@ -616,6 +631,7 @@ impl DaqManager {
             mf4_cg_id: Arc::new(TokioMutex::new(None)),
             recording_ts_tracker: Arc::new(RwLock::new(None)),
             recording_start_instant: Arc::new(RwLock::new(None)),
+            recording_start_device_ts_us: Arc::new(RwLock::new(None)),
             recording_measurement_info: Arc::new(RwLock::new(Vec::new())),
             packet_log: None,
             slave_name: String::new(),
@@ -1301,18 +1317,69 @@ impl DaqManager {
         }
 
         // 6. SET_DAQ_LIST_MODE for each DAQ list
+        //
+        // Mode bit 0x10 requests the slave to timestamp DTOs of this DAQ list.
+        // Some slaves do not support DAQ timestamping and reject mode 0x10 with
+        // ERR_PARAM_OUT_OF_RANGE (0x22). To handle this robustly:
+        //   - When the slave already advertised no timestamp support
+        //     (timestamp_size == None), send mode 0x00 directly.
+        //   - If the slave rejects the timestamp bit, fall back to mode 0x00 and
+        //     disable timestamp decoding/recording for the whole session so DTO
+        //     parsing and start_recording() do not expect a timestamp.
+        let mut timestamp_disabled_by_slave = false;
         for (daq_list_idx, _) in allocation.odt_count_per_list.iter().enumerate() {
             let daq_list = daq_list_idx as u16;
             let list_event_channel = allocation.event_channel_per_list[daq_list_idx];
+            let mode: u8 = if self.timestamp_size.is_some() && !timestamp_disabled_by_slave {
+                0x10
+            } else {
+                0x00
+            };
             tracing::trace!(
-                "SET_DAQ_LIST_MODE: mode=0x10, daq_list={}, event_channel={}, prescaler=1",
+                "SET_DAQ_LIST_MODE: mode=0x{:02X}, daq_list={}, event_channel={}, prescaler=1",
+                mode,
                 daq_list,
                 list_event_channel
             );
-            slave
-                .set_daq_list_mode(0x10, daq_list, list_event_channel, 1, 0)
+            match slave
+                .set_daq_list_mode(mode, daq_list, list_event_channel, 1, 0)
                 .await
-                .map_err(|e| format!("SET_DAQ_LIST_MODE failed: {}", e))?;
+            {
+                Ok(()) => {}
+                // Slave rejected the timestamp bit (e.g. ERR_PARAM_OUT_OF_RANGE).
+                // Retry without timestamp and disable timestamp for the session.
+                Err(crate::slave::SlaveError::Protocol(err)) if mode == 0x10 => {
+                    tracing::warn!(
+                        "SET_DAQ_LIST_MODE with timestamp (mode=0x10) rejected for DAQ list \
+                         {}: {}. Slave does not support DAQ timestamps; retrying without \
+                         timestamp (mode=0x00) and disabling timestamp for this session.",
+                        daq_list,
+                        err
+                    );
+                    timestamp_disabled_by_slave = true;
+                    self.timestamp_size = None;
+                    self.timestamp_unit = None;
+                    self.base_timestamp = None;
+                    {
+                        let mut config = self.daq_config.write().await;
+                        config.timestamp_size = 0;
+                        config.timestamp_unit = None;
+                    }
+                    slave
+                        .set_daq_list_mode(0x00, daq_list, list_event_channel, 1, 0)
+                        .await
+                        .map_err(|e| format!("SET_DAQ_LIST_MODE failed: {}", e))?;
+                }
+                Err(e) => {
+                    return Err(format!("SET_DAQ_LIST_MODE failed: {}", e));
+                }
+            }
+        }
+        if timestamp_disabled_by_slave {
+            tracing::info!(
+                "Timestamp support disabled by slave; DTO timestamps will be absent \
+                 and recording will use the local clock."
+            );
         }
 
         tracing::info!(
@@ -1415,6 +1482,7 @@ impl DaqManager {
         let csv_event_signals = self.csv_event_signals.clone();
         let recording_ts_tracker = self.recording_ts_tracker.clone();
         let recording_start_instant = self.recording_start_instant.clone();
+        let recording_start_device_ts_us = self.recording_start_device_ts_us.clone();
 
         #[cfg(feature = "mf4-native")]
         let mf4_writer = self.mf4_writer.clone();
@@ -1594,14 +1662,31 @@ impl DaqManager {
                                 let rec_ts = {
                                     let mut tracker = recording_ts_tracker.write().await;
                                     let start_instant = recording_start_instant.read().await;
+                                    let mut dev_start =
+                                        recording_start_device_ts_us.write().await;
+                                    let dev_ts = msg.device_timestamp_us;
                                     if let Some(ref mut tracker) = *tracker {
                                         if let Some(raw_ts) = data.timestamp {
                                             tracker.elapsed_seconds(raw_ts)
+                                        } else if let Some(ts) = dev_ts {
+                                            // Slave has no timestamp: fall back to the
+                                            // PCAN device hardware timestamp (µs since
+                                            // device init), relative to the first
+                                            // recorded frame.
+                                            if dev_start.is_none() {
+                                                *dev_start = Some(ts);
+                                            }
+                                            device_ts_elapsed(ts, *dev_start)
                                         } else if let Some(ref start) = *start_instant {
                                             start.elapsed().as_secs_f64()
                                         } else {
                                             display_timestamp_s
                                         }
+                                    } else if let Some(ts) = dev_ts {
+                                        if dev_start.is_none() {
+                                            *dev_start = Some(ts);
+                                        }
+                                        device_ts_elapsed(ts, *dev_start)
                                     } else if let Some(ref start) = *start_instant {
                                         start.elapsed().as_secs_f64()
                                     } else {
@@ -1811,6 +1896,10 @@ impl DaqManager {
 
         // Set recording start instant (fallback for local-clock timestamps)
         *self.recording_start_instant.write().await = Some(std::time::Instant::now());
+
+        // Reset the device-timestamp baseline; it is captured from the first
+        // recorded DTO packet (used when the slave provides no timestamps).
+        *self.recording_start_device_ts_us.write().await = None;
 
         // Get selected measurements for CSV header
         let selected_measurements = self.selected_measurements();
@@ -2100,6 +2189,7 @@ impl DaqManager {
         // Clear recording state
         *self.recording_ts_tracker.write().await = None;
         *self.recording_start_instant.write().await = None;
+        *self.recording_start_device_ts_us.write().await = None;
 
         tracing::info!(
             "Recording stopped. Data saved to {} and {}",

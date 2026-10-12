@@ -130,6 +130,31 @@ impl Default for TpcanMsgFd {
     }
 }
 
+/// PCAN-Basic reception timestamp for classic CAN messages (`TPCANTimestamp`).
+///
+/// Total microseconds since device initialization (see `PCANBasic.h`):
+/// `micros + 1000 * millis + 0x1_0000_0000 * 1000 * millis_overflow`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct TpcanTimestamp {
+    /// Milliseconds base value (0..2^32-1).
+    millis: u32,
+    /// Roll-arounds of `millis`.
+    millis_overflow: u16,
+    /// Microseconds part (0..999).
+    micros: u16,
+}
+
+impl TpcanTimestamp {
+    /// Total microseconds since device initialization.
+    fn to_micros(&self) -> u64 {
+        let micros = self.micros as u64;
+        let millis = self.millis as u64;
+        let overflow = self.millis_overflow as u64;
+        micros + 1_000 * millis + 0x1_0000_0000 * 1_000 * overflow
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TpcanChannelInformation {
@@ -176,7 +201,7 @@ impl TpcanChannelInformation {
 type CanInitializeFn = unsafe extern "system" fn(u16, u16, u8, u32, u16) -> u32;
 type CanInitializeFdFn = unsafe extern "system" fn(u16, *const i8) -> u32;
 type CanUninitializeFn = unsafe extern "system" fn(u16) -> u32;
-type CanReadFn = unsafe extern "system" fn(u16, *mut TpcanMsg, *mut c_void) -> u32;
+type CanReadFn = unsafe extern "system" fn(u16, *mut TpcanMsg, *mut TpcanTimestamp) -> u32;
 type CanReadFdFn = unsafe extern "system" fn(u16, *mut TpcanMsgFd, *mut u64) -> u32;
 type CanWriteFn = unsafe extern "system" fn(u16, *const TpcanMsg) -> u32;
 type CanWriteFdFn = unsafe extern "system" fn(u16, *const TpcanMsgFd) -> u32;
@@ -304,14 +329,17 @@ impl PcanApi {
                     .read_fd
                     .ok_or_else(|| "CAN-FD not supported by this PCANBasic version".to_string())?;
                 let mut msg = TpcanMsgFd::default();
-                let status = read_fd(handle, &mut msg, std::ptr::null_mut());
+                let mut ts: u64 = 0;
+                let status = read_fd(handle, &mut msg, &mut ts);
                 if status == PCAN_ERROR_OK {
                     let extended = msg.msg_type & PCAN_MESSAGE_EXTENDED != 0;
+                    let timestamp_us = Some(ts);
                     if msg.msg_type & (PCAN_MESSAGE_STATUS | PCAN_MESSAGE_ERRFRAME) != 0 {
                         return Ok(Some(CanFrame {
                             id: msg.id,
                             extended,
                             data: Vec::new(),
+                            timestamp_us,
                         }));
                     }
                     let len = super::device::dlc_to_len(msg.dlc).min(msg.data.len());
@@ -319,6 +347,7 @@ impl PcanApi {
                         id: msg.id,
                         extended,
                         data: msg.data[..len].to_vec(),
+                        timestamp_us,
                     }))
                 } else if status == PCAN_ERROR_QRCVEMPTY {
                     Ok(None)
@@ -327,14 +356,17 @@ impl PcanApi {
                 }
             } else {
                 let mut msg = TpcanMsg::default();
-                let status = (self.read)(handle, &mut msg, std::ptr::null_mut());
+                let mut ts = TpcanTimestamp::default();
+                let status = (self.read)(handle, &mut msg, &mut ts);
                 if status == PCAN_ERROR_OK {
                     let extended = msg.msg_type & PCAN_MESSAGE_EXTENDED != 0;
+                    let timestamp_us = Some(ts.to_micros());
                     if msg.msg_type & (PCAN_MESSAGE_STATUS | PCAN_MESSAGE_ERRFRAME) != 0 {
                         return Ok(Some(CanFrame {
                             id: msg.id,
                             extended,
                             data: Vec::new(),
+                            timestamp_us,
                         }));
                     }
                     let len = (msg.len as usize).min(msg.data.len());
@@ -342,6 +374,7 @@ impl PcanApi {
                         id: msg.id,
                         extended,
                         data: msg.data[..len].to_vec(),
+                        timestamp_us,
                     }))
                 } else if status == PCAN_ERROR_QRCVEMPTY {
                     Ok(None)
@@ -1236,9 +1269,37 @@ mod tests {
     #[test]
     fn test_msg_struct_sizes_match_pcan() {
         // PCAN requires exact layouts: TPCANMsg = 16, TPCANMsgFD = 72,
-        // TPCANChannelInformation = 52 bytes.
+        // TPCANTimestamp = 8, TPCANChannelInformation = 52 bytes.
         assert_eq!(std::mem::size_of::<TpcanMsg>(), 16);
         assert_eq!(std::mem::size_of::<TpcanMsgFd>(), 72);
+        assert_eq!(std::mem::size_of::<TpcanTimestamp>(), 8);
         assert_eq!(std::mem::size_of::<TpcanChannelInformation>(), 52);
+    }
+
+    #[test]
+    fn test_tpcan_timestamp_to_micros() {
+        // Microseconds only.
+        let ts = TpcanTimestamp {
+            millis: 0,
+            millis_overflow: 0,
+            micros: 42,
+        };
+        assert_eq!(ts.to_micros(), 42);
+
+        // Milliseconds + microseconds.
+        let ts = TpcanTimestamp {
+            millis: 3,
+            millis_overflow: 0,
+            micros: 7,
+        };
+        assert_eq!(ts.to_micros(), 3_007);
+
+        // One roll-around of millis (2^32 ms) + 1 ms.
+        let ts = TpcanTimestamp {
+            millis: 1,
+            millis_overflow: 1,
+            micros: 0,
+        };
+        assert_eq!(ts.to_micros(), 0x1_0000_0000 * 1_000 + 1_000);
     }
 }

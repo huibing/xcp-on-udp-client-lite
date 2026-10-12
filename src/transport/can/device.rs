@@ -21,6 +21,10 @@ pub struct CanFrame {
     pub extended: bool,
     /// Data bytes (0..=8 for classic CAN, 0..=64 for CAN-FD).
     pub data: Vec<u8>,
+    /// Hardware reception timestamp in microseconds since the device clock
+    /// epoch, when the driver provides one (e.g. PCAN USB frames). `None` for
+    /// drivers/transports without hardware timestamping.
+    pub timestamp_us: Option<u64>,
 }
 
 impl CanFrame {
@@ -30,6 +34,7 @@ impl CanFrame {
             id,
             extended: id > 0x7FF,
             data: data.into(),
+            timestamp_us: None,
         }
     }
 }

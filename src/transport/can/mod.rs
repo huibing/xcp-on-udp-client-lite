@@ -147,8 +147,9 @@ pub struct CanTransport {
     device: Arc<Mutex<Box<dyn CanDevice>>>,
     /// Command/response timeout.
     timeout_ms: u64,
-    /// Frames received by the background reader thread.
-    rx: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    /// Frames received by the background reader thread, paired with the
+    /// optional hardware reception timestamp (microseconds) from the device.
+    rx: Arc<Mutex<VecDeque<(Vec<u8>, Option<u64>)>>>,
     /// Signal to stop the reader thread.
     reader_stop: Arc<AtomicBool>,
     /// Background reader thread handle.
@@ -296,6 +297,7 @@ impl CanTransport {
             id: self.can_id,
             extended: self.extended,
             data: payload.to_vec(),
+            timestamp_us: None,
         };
         self.device
             .lock()
@@ -307,13 +309,13 @@ impl CanTransport {
     async fn recv_payload(
         &self,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<Vec<u8>>, TransportError> {
+    ) -> Result<Option<(Vec<u8>, Option<u64>)>, TransportError> {
         let start = Instant::now();
         loop {
             {
                 let mut queue = self.rx.lock().unwrap();
-                if let Some(payload) = queue.pop_front() {
-                    return Ok(Some(payload));
+                if let Some(item) = queue.pop_front() {
+                    return Ok(Some(item));
                 }
             }
 
@@ -341,19 +343,33 @@ impl Transport for CanTransport {
     async fn send_command(&self, command: &[u8]) -> Result<Vec<u8>, TransportError> {
         self.send_frame(command)?;
         match self.recv_payload(Some(self.timeout_ms)).await? {
-            Some(payload) => Ok(payload),
+            Some((payload, _)) => Ok(payload),
             None => Err(TransportError::Timeout),
         }
     }
 
     async fn recv_packet(&self) -> Result<Vec<u8>, TransportError> {
         match self.recv_payload(None).await? {
-            Some(payload) => Ok(payload),
+            Some((payload, _)) => Ok(payload),
             None => Err(TransportError::ConnectionClosed),
         }
     }
 
     async fn try_recv_packet(&self, timeout_ms: u64) -> Result<Option<Vec<u8>>, TransportError> {
+        Ok(self.recv_payload(Some(timeout_ms)).await?.map(|(p, _)| p))
+    }
+
+    async fn recv_packet_ts(&self) -> Result<(Vec<u8>, Option<u64>), TransportError> {
+        match self.recv_payload(None).await? {
+            Some(item) => Ok(item),
+            None => Err(TransportError::ConnectionClosed),
+        }
+    }
+
+    async fn try_recv_packet_ts(
+        &self,
+        timeout_ms: u64,
+    ) -> Result<Option<(Vec<u8>, Option<u64>)>, TransportError> {
         self.recv_payload(Some(timeout_ms)).await
     }
 
@@ -512,7 +528,7 @@ impl FrameFilter {
 fn spawn_reader(
     device: Arc<Mutex<Box<dyn CanDevice>>>,
     filter: FrameFilter,
-    rx: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    rx: Arc<Mutex<VecDeque<(Vec<u8>, Option<u64>)>>>,
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
@@ -542,7 +558,7 @@ fn spawn_reader(
                                 );
                                 continue;
                             }
-                            rx.lock().unwrap().push_back(frame.data);
+                            rx.lock().unwrap().push_back((frame.data, frame.timestamp_us));
                         }
                         Ok(None) => break,
                         Err(error) => {
