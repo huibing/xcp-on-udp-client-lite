@@ -288,6 +288,61 @@ Can {
 
 ---
 
+## 11. 打开 DAQ 时报 `SERV packet not implemented: 0xFC`，是 slave 还是上位机的问题？
+
+**原始问题**
+
+> 用 PCAN 连 slave、打开 DAQ 时，`GET_DAQ_PROCESSOR_INFO` 的响应被解析成 `FC F9 29 7E 51 CA 97 2A`，报 `parse error: SERV packet not implemented: 0xFC`。是 slave 的原因还是上位机 tauri app 的问题？
+
+**最终答案**
+
+是上位机（`CanTransport`）的问题，不是 slave。那条 `FC F9 29 7E 51 CA 97 2A` 根本不是 slave 的响应，是总线上 `0x123` 的周期随机报文被当成响应消费了。
+
+- 合法的 `GET_DAQ_PROCESSOR_INFO` 响应 byte0 必须是 `0xFF`(RES)，而 `0xFC` 在 XCP 里是 SERV（slave→master 的**异步**服务请求），绝不会作为命令响应出现。
+- `0x123` 的周期帧就是 8 字节随机数据、首字节每次不同，与该“响应”特征完全吻合。
+
+根因（代码）：
+
+1. `FrameFilter::from_config` 只按 CAN ID 过滤，且只有 `slave_id` 有值 **且** `daq_ids` 非空时才严格白名单；否则退化为“除 master 外全收”。A2L 未声明 FIXED `DAQ_LIST_CAN_ID` 时 `daq_ids` 为空 → 过滤器全收。
+2. `send_command_and_wait` 走的是 `send_command_only` + MessageRouter 的 CTO 通道；`transport.recv_packet()` 是纯 FIFO `pop_front`，不校验 PID 也不校验 CAN ID。
+3. reader 入队时只存 `frame.data`、丢弃 `frame.id`，消费端连“响应是否来自 slave_id”都无法核对。
+
+→ ~318 帧/秒的周期流量灌进队列，首字节恰好 ≥0xFC 的帧被 MessageRouter 当成 CTO 路由给命令等待方。
+
+改动：
+
+1. `src/transport/can/mod.rs`：`FrameFilter` 升级为 **CAN ID + PID 双维度**。
+   - CTO 类（PID ≥ 0xFC：RES/ERR/EV/SERV）仅当 `can_id == CAN_ID_SLAVE` 时才放行——随机流量首字节碰巧 ≥0xFC 也会被丢弃，不再被误当成命令响应。
+   - DAQ 类（PID < 0xFC）保持原宽松策略：`daq_ids` 已知时严格白名单（含 `slave_id`），未知时全收（兼容 VARIABLE/INCREMENTAL DAQ，不丢数据）。
+   - master 自身 ID 始终拒绝（echo 抑制）。
+2. reader 取 `pid = frame.data[0]` 传给过滤器，丢弃帧的 trace 日志带上 pid。
+3. 连接时若未声明 `CAN_ID_SLAVE`，打 `warn` 提示 CTO 无法按 ID 过滤。
+4. 新增 4 个测试，含回归测试 `test_frame_filter_rejects_unrelated_cto_traffic_regression`（复现本次 bug：`0x123` 上 0xFC/0xFF/0xFE 帧必须被拒，`slave_id` 上的 RES 必须放行）。
+
+关键特性：只要 A2L 声明了 `CAN_ID_SLAVE`，CTO 路径就干净了，不再需要手动关掉总线上其他周期报文；且不破坏 VARIABLE DAQ。
+
+---
+
+## 12. tauri app 一直报 `Asset favicon.ico not found; fallback to ...`
+
+**原始问题**
+
+> 日志一直刷 `Asset \`favicon.ico\` not found; fallback to favicon.ico.html` / `favicon.ico/index.html` / `index.html` 的 DEBUG，应该是 ico 路径不对。
+
+**最终答案**
+
+`favicon.ico` 原本放在 `ui/` 根目录，但 Vite 只把 `ui/public/` 目录的内容拷进 `dist/`，所以它从没进过 `ui/dist/`。Tauri 2 在编译时用 `generate_context!()` 把 `../ui/dist` 嵌入二进制；浏览器请求 `/favicon.ico` 时，Tauri 的 asset 解析器在嵌入资源里找不到，就按 `favicon.ico → favicon.ico.html → favicon.ico/index.html → index.html` 逐级 fallback，每一级 miss 都打一条 DEBUG。
+
+改动：
+
+1. `ui/favicon.ico` → `ui/public/favicon.ico`（Vite 构建时自动拷到 `dist/` 根）。
+2. 补一份到 `ui/dist/favicon.ico`，让当前构建产物立刻有。
+3. `ui/index.html` 与 `ui/dist/index.html` 的 `<head>` 加 `<link rel="icon" type="image/x-icon" href="/favicon.ico" />`。
+
+重新编译 tauri 二进制（`cargo run` / `tauri build`）后 `generate_context!()` 会把带 favicon 的 `dist/` 重新嵌入，fallback 日志消失；`tauri dev`（走 Vite）则由 `public/favicon.ico` 直接服务。
+
+---
+
 ## 相关提交
 
 | 提交 | 内容 |

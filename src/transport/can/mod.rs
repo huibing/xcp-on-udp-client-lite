@@ -13,12 +13,17 @@
 //! is accessed through the [`CanDevice`] trait; see the [`device`] module for the
 //! abstraction and [`pcan`] for the PEAK-System PCAN-Basic driver.
 //!
-//! Incoming frames are filtered by CAN ID: the master's own ID is always
-//! rejected, and when both `CAN_ID_SLAVE` and fixed DAQ DTO IDs are declared,
-//! only those IDs are accepted. DAQ DTO IDs come from `DAQ_LIST_CAN_ID` and/or
-//! `EVENT_CAN_ID_LIST` — the latter is how a slave declares that DAQ data uses a
-//! different CAN ID than the command responses. This keeps unrelated traffic on
-//! a shared bus from polluting the XCP stream.
+//! Incoming frames are filtered by CAN ID **and** PID so that unrelated
+//! traffic on a shared bus cannot pollute the XCP stream:
+//! - The master's own transmit ID is always rejected (echo suppression).
+//! - CTO-class frames (PID >= 0xFC: RES/ERR/EV/SERV) are accepted only from
+//!   `CAN_ID_SLAVE` when it is declared. This prevents random bus frames
+//!   whose first byte happens to be >= 0xFC from being mistaken for a command
+//!   response (the GET_DAQ_PROCESSOR_INFO `0xFC` parse failure).
+//! - DAQ-class frames (PID < 0xFC) are accepted from `CAN_ID_SLAVE` and the
+//!   fixed DAQ DTO IDs (`DAQ_LIST_CAN_ID` / `EVENT_CAN_ID_LIST`). When no fixed
+//!   DAQ IDs are declared (VARIABLE/INCREMENTAL), all non-master IDs are
+//!   accepted so DAQ data is never dropped.
 
 mod device;
 mod pcan;
@@ -195,6 +200,12 @@ impl CanTransport {
             config.can_id,
             filter.describe()
         );
+        if config.slave_id.is_none() {
+            tracing::warn!(
+                "CAN_ID_SLAVE is not declared; CTO responses cannot be filtered \
+                 by CAN ID and may be polluted by unrelated bus traffic"
+            );
+        }
         let reader = spawn_reader(device.clone(), filter, rx.clone(), reader_stop.clone());
 
         let can_id = config.can_id;
@@ -412,53 +423,88 @@ fn map_device_error(error: CanDeviceError) -> TransportError {
 
 /// Frame acceptance rule for the reader thread.
 ///
-/// The master's own transmit ID is always rejected (echo suppression). When a
-/// concrete allow-list of response/DAQ IDs is known, only those IDs are
-/// accepted; otherwise every other ID is accepted (to avoid dropping DAQ data
-/// when the A2L does not declare fixed DAQ/event CAN IDs).
+/// Filtering is joint on CAN ID **and** PID so that command responses (CTO)
+/// are never polluted by unrelated bus traffic, while DAQ (DTO) stays lenient
+/// enough to support VARIABLE/INCREMENTAL DAQ IDs:
+/// - The master's own transmit ID is always rejected (echo suppression).
+/// - CTO-class frames (PID >= 0xFC: RES/ERR/EV/SERV) are accepted only from
+///   `slave_id` when it is known. A random frame whose first byte happens to
+///   be >= 0xFC on any other ID is dropped instead of being mistaken for a
+///   command response.
+/// - DAQ-class frames (PID < 0xFC) are accepted from `slave_id` and the fixed
+///   DAQ DTO IDs; when no fixed DAQ IDs are declared, every non-master ID is
+///   accepted (VARIABLE DAQ fallback).
 struct FrameFilter {
     master_id: u32,
-    allowed: Option<HashSet<u32>>,
+    slave_id: Option<u32>,
+    /// DAQ DTO allow-list: `slave_id` ∪ fixed DAQ IDs when fixed DAQ IDs are
+    /// declared; `None` when DAQ IDs are unknown (accept all non-master).
+    daq_allowed: Option<HashSet<u32>>,
 }
 
 impl FrameFilter {
     fn from_config(config: &CanTransportConfig) -> Self {
-        // Only enforce a strict allow-list when both the response and DAQ IDs
-        // are known, so we never accidentally drop DAQ frames.
-        let allowed = match (config.slave_id, config.daq_ids.is_empty()) {
-            (Some(slave_id), false) => {
-                let mut set: HashSet<u32> = config.daq_ids.iter().copied().collect();
+        // DAQ DTO frames come from the fixed DAQ IDs and/or the slave response
+        // ID (DAQ may share it when no separate DAQ ID is declared). When the
+        // A2L does not declare fixed DAQ IDs (VARIABLE/INCREMENTAL), keep the
+        // DAQ path lenient so dynamically-assigned DAQ traffic is not dropped.
+        let daq_allowed = if config.daq_ids.is_empty() {
+            None
+        } else {
+            let mut set: HashSet<u32> = config.daq_ids.iter().copied().collect();
+            if let Some(slave_id) = config.slave_id {
                 set.insert(slave_id);
-                Some(set)
             }
-            _ => None,
+            Some(set)
         };
 
         Self {
             master_id: config.can_id,
-            allowed,
+            slave_id: config.slave_id,
+            daq_allowed,
         }
     }
 
-    fn accepts(&self, can_id: u32) -> bool {
+    /// Decide whether a received frame should enter the XCP stream.
+    ///
+    /// `pid` is the first data byte (XCP packet ID). CTO-class frames
+    /// (PID >= 0xFC) are only accepted from the declared slave response ID, so
+    /// unrelated bus traffic can never be mistaken for a command response.
+    /// DAQ-class frames (PID < 0xFC) follow the DAQ allow-list (lenient when
+    /// DAQ IDs are unknown).
+    fn accepts(&self, can_id: u32, pid: u8) -> bool {
         if can_id == self.master_id {
-            return false;
+            return false; // echo suppression
         }
-        match &self.allowed {
-            Some(set) => set.contains(&can_id),
-            None => true,
+        if pid >= 0xFC {
+            // CTO (RES/ERR/EV/SERV): only from the slave response ID.
+            match self.slave_id {
+                Some(slave_id) => can_id == slave_id,
+                None => true, // slave ID unknown -> cannot filter (lenient)
+            }
+        } else {
+            // DAQ DTO.
+            match &self.daq_allowed {
+                Some(set) => set.contains(&can_id),
+                None => true, // DAQ IDs unknown -> accept (VARIABLE DAQ)
+            }
         }
     }
 
     fn describe(&self) -> String {
-        match &self.allowed {
+        let cto = match self.slave_id {
+            Some(id) => format!("CTO only from 0x{:X}", id),
+            None => "CTO accept-all (CAN_ID_SLAVE unknown)".to_string(),
+        };
+        let dto = match &self.daq_allowed {
             Some(set) => {
                 let mut ids: Vec<String> = set.iter().map(|id| format!("0x{:X}", id)).collect();
                 ids.sort();
-                format!("strict allow-list [{}]", ids.join(", "))
+                format!("DAQ strict [{}]", ids.join(", "))
             }
-            None => "accept all except master (DAQ IDs unknown)".to_string(),
-        }
+            None => "DAQ accept-all (fixed DAQ IDs unknown)".to_string(),
+        };
+        format!("{}; {}", cto, dto)
     }
 }
 
@@ -488,10 +534,11 @@ fn spawn_reader(
                                 // Error/status frame: ignore.
                                 continue;
                             }
-                            if !filter.accepts(frame.id) {
+                            let pid = frame.data[0];
+                            if !filter.accepts(frame.id, pid) {
                                 tracing::trace!(
-                                    "Ignoring CAN frame id=0x{:X} (filtered out)",
-                                    frame.id
+                                    "Ignoring CAN frame id=0x{:X} pid=0x{:02X} (filtered out)",
+                                    frame.id, pid
                                 );
                                 continue;
                             }
@@ -552,11 +599,20 @@ mod tests {
             ..Default::default()
         };
         let filter = FrameFilter::from_config(&cfg);
-        assert!(filter.accepts(0x456));
-        assert!(filter.accepts(0x310));
-        assert!(filter.accepts(0x320));
-        assert!(!filter.accepts(0x123)); // master / echo
-        assert!(!filter.accepts(0x999)); // unrelated bus traffic
+
+        // CTO (RES/ERR/EV/SERV, pid >= 0xFC) only from slave_id.
+        assert!(filter.accepts(0x456, 0xFF)); // RES from slave
+        assert!(filter.accepts(0x456, 0xFE)); // ERR from slave
+        assert!(!filter.accepts(0x310, 0xFF)); // CTO not from DAQ IDs
+        assert!(!filter.accepts(0x999, 0xFC)); // unrelated CTO traffic (the bug)
+        assert!(!filter.accepts(0x123, 0xFF)); // master echo
+
+        // DAQ (pid < 0xFC) from slave_id and declared DAQ IDs.
+        assert!(filter.accepts(0x456, 0x00)); // DAQ on slave id
+        assert!(filter.accepts(0x310, 0x10)); // DAQ on declared id
+        assert!(filter.accepts(0x320, 0x10));
+        assert!(!filter.accepts(0x999, 0x10)); // unrelated DAQ traffic
+        assert!(!filter.accepts(0x123, 0x10)); // master echo
     }
 
     #[test]
@@ -569,9 +625,58 @@ mod tests {
             ..Default::default()
         };
         let filter = FrameFilter::from_config(&cfg);
-        assert!(filter.accepts(0x456));
-        assert!(filter.accepts(0x999)); // DAQ IDs unknown -> accept other IDs
-        assert!(!filter.accepts(0x123)); // master still rejected
+
+        // CTO still strictly from slave_id even when DAQ IDs are unknown:
+        // this is the core fix for command-response pollution.
+        assert!(filter.accepts(0x456, 0xFF));
+        assert!(!filter.accepts(0x999, 0xFC)); // unrelated CTO traffic rejected
+        assert!(!filter.accepts(0x123, 0xFF)); // master echo
+
+        // DAQ lenient (VARIABLE DAQ) when DAQ IDs unknown.
+        assert!(filter.accepts(0x456, 0x00));
+        assert!(filter.accepts(0x999, 0x10)); // unknown DAQ id accepted
+        assert!(!filter.accepts(0x123, 0x10)); // master echo
+    }
+
+    #[test]
+    fn test_frame_filter_slave_id_unknown() {
+        // Without CAN_ID_SLAVE we cannot filter CTO by ID (lenient, warned at
+        // connect time). DAQ is also lenient. Master echo is still rejected.
+        let cfg = CanTransportConfig {
+            channel: "auto".to_string(),
+            can_id: 0x123,
+            slave_id: None,
+            daq_ids: Vec::new(),
+            ..Default::default()
+        };
+        let filter = FrameFilter::from_config(&cfg);
+        assert!(filter.accepts(0x999, 0xFF));
+        assert!(filter.accepts(0x456, 0xFC));
+        assert!(!filter.accepts(0x123, 0xFF)); // master echo
+        assert!(filter.accepts(0x999, 0x10)); // DAQ lenient
+    }
+
+    #[test]
+    fn test_frame_filter_rejects_unrelated_cto_traffic_regression() {
+        // Reproduces the GET_DAQ_PROCESSOR_INFO failure: a periodic frame on an
+        // unrelated CAN ID whose first byte is 0xFC (SERV) was consumed as the
+        // command response. With slave_id declared, such frames must be dropped
+        // regardless of the DAQ ID configuration.
+        let cfg = CanTransportConfig {
+            channel: "auto".to_string(),
+            can_id: 0x7FF, // master
+            slave_id: Some(0x800), // slave response ID
+            daq_ids: Vec::new(), // no fixed DAQ IDs
+            ..Default::default()
+        };
+        let filter = FrameFilter::from_config(&cfg);
+        // Random 0x123 traffic with a high first byte must NOT enter the stream.
+        assert!(!filter.accepts(0x123, 0xFC));
+        assert!(!filter.accepts(0x123, 0xFF));
+        assert!(!filter.accepts(0x123, 0xFE));
+        // The real slave response on slave_id is accepted.
+        assert!(filter.accepts(0x800, 0xFF));
+        assert!(filter.accepts(0x800, 0xFE));
     }
 
     #[test]
