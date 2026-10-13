@@ -205,7 +205,7 @@ CAN environment variables:
 - `PCAN_BITRATE` — fallback bit rate used only when the config declares none
 - `PCAN_FD_CLOCK` — CAN-FD controller clock in Hz used to derive timing (default 80 MHz)
 
-See [`PCAN_CAN_QA.md`](PCAN_CAN_QA.md) for the CAN/PCAN design Q&A and
+See [`docs/PCAN_CAN_QA.md`](docs/PCAN_CAN_QA.md) for the CAN/PCAN design Q&A and
 [`src/transport/can/device.rs`](src/transport/can/device.rs) for how to add a new
 CAN device driver.
 
@@ -925,7 +925,7 @@ Contributions are welcome! Please feel free to submit pull requests.
 - ✅ **A2L-driven CAN config**: bitrate, CAN-FD data bitrate, `CAN_ID_SLAVE`, `DAQ_LIST_CAN_ID`, `EVENT_CAN_ID_LIST`, `MAX_DLC_REQUIRED`
 - ✅ **Device-level selection**: enumerate attached channels, choose by stable `device_id`/controller (resolved via `CAN_LookUpChannel`)
 - ✅ **Tauri/Vue**: `list_can_devices` command and a CAN device/channel dropdown on the Devices page
-- 📄 Design Q&A in [`PCAN_CAN_QA.md`](PCAN_CAN_QA.md)
+- 📄 Design Q&A in [`docs/PCAN_CAN_QA.md`](docs/PCAN_CAN_QA.md)
 
 ### v0.4.0 - CLI Subcommands & Checksum Verification
 
