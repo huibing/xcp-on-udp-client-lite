@@ -34,6 +34,11 @@ daq_data.csv
 *.a2l
 *.aml
 
+# Except test fixtures required by cargo test
+!abc.a2l
+!hello_xcp.a2l
+!xcp_dft.a2l
+
 # Web test artifacts
 web_test/logs/
 web_test/node_modules/

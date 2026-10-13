@@ -169,6 +169,10 @@ fn current_timestamp() -> u64 {
 mod tests {
     use super::*;
 
+    /// Session tests share the global SESSION state, so they must run
+    /// serially to avoid interfering with each other.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_verify_credentials() {
         assert!(verify_credentials("admin", "admin"));
@@ -178,6 +182,7 @@ mod tests {
 
     #[test]
     fn test_single_user_restriction_first_user_can_login() {
+        let _guard = TEST_LOCK.lock().unwrap();
         // Given: No active session
         clear_session();
         assert!(!has_active_session());
@@ -197,6 +202,7 @@ mod tests {
 
     #[test]
     fn test_single_user_restriction_second_user_blocked() {
+        let _guard = TEST_LOCK.lock().unwrap();
         // Given: First user is logged in (use unique IP to avoid conflict with other tests)
         clear_session();
         let _first_token = try_create_session("192.168.2.10").unwrap();
@@ -222,6 +228,7 @@ mod tests {
 
     #[test]
     fn test_single_user_restriction_after_logout_new_user_can_login() {
+        let _guard = TEST_LOCK.lock().unwrap();
         // Given: First user is logged in (use unique IPs to avoid parallel test conflicts)
         clear_session();
         let first_token = try_create_session("10.1.1.10").unwrap();
@@ -246,6 +253,7 @@ mod tests {
 
     #[test]
     fn test_session_info_tracks_ip_address() {
+        let _guard = TEST_LOCK.lock().unwrap();
         // Given: User logs in from specific IP (use unique IP to avoid conflict)
         clear_session();
         let unique_ip = "10.0.1.50";
