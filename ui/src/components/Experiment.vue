@@ -2349,6 +2349,25 @@ function computeDaqLayoutFromTabs(deviceMeta) {
 
     const vars = Object.values(usedPerCfgDev[cfgId] || {})
 
+    // If the slave has already configured DAQ (after start), use the real
+    // layout returned by the backend — actual ODT structure + real firstPID
+    // per list. PIDs are NOT contiguous across DAQ lists (e.g. list 0 →
+    // PID 0..2, list 1 → PID 0x60..0x62), so the contiguous estimate below
+    // would be wrong once DAQ is running.
+    if (Array.isArray(meta.configured_layout) && meta.configured_layout.length > 0) {
+      result.push({
+        device_id: meta.device_id || cfgId, config_device_id: cfgId,
+        device_name: meta.device_name || cfgId, connected: meta.connected || false,
+        identification_type: meta.identification_type || 'AbsoluteODT',
+        pid_bytes: meta.pid_bytes || 1, has_timestamp: meta.has_timestamp || false,
+        timestamp_bytes: meta.timestamp_bytes || 0, timestamp_unit: meta.timestamp_unit || 'unknown',
+        selected_count: vars.length, total_measurements: meta.total_measurements || 0,
+        daq_list_count: meta.configured_layout.length, daq_lists: meta.configured_layout,
+        layout_source: 'configured',
+      })
+      return
+    }
+
     // Group by event channel (1 DAQ list per event)
     const eventGroups = {}
     vars.forEach(v => {
@@ -2434,6 +2453,7 @@ function computeDaqLayoutFromTabs(deviceMeta) {
       timestamp_bytes: meta.timestamp_bytes || 0, timestamp_unit: meta.timestamp_unit || 'unknown',
       selected_count: vars.length, total_measurements: meta.total_measurements || 0,
       daq_list_count: daqLists.length, daq_lists: daqLists,
+      layout_source: 'estimated',
     })
   })
   return result
@@ -2447,6 +2467,9 @@ function renderDaqDevice(dev) {
   const connBadge = dev.connected
     ? '<span style="color:#00ff88;font-size:0.72rem;">● connected</span>'
     : '<span style="color:#666;font-size:0.72rem;">○ not connected</span>'
+  const srcBadge = dev.layout_source === 'configured'
+    ? '<span style="color:#00ff88;font-size:0.72rem;">▣ live layout</span>'
+    : '<span style="color:#888;font-size:0.72rem;">▢ estimated</span>'
   const selLabel = `${dev.selected_count || 0} selected`
 
   let listsHtml = ''
@@ -2464,6 +2487,7 @@ function renderDaqDevice(dev) {
       <span style="color:#666;">▾</span>
       <span class="daq-layout-device-title">${escHtml(dev.device_name)}</span>
       ${connBadge}
+      ${srcBadge}
       <span class="daq-layout-device-meta">${escHtml(selLabel)}</span>
     </div>
     <div class="daq-layout-device-body">

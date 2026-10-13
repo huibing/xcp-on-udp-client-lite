@@ -2029,8 +2029,13 @@ impl XcpSlave {
         }
     }
 
-    /// Start/stop DAQ list on slave
-    pub async fn start_stop_daq_list(&self, mode: u8, daq_list: u16) -> Result<(), SlaveError> {
+    /// Start/stop DAQ list on slave.
+    ///
+    /// Returns `firstPID` — the absolute PID (identification field value) of the
+    /// first ODT of this DAQ list, taken from the positive response
+    /// (`0xFF [firstPID]`). This is required for DTO routing in AbsoluteODT mode,
+    /// where PIDs are NOT necessarily contiguous across DAQ lists.
+    pub async fn start_stop_daq_list(&self, mode: u8, daq_list: u16) -> Result<u8, SlaveError> {
         let response = self
             .send_command_and_wait(&commands::start_stop_daq_list(mode, daq_list))
             .await?;
@@ -2038,7 +2043,11 @@ impl XcpSlave {
         let parsed = parse_response(&response).map_err(|e| SlaveError::ParseError(e))?;
 
         match parsed {
-            Response::Res(_) => Ok(()),
+            Response::Res(res_data) => {
+                // Response layout: [0xFF, firstPID]
+                let first_pid = res_data.first().copied().unwrap_or(0);
+                Ok(first_pid)
+            }
             Response::Err(err) => Err(SlaveError::Protocol(err)),
             _ => Err(SlaveError::InvalidResponse(
                 "Unexpected response type".to_string(),

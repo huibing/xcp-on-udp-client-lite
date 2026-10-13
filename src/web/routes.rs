@@ -5794,64 +5794,129 @@ pub async fn experiment_daq_layout(State(state): State<AppState>) -> impl IntoRe
             event_groups.entry(ch).or_default().push(meas_idx);
         }
 
-        // Build DAQ list entries — one per unique event channel
-        // Compute absolute PID counter (for AbsoluteODT identification type)
-        let mut abs_pid: u16 = 0;
+        // Build DAQ list entries. When DAQ has been configured (after
+        // start), use the real ODT structure + firstPID from the slave —
+        // PIDs are NOT contiguous across DAQ lists. Otherwise fall back to
+        // the contiguous-PID estimate (one ODT per event, no payload split).
+        let real_cfg_arc = daq_mgr.get_config();
+        let real_cfg = real_cfg_arc.read().await;
         let mut daq_lists: Vec<serde_json::Value> = Vec::new();
-        for (daq_list_idx, (event_ch, meas_indices)) in event_groups.iter().enumerate() {
-            let event = event_lookup.get(event_ch);
-            let event_name = event.map(|e| e.name.as_str()).unwrap_or("unknown");
-            let event_short_name = event.map(|e| e.short_name.as_str()).unwrap_or("");
-            let event_cycle_ms = event.map(|e| e.cycle_time_ms()).unwrap_or(0.0);
+        let layout_source: &str;
+        if real_cfg.daq_list_count > 0 && !real_cfg.first_pid_per_list.is_empty() {
+            layout_source = "configured";
+            for list_idx in 0..real_cfg.daq_list_count as usize {
+                let first_pid = real_cfg.first_pid_per_list.get(list_idx).copied().unwrap_or(0);
+                let odt_count = real_cfg.odt_count_per_list.get(list_idx).copied().unwrap_or(0);
+                let event_ch = real_cfg.event_channel_per_list.get(list_idx).copied().unwrap_or(0);
+                let event = event_lookup.get(&event_ch);
+                let event_name = event.map(|e| e.name.as_str()).unwrap_or("unknown");
+                let event_short_name = event.map(|e| e.short_name.as_str()).unwrap_or("");
+                let event_cycle_ms = event.map(|e| e.cycle_time_ms()).unwrap_or(0.0);
+                let mut odts: Vec<serde_json::Value> = Vec::new();
+                for odt_idx in 0..odt_count {
+                    let odt_entries: Vec<&crate::daq::OdtEntryConfig> = real_cfg
+                        .odt_entries
+                        .iter()
+                        .filter(|e| e.daq_list == list_idx as u16 && e.odt == odt_idx)
+                        .collect();
+                    let data_bytes: usize = odt_entries.iter().map(|e| e.size).sum();
+                    let entries: Vec<serde_json::Value> = odt_entries
+                        .iter()
+                        .map(|e| {
+                            json!({
+                                "name": e.name.clone(),
+                                "bytes": e.size,
+                                "data_type": format!("{:?}", e.data_type),
+                                "unit": e.unit.clone().unwrap_or_default(),
+                                "byte_offset": e.byte_offset,
+                            })
+                        })
+                        .collect();
+                    let has_ts = odt_idx == 0 && ts_size > 0;
+                    let total = pid_bytes as usize
+                        + if has_ts { ts_size as usize } else { 0 }
+                        + data_bytes;
+                    odts.push(json!({
+                        "odt_idx": odt_idx,
+                        "absolute_pid": first_pid + odt_idx,
+                        "pid_bytes": pid_bytes,
+                        "has_timestamp": has_ts,
+                        "timestamp_bytes": if has_ts { ts_size } else { 0 },
+                        "data_bytes": data_bytes,
+                        "total_bytes": total,
+                        "entries": entries,
+                    }));
+                }
+                daq_lists.push(json!({
+                    "daq_list_idx": list_idx,
+                    "event_channel": event_ch,
+                    "event_name": event_name,
+                    "event_short_name": event_short_name,
+                    "event_cycle_ms": event_cycle_ms,
+                    "odt_count": odt_count,
+                    "first_pid": first_pid,
+                    "odts": odts,
+                }));
+            }
+        } else {
+            layout_source = "estimated";
+            // Estimate: one ODT per event, contiguous PIDs (no slave connection)
+            let mut abs_pid: u16 = 0;
+            for (daq_list_idx, (event_ch, meas_indices)) in event_groups.iter().enumerate() {
+                let event = event_lookup.get(event_ch);
+                let event_name = event.map(|e| e.name.as_str()).unwrap_or("unknown");
+                let event_short_name = event.map(|e| e.short_name.as_str()).unwrap_or("");
+                let event_cycle_ms = event.map(|e| e.cycle_time_ms()).unwrap_or(0.0);
 
-            // All selected measurements for this event → one ODT for preview
-            // (no payload splitting; we don't know slave max_dto without a connection)
-            let entries: Vec<serde_json::Value> = meas_indices
-                .iter()
-                .filter_map(|&idx| all_measurements.get(idx))
-                .map(|m| {
-                    json!({
-                        "name": m.name,
-                        "bytes": m.size,
-                        "data_type": format!("{:?}", m.data_type),
-                        "unit": m.unit.as_deref().unwrap_or(""),
-                        "address_hex": format!("0x{:08X}", m.address),
+                // All selected measurements for this event → one ODT for preview
+                // (no payload splitting; we don't know slave max_dto without a connection)
+                let entries: Vec<serde_json::Value> = meas_indices
+                    .iter()
+                    .filter_map(|&idx| all_measurements.get(idx))
+                    .map(|m| {
+                        json!({
+                            "name": m.name,
+                            "bytes": m.size,
+                            "data_type": format!("{:?}", m.data_type),
+                            "unit": m.unit.as_deref().unwrap_or(""),
+                            "address_hex": format!("0x{:08X}", m.address),
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            let data_bytes: usize = entries
-                .iter()
-                .map(|e| e["bytes"].as_u64().unwrap_or(0) as usize)
-                .sum();
+                let data_bytes: usize = entries
+                    .iter()
+                    .map(|e| e["bytes"].as_u64().unwrap_or(0) as usize)
+                    .sum();
 
-            // Compute absolute PID for this ODT (AbsoluteODT mode assigns PIDs globally)
-            let odt_pid = abs_pid;
-            abs_pid += 1;
+                // Compute absolute PID for this ODT (contiguous estimate)
+                let odt_pid = abs_pid;
+                abs_pid += 1;
 
-            let odt_total_bytes =
-                pid_bytes as usize + if ts_size > 0 { ts_size as usize } else { 0 } + data_bytes;
+                let odt_total_bytes =
+                    pid_bytes as usize + if ts_size > 0 { ts_size as usize } else { 0 } + data_bytes;
 
-            let odt = json!({
-                "odt_idx": 0,
-                "absolute_pid": odt_pid,
-                "pid_bytes": pid_bytes,
-                "has_timestamp": ts_size > 0,
-                "timestamp_bytes": ts_size,
-                "data_bytes": data_bytes,
-                "total_bytes": odt_total_bytes,
-                "entries": entries,
-            });
+                let odt = json!({
+                    "odt_idx": 0,
+                    "absolute_pid": odt_pid,
+                    "pid_bytes": pid_bytes,
+                    "has_timestamp": ts_size > 0,
+                    "timestamp_bytes": ts_size,
+                    "data_bytes": data_bytes,
+                    "total_bytes": odt_total_bytes,
+                    "entries": entries,
+                });
 
-            daq_lists.push(json!({
-                "daq_list_idx": daq_list_idx,
-                "event_channel": event_ch,
-                "event_name": event_name,
-                "event_short_name": event_short_name,
-                "event_cycle_ms": event_cycle_ms,
-                "odt_count": 1,
-                "odts": [odt],
-            }));
+                daq_lists.push(json!({
+                    "daq_list_idx": daq_list_idx,
+                    "event_channel": event_ch,
+                    "event_name": event_name,
+                    "event_short_name": event_short_name,
+                    "event_cycle_ms": event_cycle_ms,
+                    "odt_count": 1,
+                    "odts": [odt],
+                }));
+            }
         }
 
         result.push(json!({
@@ -5868,6 +5933,7 @@ pub async fn experiment_daq_layout(State(state): State<AppState>) -> impl IntoRe
             "total_measurements": all_measurements.len(),
             "daq_list_count": daq_lists.len(),
             "daq_lists": daq_lists,
+            "layout_source": layout_source,
         }));
     }
 

@@ -246,6 +246,11 @@ pub struct DaqConfiguration {
     pub daq_list_count: u16,
     /// Number of ODTs per DAQ list
     pub odt_count_per_list: Vec<u8>,
+    /// First absolute PID (firstPID) of each DAQ list, returned by the
+    /// START_STOP_DAQ_LIST (0xDE) response. Used to route DTO packets in
+    /// AbsoluteODT mode, where PIDs are NOT necessarily contiguous across
+    /// DAQ lists (e.g. list 0 → PID 0..2, list 1 → PID 0x60..0x62).
+    pub first_pid_per_list: Vec<u8>,
     /// Event channel assigned to each DAQ list (index = daq_list)
     pub event_channel_per_list: Vec<u16>,
 }
@@ -262,6 +267,7 @@ impl DaqConfiguration {
             odt_entry_granularity: 1,
             daq_list_count: 0,
             odt_count_per_list: Vec::new(),
+            first_pid_per_list: Vec::new(),
             event_channel_per_list: Vec::new(),
         }
     }
@@ -284,27 +290,45 @@ impl DaqConfiguration {
         self.odt_entries.iter().map(|e| e.size).sum()
     }
 
-    /// Resolve an absolute ODT number to (daq_list, relative_odt).
+    /// Resolve an absolute ODT number (PID) to (daq_list, relative_odt).
     ///
-    /// In AbsoluteODT identification mode the PID carries a global ODT index
-    /// that spans all DAQ lists sequentially.  For example, if DAQ list 0 has
-    /// 2 ODTs and DAQ list 1 has 1 ODT, then absolute ODT 0→(0,0), 1→(0,1),
-    /// 2→(1,0).
+    /// In AbsoluteODT identification mode the PID carries an absolute ODT
+    /// number. PIDs are NOT necessarily contiguous across DAQ lists — each
+    /// DAQ list's first PID (`firstPID`) is returned by the START_STOP_DAQ_LIST
+    /// (0xDE) response. For example, if DAQ list 0 has firstPID=0 with 2 ODTs
+    /// and DAQ list 1 has firstPID=0x60 with 3 ODTs, then PID 0→(0,0),
+    /// 1→(0,1), 0x60→(1,0), 0x61→(1,1).
+    ///
+    /// When `first_pid_per_list` is populated (after START_STOP_DAQ_LIST),
+    /// range-based lookup is used. Otherwise it falls back to the legacy
+    /// contiguous assumption (PIDs packed sequentially across lists).
     pub fn resolve_absolute_odt(&self, abs_odt: u8) -> Option<(u16, u8)> {
-        let mut remaining = abs_odt as u16;
-        for (list_idx, &odt_count) in self.odt_count_per_list.iter().enumerate() {
-            if remaining < odt_count as u16 {
-                return Some((list_idx as u16, remaining as u8));
+        if !self.first_pid_per_list.is_empty() {
+            for (list_idx, &first_pid) in self.first_pid_per_list.iter().enumerate() {
+                let odt_count = self.odt_count_per_list.get(list_idx).copied().unwrap_or(0) as u8;
+                if abs_odt >= first_pid && abs_odt < first_pid.saturating_add(odt_count) {
+                    return Some((list_idx as u16, abs_odt - first_pid));
+                }
             }
-            remaining -= odt_count as u16;
+            None
+        } else {
+            // Fallback: legacy contiguous assumption (PIDs packed sequentially).
+            let mut remaining = abs_odt as u16;
+            for (list_idx, &odt_count) in self.odt_count_per_list.iter().enumerate() {
+                if remaining < odt_count as u16 {
+                    return Some((list_idx as u16, remaining as u8));
+                }
+                remaining -= odt_count as u16;
+            }
+            None
         }
-        None
     }
 
     /// Clear all entries
     pub fn clear(&mut self) {
         self.odt_entries.clear();
         self.odt_count_per_list.clear();
+        self.first_pid_per_list.clear();
         self.event_channel_per_list.clear();
     }
 }
@@ -1425,17 +1449,31 @@ impl DaqManager {
         // Get DTO receiver for DAQ reception (must be done before starting DAQ)
         let dto_rx = slave.get_dto_receiver();
 
-        // Select all configured DAQ lists (one per event group)
+        // Select all configured DAQ lists (one per event group).
+        // Capture firstPID from each START_STOP_DAQ_LIST response — PIDs are
+        // not necessarily contiguous across DAQ lists (e.g. list 0 → 0..2,
+        // list 1 → 0x60..0x62), so we need them for DTO routing.
         let daq_list_count = {
             let config = self.daq_config.read().await;
             config.daq_list_count
         };
+        let mut first_pid_per_list: Vec<u8> = Vec::with_capacity(daq_list_count as usize);
         for daq_list in 0..daq_list_count {
             tracing::info!("Selecting DAQ list {}", daq_list);
-            slave
+            let first_pid = slave
                 .start_stop_daq_list(2, daq_list) // mode=2 (select DAQ list)
                 .await
                 .map_err(|e| format!("START_STOP_DAQ_LIST failed for list {}: {}", daq_list, e))?;
+            tracing::info!(
+                "DAQ list {} selected, firstPID=0x{:02X}",
+                daq_list,
+                first_pid
+            );
+            first_pid_per_list.push(first_pid);
+        }
+        {
+            let mut config = self.daq_config.write().await;
+            config.first_pid_per_list = first_pid_per_list;
         }
 
         tracing::info!("All {} DAQ lists selected, starting DAQ...", daq_list_count);
@@ -3188,6 +3226,29 @@ mod tests {
         assert_eq!(config.resolve_absolute_odt(5), Some((2, 2)));
         // Absolute ODT 6 → out of range
         assert_eq!(config.resolve_absolute_odt(6), None);
+    }
+
+    #[test]
+    fn test_resolve_absolute_odt_non_contiguous_first_pid() {
+        // PIDs are NOT contiguous across DAQ lists: list 0 starts at PID 0
+        // with 3 ODTs, list 1 starts at PID 0x60 with 3 ODTs.
+        let mut config = DaqConfiguration::new();
+        config.odt_count_per_list = vec![3, 3];
+        config.first_pid_per_list = vec![0x00, 0x60];
+
+        // List 0: PIDs 0x00..0x02
+        assert_eq!(config.resolve_absolute_odt(0x00), Some((0, 0)));
+        assert_eq!(config.resolve_absolute_odt(0x01), Some((0, 1)));
+        assert_eq!(config.resolve_absolute_odt(0x02), Some((0, 2)));
+        // List 1: PIDs 0x60..0x62
+        assert_eq!(config.resolve_absolute_odt(0x60), Some((1, 0)));
+        assert_eq!(config.resolve_absolute_odt(0x61), Some((1, 1)));
+        assert_eq!(config.resolve_absolute_odt(0x62), Some((1, 2)));
+        // Gap between lists (e.g. 0x03..0x5F) is unmapped → None
+        assert_eq!(config.resolve_absolute_odt(0x03), None);
+        assert_eq!(config.resolve_absolute_odt(0x5F), None);
+        // Beyond last list
+        assert_eq!(config.resolve_absolute_odt(0x63), None);
     }
 
     /// Verify that enum measurements produce MF4 channels with Value2Text CC blocks.

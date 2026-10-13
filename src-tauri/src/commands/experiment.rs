@@ -195,6 +195,76 @@ pub async fn experiment_daq_meta(state: State<'_, SharedState>) -> Result<Value,
             .map(|r| r.odt_entry_granularity_daq)
             .unwrap_or(1);
 
+        // Real configured DAQ layout (available after configure()/start()).
+        // When present, the frontend renders the actual ODT/PID structure
+        // returned by the slave instead of the contiguous-PID estimate.
+        // PIDs are NOT contiguous across DAQ lists — each list's firstPID is
+        // taken from the START_STOP_DAQ_LIST (0xDE) response.
+        let configured_layout: Value = {
+            let cfg = daq_mgr.get_config();
+            let cfg = cfg.read().await;
+            if cfg.daq_list_count == 0 || cfg.first_pid_per_list.is_empty() {
+                Value::Null
+            } else {
+                let events = daq_mgr.get_available_events();
+                let ev_lookup: std::collections::HashMap<u16, &xcp_client::a2l::DaqEvent> =
+                    events.iter().map(|e| (e.channel, e)).collect();
+                let mut lists: Vec<Value> = Vec::with_capacity(cfg.daq_list_count as usize);
+                for list_idx in 0..cfg.daq_list_count as usize {
+                    let first_pid = cfg.first_pid_per_list.get(list_idx).copied().unwrap_or(0);
+                    let odt_count = cfg.odt_count_per_list.get(list_idx).copied().unwrap_or(0);
+                    let event_ch = cfg.event_channel_per_list.get(list_idx).copied().unwrap_or(0);
+                    let ev = ev_lookup.get(&event_ch);
+                    let mut odts: Vec<Value> = Vec::with_capacity(odt_count as usize);
+                    for odt_idx in 0..odt_count {
+                        let odt_entries: Vec<&xcp_client::daq::OdtEntryConfig> = cfg
+                            .odt_entries
+                            .iter()
+                            .filter(|e| e.daq_list == list_idx as u16 && e.odt == odt_idx)
+                            .collect();
+                        let data_bytes: usize = odt_entries.iter().map(|e| e.size).sum();
+                        let entries: Vec<Value> = odt_entries
+                            .iter()
+                            .map(|e| {
+                                json!({
+                                    "name": e.name.clone(),
+                                    "bytes": e.size,
+                                    "data_type": format!("{:?}", e.data_type),
+                                    "unit": e.unit.clone().unwrap_or_default(),
+                                    "byte_offset": e.byte_offset,
+                                })
+                            })
+                            .collect();
+                        let has_ts = odt_idx == 0 && ts_size > 0;
+                        let total = pid_bytes as usize
+                            + if has_ts { ts_size as usize } else { 0 }
+                            + data_bytes;
+                        odts.push(json!({
+                            "odt_idx": odt_idx,
+                            "absolute_pid": first_pid + odt_idx,
+                            "pid_bytes": pid_bytes,
+                            "has_timestamp": has_ts,
+                            "timestamp_bytes": if has_ts { ts_size } else { 0 },
+                            "data_bytes": data_bytes,
+                            "total_bytes": total,
+                            "entries": entries,
+                        }));
+                    }
+                    lists.push(json!({
+                        "daq_list_idx": list_idx,
+                        "event_channel": event_ch,
+                        "event_name": ev.map(|e| e.name.as_str()).unwrap_or("unknown"),
+                        "event_short_name": ev.map(|e| e.short_name.as_str()).unwrap_or(""),
+                        "event_cycle_ms": ev.map(|e| e.cycle_time_ms()).unwrap_or(0.0),
+                        "odt_count": odt_count,
+                        "first_pid": first_pid,
+                        "odts": odts,
+                    }));
+                }
+                Value::Array(lists)
+            }
+        };
+
         devices.push(json!({
             "device_id": device_id,
             "config_device_id": config_device_id,
@@ -209,6 +279,7 @@ pub async fn experiment_daq_meta(state: State<'_, SharedState>) -> Result<Value,
             "max_dto": max_dto,
             "max_odt_entry_size": max_odt_entry_size,
             "odt_entry_granularity": odt_granularity,
+            "configured_layout": configured_layout,
         }));
     }
 

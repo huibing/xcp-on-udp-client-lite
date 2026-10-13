@@ -17,8 +17,11 @@ pub fn parse_response(data: &[u8]) -> Result<Response, String> {
     match pid {
         0xFF => {
             // Positive response: RES
+            // res_data = everything after the 0xFF status byte.
+            // Per-command layout varies; e.g. START_STOP_DAQ_LIST returns
+            // [0xFF, firstPID] so res_data[0] is firstPID. Some commands echo
+            // the command code as res_data[0]; callers parse accordingly.
             let res_data = data[1..].to_vec();
-            // Note: response data includes the command code echo, so actual data starts at +1
             Ok(Response::Res(res_data))
         }
         0xFE => {

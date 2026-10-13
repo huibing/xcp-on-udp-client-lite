@@ -506,8 +506,9 @@ impl XcpClient {
             .map_err(|e| e.into())
     }
 
-    /// Start/stop DAQ list on current slave
-    pub async fn start_stop_daq_list(&self, mode: u8, daq_list: u16) -> Result<(), XcpError> {
+    /// Start/stop DAQ list on current slave.
+    /// Returns `firstPID` from the slave response (see `XcpSlave::start_stop_daq_list`).
+    pub async fn start_stop_daq_list(&self, mode: u8, daq_list: u16) -> Result<u8, XcpError> {
         let slave = self.current_slave().ok_or(XcpError::NotConnected)?;
         let slave = slave.lock().await;
         slave
