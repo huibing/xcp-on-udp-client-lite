@@ -162,6 +162,39 @@ pub async fn experiment_daq_meta(state: State<'_, SharedState>) -> Result<Value,
 
         let total_measurements = daq_mgr.all_measurements().len();
 
+        // Infer max_dto from the A2L transport config.
+        // CAN classic: 8 bytes; CAN-FD: 64 bytes; UDP/TCP: 255 (conservative).
+        // After the slave connects, the real max_dto from CONNECT may differ
+        // slightly, but the A2L value gives the correct transport limit for
+        // ODT-splitting display purposes.
+        let max_dto = dev
+            .transport_configs
+            .first()
+            .map(|tc| match tc.transport_type() {
+                xcp_client::transport::TransportType::Can => {
+                    if let xcp_client::a2l::A2lTransportConfig::Can {
+                        data_baudrate: Some(_),
+                        ..
+                    } = tc
+                    {
+                        64
+                    } else {
+                        8
+                    }
+                }
+                _ => 255,
+            })
+            .unwrap_or(8);
+
+        // DAQ resolution parameters (from slave after configure; defaults before)
+        let daq_res = daq_mgr.get_daq_resolution();
+        let max_odt_entry_size = daq_res
+            .map(|r| r.max_odt_entry_size_daq)
+            .unwrap_or(255);
+        let odt_granularity = daq_res
+            .map(|r| r.odt_entry_granularity_daq)
+            .unwrap_or(1);
+
         devices.push(json!({
             "device_id": device_id,
             "config_device_id": config_device_id,
@@ -173,6 +206,9 @@ pub async fn experiment_daq_meta(state: State<'_, SharedState>) -> Result<Value,
             "timestamp_bytes": ts_size,
             "timestamp_unit": ts_unit_str,
             "total_measurements": total_measurements,
+            "max_dto": max_dto,
+            "max_odt_entry_size": max_odt_entry_size,
+            "odt_entry_granularity": odt_granularity,
         }));
     }
 

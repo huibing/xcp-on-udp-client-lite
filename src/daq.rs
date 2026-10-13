@@ -1505,6 +1505,15 @@ impl DaqManager {
         let handle = tokio::spawn(async move {
             tracing::info!("DAQ started, waiting for DTO packets...");
 
+            // Per-DAQ-list accumulated signal values.
+            // When a DAQ list has multiple ODTs, each DTO only carries a subset
+            // of the signals. We keep the latest known value for every signal so
+            // that MF4 and CSV records are always complete — no artificial zeros.
+            let mut acc_values: std::collections::HashMap<
+                u16,
+                std::collections::HashMap<String, f64>,
+            > = std::collections::HashMap::new();
+
             while running.load(Ordering::SeqCst) {
                 // Check if selection changed - if so, we need to restart
                 if selection_changed.load(Ordering::SeqCst) {
@@ -1658,6 +1667,18 @@ impl DaqManager {
 
                             // If recording is active, write to files
                             if recording.load(Ordering::SeqCst) {
+                                // Merge current ODT values into per-DAQ-list
+                                // accumulation so that signals from other ODTs of
+                                // the same DAQ list keep their last-known value
+                                // instead of being zero-filled.
+                                {
+                                    let daq_values =
+                                        acc_values.entry(resolved_daq_list).or_default();
+                                    for (name, value) in &record.values {
+                                        daq_values.insert(name.clone(), *value);
+                                    }
+                                }
+
                                 // Calculate recording timestamp (relative to recording start)
                                 let rec_ts = {
                                     let mut tracker = recording_ts_tracker.write().await;
@@ -1702,9 +1723,11 @@ impl DaqManager {
                                         if let Some(writer) = csv_guard.get_mut(&resolved_daq_list)
                                         {
                                             let mut csv_line = format!("{:.6}", rec_ts);
+                                            let daq_values =
+                                                acc_values.entry(resolved_daq_list).or_default();
                                             for name in signal_names {
                                                 csv_line.push(',');
-                                                if let Some(value) = record.get_value(name) {
+                                                if let Some(value) = daq_values.get(name).copied() {
                                                     // Find data type from config entries
                                                     let is_float = config
                                                         .odt_entries
@@ -1746,17 +1769,41 @@ impl DaqManager {
                                                     tracing::error!("MF4 set time failed: {}", e);
                                                 }
                                                 // Set signal channels (skip time_s at index 0)
-                                                for ch_name in eg.channel_names.iter().skip(1) {
-                                                    let v =
-                                                        record.get_value(ch_name).unwrap_or(0.0);
-                                                    if let Err(e) =
-                                                        writer.set_channel_value(ch_name, v)
-                                                    {
-                                                        tracing::error!(
-                                                            "MF4 set {} failed: {}",
-                                                            ch_name,
-                                                            e
-                                                        );
+                                                // Read back accumulated values so that
+                                                // signals from other ODTs of this DAQ list
+                                                // keep their last-known value.
+                                                if let Some(daq_values) =
+                                                    acc_values.get(&resolved_daq_list)
+                                                {
+                                                    for ch_name in eg.channel_names.iter().skip(1) {
+                                                        let v = daq_values
+                                                            .get(ch_name)
+                                                            .copied()
+                                                            .unwrap_or(0.0);
+                                                        if let Err(e) =
+                                                            writer.set_channel_value(ch_name, v)
+                                                        {
+                                                            tracing::error!(
+                                                                "MF4 set {} failed: {}",
+                                                                ch_name,
+                                                                e
+                                                            );
+                                                        }
+                                                    }
+                                                } else {
+                                                    for ch_name in eg.channel_names.iter().skip(1) {
+                                                        let v = record
+                                                            .get_value(ch_name)
+                                                            .unwrap_or(0.0);
+                                                        if let Err(e) =
+                                                            writer.set_channel_value(ch_name, v)
+                                                        {
+                                                            tracing::error!(
+                                                                "MF4 set {} failed: {}",
+                                                                ch_name,
+                                                                e
+                                                            );
+                                                        }
                                                     }
                                                 }
                                                 if let Err(e) = writer.flush_record() {
@@ -1781,8 +1828,10 @@ impl DaqManager {
                                         let mut mdf_values =
                                             Vec::with_capacity(meas_info.len() + 1);
                                         mdf_values.push(DecodedValue::Float(rec_ts));
+                                        let daq_values =
+                                            acc_values.entry(resolved_daq_list).or_default();
                                         for (name, _) in meas_info.iter() {
-                                            let v = record.get_value(name).unwrap_or(0.0);
+                                            let v = daq_values.get(name).copied().unwrap_or(0.0);
                                             mdf_values.push(DecodedValue::Float(v));
                                         }
                                         if let Err(e) = writer.write_record(cg_id, &mdf_values) {

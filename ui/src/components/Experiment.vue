@@ -197,6 +197,7 @@
               :gridColor="chartGridColor"
               :tickColor="chartTickColor"
               @close="closeAllGraphs"
+              @color-change="onSignalColorChange"
             />
         </div>
 
@@ -850,6 +851,10 @@ const SIGNAL_COLORS = [
 ]
 const MAX_HISTORY_POINTS = 50000
 
+// User-customized line colors per signal, keyed by "device_id:name".
+// Falls back to SIGNAL_COLORS by index when unset; persisted in saveState().
+const signalColors = reactive({})
+
 // ── Core state ────────────────────────────────────────────────────────────────
 const expTitle = ref('Experiment')
 const tabs = ref([])
@@ -1172,6 +1177,12 @@ function toggleGraph(v) {
   saveState()
 }
 
+/** Apply a user-picked line color to a graphed signal (persists across reloads). */
+function onSignalColorChange({ key, color }) {
+  signalColors[key] = color
+  saveState()
+}
+
 /** Signals for the active tab's graph, with stable colors by position */
 const tabGraphedSignals = computed(() => {
   const keys = activeTab.value?.graphedKeys ?? []
@@ -1185,7 +1196,7 @@ const tabGraphedSignals = computed(() => {
       key: hkey,
       name: v?.name ?? name,
       device_name: v?.device_name ?? devId,
-      color: SIGNAL_COLORS[i % SIGNAL_COLORS.length],
+      color: signalColors[hkey] ?? SIGNAL_COLORS[i % SIGNAL_COLORS.length],
     }
   })
 })
@@ -2348,24 +2359,70 @@ function computeDaqLayoutFromTabs(deviceMeta) {
     const sortedChs = Object.keys(eventGroups).map(Number).sort((a, b) => a - b)
 
     const availEvents = availableEventsByDevice[cfgId] || []
+
+    // ── Helper: compute max payload per ODT ──
+    const pdSize = meta.pid_bytes || 1
+    const tsSize = meta.has_timestamp ? (meta.timestamp_bytes || 0) : 0
+    const maxDto = meta.max_dto || 8
+    const granularity = Math.max(1, meta.odt_entry_granularity || 1)
+    // ODT 0 carries timestamp; subsequent ODTs do not.
+    const maxOdt0Payload = Math.max(0, maxDto - pdSize - tsSize)
+    const maxOdtPayload = Math.max(0, maxDto - pdSize)
+
     let absPid = 0
     const daqLists = sortedChs.map((ch, daqIdx) => {
       const grpVars = eventGroups[ch]
       const evt = availEvents.find(e => e.channel === ch) || { name: `Ch${ch}`, short_name: '', cycle_time_ms: 0 }
-      const entries = grpVars.map(v => ({ name: v.name, bytes: v.bytes, data_type: v.data_type, unit: v.unit }))
-      const dataBytes = grpVars.reduce((s, v) => s + (v.bytes || 0), 0)
-      const odt = {
-        odt_idx: 0, absolute_pid: absPid, pid_bytes: meta.pid_bytes,
-        has_timestamp: meta.has_timestamp, timestamp_bytes: meta.timestamp_bytes,
-        data_bytes: dataBytes,
-        total_bytes: meta.pid_bytes + (meta.has_timestamp ? meta.timestamp_bytes : 0) + dataBytes,
-        entries,
+
+      // Split measurements into ODTs based on DTO payload limits.
+      const odts = []
+      let curEntries = []
+      let curBytes = 0
+      for (const v of grpVars) {
+        const aligned = Math.ceil((v.bytes || 0) / granularity) * granularity
+        const isOdt0 = odts.length === 0
+        const maxPayload = isOdt0 ? maxOdt0Payload : maxOdtPayload
+
+        if (curEntries.length > 0 && curBytes + aligned > maxPayload) {
+          // Flush current ODT
+          odts.push({
+            odt_idx: odts.length,
+            absolute_pid: absPid,
+            pid_bytes: pdSize,
+            has_timestamp: isOdt0 && tsSize > 0,
+            timestamp_bytes: isOdt0 ? tsSize : 0,
+            data_bytes: curBytes,
+            total_bytes: pdSize + (isOdt0 ? tsSize : 0) + curBytes,
+            entries: curEntries,
+          })
+          absPid++
+          curEntries = []
+          curBytes = 0
+        }
+        curEntries.push({ name: v.name, bytes: v.bytes, data_type: v.data_type, unit: v.unit })
+        curBytes += aligned
       }
-      absPid++
+      // Flush remaining
+      if (curEntries.length > 0) {
+        const isOdt0 = odts.length === 0
+        odts.push({
+          odt_idx: odts.length,
+          absolute_pid: absPid,
+          pid_bytes: pdSize,
+          has_timestamp: isOdt0 && tsSize > 0,
+          timestamp_bytes: isOdt0 ? tsSize : 0,
+          data_bytes: curBytes,
+          total_bytes: pdSize + (isOdt0 ? tsSize : 0) + curBytes,
+          entries: curEntries,
+        })
+        absPid++
+      }
+
       return {
         daq_list_idx: daqIdx, event_channel: ch,
         event_name: evt.name, event_short_name: evt.short_name || '',
-        event_cycle_ms: evt.cycle_time_ms || 0, odt_count: 1, odts: [odt],
+        event_cycle_ms: evt.cycle_time_ms || 0,
+        odt_count: odts.length, odts,
       }
     })
 
@@ -2505,6 +2562,7 @@ function saveState() {
       tabs: tabs.value,
       activeTabId: activeTabId.value,
       tabCounter: tabCounter.value,
+      signalColors: signalColors,
     }))
   } catch {}
 }
@@ -2516,6 +2574,9 @@ function loadState() {
     const s = JSON.parse(raw)
     if (s.expTitle) expTitle.value = s.expTitle
     if (s.tabCounter) tabCounter.value = s.tabCounter
+    if (s.signalColors && typeof s.signalColors === 'object') {
+      Object.assign(signalColors, s.signalColors)
+    }
     if (Array.isArray(s.tabs) && s.tabs.length > 0) {
       tabs.value = s.tabs
       activeTabId.value = (s.activeTabId && tabs.value.find(t => t.id === s.activeTabId))
