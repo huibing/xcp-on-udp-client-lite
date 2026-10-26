@@ -313,13 +313,38 @@ Can {
 
 1. `src/transport/can/mod.rs`：`FrameFilter` 升级为 **CAN ID + PID 双维度**。
    - CTO 类（PID ≥ 0xFC：RES/ERR/EV/SERV）仅当 `can_id == CAN_ID_SLAVE` 时才放行——随机流量首字节碰巧 ≥0xFC 也会被丢弃，不再被误当成命令响应。
-   - DAQ 类（PID < 0xFC）保持原宽松策略：`daq_ids` 已知时严格白名单（含 `slave_id`），未知时全收（兼容 VARIABLE/INCREMENTAL DAQ，不丢数据）。
+   - DAQ 类（PID < 0xFC）：`daq_ids` 已知时严格白名单（含 `slave_id`）；未知时**默认只收 `CAN_ID_SLAVE`**（见第 13 条：全收会让总线上首字节恰好是合法 PID 的周期报文污染 DAQ 采集）。
    - master 自身 ID 始终拒绝（echo 抑制）。
 2. reader 取 `pid = frame.data[0]` 传给过滤器，丢弃帧的 trace 日志带上 pid。
 3. 连接时若未声明 `CAN_ID_SLAVE`，打 `warn` 提示 CTO 无法按 ID 过滤。
 4. 新增 4 个测试，含回归测试 `test_frame_filter_rejects_unrelated_cto_traffic_regression`（复现本次 bug：`0x123` 上 0xFC/0xFF/0xFE 帧必须被拒，`slave_id` 上的 RES 必须放行）。
 
-关键特性：只要 A2L 声明了 `CAN_ID_SLAVE`，CTO 路径就干净了，不再需要手动关掉总线上其他周期报文；且不破坏 VARIABLE DAQ。
+关键特性：只要 A2L 声明了 `CAN_ID_SLAVE`，CTO 路径就干净了，不再需要手动关掉总线上其他周期报文；DAQ 路径同样默认收敛到 `CAN_ID_SLAVE`（若 slave 确实用独立 DAQ ID，需在 A2L `DAQ_LIST_CAN_ID` 或配置里声明）。
+
+---
+
+## 13. daq-record 采集 CAN 信号时，部分 10ms 信号周期性归零/乱码
+
+**原始问题**
+
+> daq-record 采集 CAN 信号时，采集文件中有些 10ms 的信号周期性的归 0（甚至出现 -1.6e29 这种乱码值），控制器并没有发 0 出来。
+
+**定位过程**
+
+1. `recording_event0.csv`（10ms 事件）每 20ms 出现 5 条记录：3 条乱码/零值（时间戳相隔 ~250µs，即背靠背的 CAN 帧）+ 2 条真实值（严格 10ms 周期）。而 `recording_event1.csv`（100ms 事件，PID 0x60）完全干净。
+2. 日志：`DAQ list 0: 1 ODTs, event_channel=0`（firstPID=0x00）、`DAQ list 1: 1 ODTs`（firstPID=0x60）、`CAN receive filter: master=0x550, CTO only from 0x551; DAQ accept-all (fixed DAQ IDs unknown)`。
+3. A2L 的 `XCP_ON_CAN` 只声明了 `CAN_ID_MASTER 0x550` / `CAN_ID_SLAVE 0x551`（注释明确 `DTO = XCP_CAN_ID_DTO`），**没有 `DAQ_LIST_CAN_ID`** → `daq_ids` 为空 → 过滤器退化为“除 master 外全收”。
+4. ECU 自己每 20ms 周期发送的应用 CAN 报文（PMS01/02/03 等）首字节恰好是 0x00，被当成 PID=0x00 的 DAQ DTO，路由到 10ms 的 DAQ list 0，报文字节被按 FLOAT32/UBYTE 解码 → 乱码（-1.6e29）或 0。真正的 DAQ DTO（每 10ms，走 0x551）才是正确值。
+
+**根因**
+
+XCP-on-CAN 规范 §1.1：每个 slave 用两个 ID——一个 CMD/STIM，一个 **RES/ERR/EV/SERV/DAQ**。未声明 `DAQ_LIST_CAN_ID` 时 DAQ 默认走 `CAN_ID_SLAVE`。旧代码在 `daq_ids` 为空时对 DAQ 类帧全收，导致总线上任何首字节 < 0xFC 的周期报文都会灌进 DAQ 流；首字节恰好命中已启动 DAQ list 的 PID 范围（如 0x00）时就被解码成信号。
+
+**修复**
+
+`FrameFilter::from_config`：`daq_ids` 为空时，DAQ 白名单**默认收敛到 `slave_id`**（规范默认行为）；仅当 `slave_id` 也未知时才保持全收。若 slave 确实用独立/动态 DAQ ID，需在 A2L `DAQ_LIST_CAN_ID`（FIXED）或 daq-record 配置 `[connection].daq_ids` 里声明。
+
+新增回归测试 `test_frame_filter_daq_defaults_to_slave_id_without_daq_ids`（复现本次 bug：0x551 上的 DAQ 帧放行，0x310/0x999 等总线流量拒绝）。
 
 ---
 

@@ -949,7 +949,7 @@ Contributions are welcome! Please feel free to submit pull requests.
 ### v0.5.0 - CAN / PCAN Transport
 
 - ✅ **XCP-on-CAN Transport**: One XCP packet per CAN frame, no `LEN`/`COUNTER` header (DLC = length)
-  - CAN ID receive filtering: accepts `CAN_ID_SLAVE` plus DAQ DTO IDs from `DAQ_LIST_CAN_ID` / `EVENT_CAN_ID_LIST`, always rejects the master's own ID
+  - CAN ID receive filtering: accepts `CAN_ID_SLAVE` plus DAQ DTO IDs from `DAQ_LIST_CAN_ID` / `EVENT_CAN_ID_LIST`, always rejects the master's own ID; when no DAQ IDs are declared, DAQ defaults to `CAN_ID_SLAVE` (per the XCP-on-CAN spec) so unrelated bus traffic never pollutes DAQ recordings
   - `MAX_DLC_REQUIRED` padding; classic CAN and CAN-FD (timing derived from bit rates)
 - ✅ **CAN Device Driver Abstraction**: `CanDevice`/`CanDriver` traits with a registry; `pcan.rs` implements PEAK-System PCAN-Basic (dynamic `PCANBasic.dll` loading via `libloading`)
 - ✅ **A2L-driven CAN config**: bitrate, CAN-FD data bitrate, `CAN_ID_SLAVE`, `DAQ_LIST_CAN_ID`, `EVENT_CAN_ID_LIST`, `MAX_DLC_REQUIRED`
