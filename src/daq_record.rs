@@ -328,14 +328,21 @@ pub async fn run_daq_record(config_path: &str) -> Result<(), Box<dyn std::error:
 
     // Load events from A2L
     let events = reader.get_events();
-    let event_channels: Vec<u16> = events.iter().map(|e| e.channel).collect();
+    // Distinct event channels (for validation and error messages)
+    let mut event_channels: Vec<u16> = events.iter().map(|e| e.channel).collect();
+    event_channels.sort_unstable();
+    event_channels.dedup();
     if !events.is_empty() {
         println!("  {} DAQ events found in A2L:", events.len());
         for ev in &events {
-            println!(
-                "    channel {}: {} ({}ms cycle)",
-                ev.channel, ev.name, ev.time_cycle
-            );
+            // TIME_UNIT is a decade exponent (base 1 ns), so the real cycle
+            // is time_cycle * 10^time_unit ns — e.g. cycle=1, unit=7 → 10 ms.
+            let cycle = if ev.time_cycle > 0 {
+                format!("{:.1}ms", ev.cycle_time_ms())
+            } else {
+                "n/a".to_string()
+            };
+            println!("    channel {}: {} ({})", ev.channel, ev.name, cycle);
         }
         daq_manager.set_available_events(events);
     }

@@ -631,11 +631,10 @@ impl A2lReader {
         let mut events = Vec::new();
         let mut search = raw;
 
-        while let Some(begin_pos) = search.to_uppercase().find("/BEGIN EVENT") {
+        while let Some(begin_pos) = Self::find_a2l_keyword(&search.to_uppercase(), "/BEGIN EVENT")
+        {
             let after_begin = &search[begin_pos + "/BEGIN EVENT".len()..];
-            let end_pos = after_begin
-                .to_uppercase()
-                .find("/END EVENT")
+            let end_pos = Self::find_a2l_keyword(&after_begin.to_uppercase(), "/END EVENT")
                 .unwrap_or(after_begin.len());
             let block = &after_begin[..end_pos];
 
@@ -645,12 +644,16 @@ impl A2lReader {
             if tokens.len() >= 7 {
                 let name = tokens[0].trim_matches('"').to_string();
                 let short_name = tokens[1].trim_matches('"').to_string();
-                let channel: u16 = tokens[2].parse().unwrap_or(0);
+                // Numeric literals may be decimal or hexadecimal (e.g. `0x0001`).
+                let channel = Self::parse_u16_token(&tokens[2]).unwrap_or(0);
                 // tokens[3] is DAQ/STIM direction keyword — skip
-                let max_daq_list: u8 = tokens[4].parse().unwrap_or(0);
-                let time_cycle: u8 = tokens[5].parse().unwrap_or(0);
-                let time_unit: u8 = tokens[6].parse().unwrap_or(0);
-                let priority: u8 = tokens.get(7).and_then(|t| t.parse().ok()).unwrap_or(0);
+                let max_daq_list = Self::parse_u8_token(&tokens[4]).unwrap_or(0);
+                let time_cycle = Self::parse_u8_token(&tokens[5]).unwrap_or(0);
+                let time_unit = Self::parse_u8_token(&tokens[6]).unwrap_or(0);
+                let priority = tokens
+                    .get(7)
+                    .and_then(|t| Self::parse_u8_token(t))
+                    .unwrap_or(0);
 
                 events.push(super::types::DaqEvent {
                     channel,
@@ -667,6 +670,23 @@ impl A2lReader {
         }
 
         events
+    }
+
+    /// Find an A2L keyword (e.g. `/BEGIN EVENT`) in an uppercased haystack,
+    /// matching only complete keywords: the match must be followed by
+    /// whitespace (or end of input) so that `/BEGIN EVENT` does not
+    /// prefix-match `/BEGIN EVENT_CAN_ID_LIST`.
+    fn find_a2l_keyword(haystack_upper: &str, keyword: &str) -> Option<usize> {
+        let mut offset = 0usize;
+        while let Some(pos) = haystack_upper[offset..].find(keyword) {
+            let end = offset + pos + keyword.len();
+            let rest = &haystack_upper[end..];
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                return Some(offset + pos);
+            }
+            offset = end;
+        }
+        None
     }
 
     fn parse_transport_configs_from_raw(raw: &str) -> Vec<A2lTransportConfig> {
@@ -867,6 +887,15 @@ impl A2lReader {
             u16::from_str_radix(token.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
         } else {
             token.parse::<u16>().ok()
+        }
+    }
+
+    fn parse_u8_token(token: &str) -> Option<u8> {
+        let token = token.trim();
+        if let Some(hex) = token.strip_prefix("0x").or_else(|| token.strip_prefix("0X")) {
+            u8::from_str_radix(hex, 16).ok()
+        } else {
+            token.parse::<u8>().ok()
         }
     }
 
@@ -2405,6 +2434,117 @@ mod tests {
             "Should find a slave address with port 5555 from A2L file, got: {:?}",
             addrs
         );
+    }
+
+    #[test]
+    fn test_parse_events_hex_literals() {
+        // Mirrors a real AUTOSAR-generated A2L where the EVENT block numbers
+        // are hexadecimal (0x0000, 0x07, ...). Regression test: the channel
+        // used to silently fall back to 0 because "0x0001".parse::<u16>()
+        // fails, producing two events on channel 0.
+        let raw = r#"
+            /begin DAQ
+                /begin EVENT
+                    "XCP event channel 0 (10 ms)" "10ms" 0x0000
+                    DAQ                       /* direction */
+                    2                         /* MAX_DAQ_LIST */
+                    1                         /* TIME_CYCLE */
+                    0x07                      /* TIME_UNIT: UNIT_10MS */
+                    0                         /* PRIORITY */
+                /end EVENT
+                /begin EVENT
+                    "XCP event channel 1 (100 ms)" "100ms" 0x0001
+                    DAQ                       /* direction */
+                    2                         /* MAX_DAQ_LIST */
+                    1                         /* TIME_CYCLE */
+                    0x08                      /* TIME_UNIT: UNIT_100MS */
+                    0                         /* PRIORITY */
+                /end EVENT
+            /end DAQ
+        "#;
+
+        let events = A2lReader::parse_events_from_raw(raw);
+        assert_eq!(events.len(), 2);
+
+        assert_eq!(events[0].channel, 0);
+        assert_eq!(events[0].name, "XCP event channel 0 (10 ms)");
+        assert_eq!(events[0].short_name, "10ms");
+        assert_eq!(events[0].max_daq_list, 2);
+        assert_eq!(events[0].time_cycle, 1);
+        assert_eq!(events[0].time_unit, 0x07);
+        assert_eq!(events[0].priority, 0);
+        // 1 * 10^7 ns = 10 ms
+        assert_eq!(events[0].cycle_time_ms(), 10.0);
+
+        assert_eq!(events[1].channel, 1);
+        assert_eq!(events[1].name, "XCP event channel 1 (100 ms)");
+        assert_eq!(events[1].time_cycle, 1);
+        assert_eq!(events[1].time_unit, 0x08);
+        // 1 * 10^8 ns = 100 ms
+        assert_eq!(events[1].cycle_time_ms(), 100.0);
+    }
+
+    #[test]
+    fn test_parse_events_decimal_literals() {
+        let raw = r#"
+            /begin EVENT "10 ms" "10 ms" 2 DAQ 3 10 1 0 /end EVENT
+        "#;
+
+        let events = A2lReader::parse_events_from_raw(raw);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].channel, 2);
+        assert_eq!(events[0].name, "10 ms");
+        assert_eq!(events[0].max_daq_list, 3);
+        assert_eq!(events[0].time_cycle, 10);
+        assert_eq!(events[0].time_unit, 1);
+        assert_eq!(events[0].priority, 0);
+    }
+
+    #[test]
+    fn test_parse_events_ignores_event_can_id_list() {
+        // `/begin EVENT` must not prefix-match `/begin EVENT_CAN_ID_LIST`
+        // inside an XCP_ON_CAN IF_DATA block.
+        let raw = r#"
+            /begin IF_DATA XCP
+                /begin XCP_ON_CAN
+                    /begin EVENT_CAN_ID_LIST
+                        0 FIXED 0x7fd
+                    /end EVENT_CAN_ID_LIST
+                /end XCP_ON_CAN
+            /end IF_DATA
+            /begin EVENT "10 ms" "10 ms" 0 DAQ 1 10 1 0 /end EVENT
+        "#;
+
+        let events = A2lReader::parse_events_from_raw(raw);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].channel, 0);
+        assert_eq!(events[0].name, "10 ms");
+    }
+
+    #[test]
+    fn test_find_a2l_keyword_word_boundary() {
+        let hay = "/BEGIN EVENT_CAN_ID_LIST 0 FIXED /END EVENT_CAN_ID_LIST /BEGIN EVENT X".to_string();
+        // Must skip the EVENT_CAN_ID_LIST prefix match and find the real one.
+        let pos = A2lReader::find_a2l_keyword(&hay, "/BEGIN EVENT").unwrap();
+        assert_eq!(&hay[pos..pos + "/BEGIN EVENT".len()], "/BEGIN EVENT");
+        assert!(hay[pos + "/BEGIN EVENT".len()..].starts_with(' '));
+
+        // No complete keyword -> None
+        assert!(A2lReader::find_a2l_keyword("/BEGIN EVENT_X", "/BEGIN EVENT").is_none());
+        // Keyword at end of input is a complete match
+        assert!(A2lReader::find_a2l_keyword("XX/BEGIN EVENT", "/BEGIN EVENT").is_some());
+    }
+
+    #[test]
+    fn test_parse_u8_token() {
+        assert_eq!(A2lReader::parse_u8_token("0"), Some(0));
+        assert_eq!(A2lReader::parse_u8_token("255"), Some(255));
+        assert_eq!(A2lReader::parse_u8_token("0x07"), Some(7));
+        assert_eq!(A2lReader::parse_u8_token("0X08"), Some(8));
+        assert_eq!(A2lReader::parse_u8_token("0xff"), Some(255));
+        assert_eq!(A2lReader::parse_u8_token("0x100"), None); // overflow
+        assert_eq!(A2lReader::parse_u8_token("DAQ"), None);
+        assert_eq!(A2lReader::parse_u8_token(""), None);
     }
 
     #[test]
