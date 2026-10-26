@@ -122,7 +122,15 @@ pub trait Transport: Send + Sync {
     /// Send a command packet (without waiting for response)
     async fn send_command_only(&self, command: &[u8]) -> Result<(), TransportError>;
 
-    /// Send a command and wait for response
+    /// Send a command and wait for response.
+    ///
+    /// ⚠️ Only use this when the message router is NOT running (e.g. before
+    /// `XcpSlave::connect`). With the router active, the router and this
+    /// method compete for the same receive queue: the router may consume the
+    /// response first (this call then times out) or this call may consume
+    /// frames the router needed. Normal command flow goes through
+    /// `XcpSlave::send_command_and_wait` (`send_command_only` + the router's
+    /// CTO channel, which classifies packets by PID).
     async fn send_command(&self, command: &[u8]) -> Result<Vec<u8>, TransportError>;
 
     /// Receive one normalized XCP payload packet (blocking)

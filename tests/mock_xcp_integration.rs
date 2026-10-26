@@ -70,6 +70,58 @@ async fn client_connects_and_reads_identity() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_command_and_wait_skips_unsolicited_ev_and_serv_packets() {
+    // A slave may send asynchronous EV (0xFD) / SERV (0xFC) packets while a
+    // command is in flight. Those land in the router's CTO channel but are
+    // NOT responses — send_command_and_wait must skip them and still return
+    // the real RES for the command (otherwise the RES would be misattributed
+    // to the NEXT command).
+    let _guard = PORT_LOCK.lock().await;
+    let server = MockXcpSlaveServer::start()
+        .await
+        .expect("start mock server");
+
+    let mut client = XcpClient::new();
+    let slave_id = client
+        .connect_slave_udp("mock", MOCK_SLAVE_ADDR)
+        .await
+        .expect("connect slave");
+    let slave = client.get_slave(slave_id).expect("get slave");
+    let slave = slave.lock().await;
+
+    // Queue an EV packet (PID 0xFD: daq_list u16 + odt u8 + data) and a SERV
+    // packet (PID 0xFC) before issuing the command, so both are already in
+    // the CTO channel ahead of the response.
+    server
+        .send_unsolicited(&[0xFD, 0x00, 0x00, 0x00, 0xAA])
+        .await
+        .expect("send EV");
+    server
+        .send_unsolicited(&[0xFC, 0x01])
+        .await
+        .expect("send SERV");
+    // Give the client's router a moment to route both into the CTO channel.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The command must still succeed and return the real GET_ID response.
+    assert_eq!(
+        slave.get_id(0).await.expect("get id despite EV/SERV"),
+        MOCK_ID_STRING
+    );
+
+    // And the next command must not receive the stale GET_ID response
+    // misattributed from the previous exchange.
+    assert_eq!(
+        slave.get_id(0).await.expect("next get id"),
+        MOCK_ID_STRING
+    );
+
+    drop(slave);
+    client.disconnect_all().await.expect("disconnect");
+    server.stop().await.expect("stop mock server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn calibration_pages_chunked_transfers_and_checksum_work() {
     let _guard = PORT_LOCK.lock().await;
     let server = MockXcpSlaveServer::start()

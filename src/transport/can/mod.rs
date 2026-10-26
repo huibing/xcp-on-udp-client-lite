@@ -306,6 +306,63 @@ impl CanTransport {
             .map_err(|e| TransportError::SendFailed(e.to_string()))
     }
 
+    /// Pop the first CTO-class item (PID >= 0xFC) from `queue`, leaving all
+    /// preceding DAQ-class items at the front in their original order so the
+    /// message router still receives them.
+    ///
+    /// Pure helper (unit-testable without CAN hardware).
+    fn pop_first_cto(
+        queue: &mut VecDeque<(Vec<u8>, Option<u64>)>,
+    ) -> Option<(Vec<u8>, Option<u64>)> {
+        let mut stashed: Vec<(Vec<u8>, Option<u64>)> = Vec::new();
+        let mut found = None;
+        while let Some(item) = queue.pop_front() {
+            let is_cto = item.0.first().is_some_and(|pid| *pid >= 0xFC);
+            if is_cto {
+                found = Some(item);
+                break;
+            }
+            stashed.push(item);
+        }
+        // Requeue the leading DAQ frames in their original order.
+        for item in stashed.into_iter().rev() {
+            queue.push_front(item);
+        }
+        found
+    }
+
+    /// Pop the next CTO-class frame (PID >= 0xFC) from the receive queue,
+    /// requeueing any leading DAQ-class frames so the message router still
+    /// receives them.
+    ///
+    /// The scan and requeue happen under a single queue lock so the router
+    /// cannot observe a reordered queue. Note that the router itself may
+    /// still consume the response frame first — with the router running
+    /// (normal operation), prefer `send_command_only` + the router's CTO
+    /// channel (see `XcpSlave::send_command_and_wait`).
+    async fn recv_cto_payload(
+        &self,
+        timeout_ms: u64,
+    ) -> Result<Option<(Vec<u8>, Option<u64>)>, TransportError> {
+        let start = Instant::now();
+        loop {
+            {
+                let mut queue = self.rx.lock().unwrap();
+                if let Some(item) = Self::pop_first_cto(&mut queue) {
+                    return Ok(Some(item));
+                }
+            }
+
+            if !self.connected.load(Ordering::SeqCst) {
+                return Err(TransportError::ConnectionClosed);
+            }
+            if start.elapsed() >= Duration::from_millis(timeout_ms) {
+                return Ok(None);
+            }
+            tokio::time::sleep(Duration::from_micros(500)).await;
+        }
+    }
+
     async fn recv_payload(
         &self,
         timeout_ms: Option<u64>,
@@ -342,7 +399,10 @@ impl Transport for CanTransport {
 
     async fn send_command(&self, command: &[u8]) -> Result<Vec<u8>, TransportError> {
         self.send_frame(command)?;
-        match self.recv_payload(Some(self.timeout_ms)).await? {
+        // PID-aware receive: skip DAQ-class frames (requeued for the router)
+        // and return the first CTO-class frame, so a DTO in flight while the
+        // command was sent can no longer be mistaken for the response.
+        match self.recv_cto_payload(self.timeout_ms).await? {
             Some((payload, _)) => Ok(payload),
             None => Err(TransportError::Timeout),
         }
@@ -636,6 +696,52 @@ mod tests {
         assert!(filter.accepts(0x320, 0x10));
         assert!(!filter.accepts(0x999, 0x10)); // unrelated DAQ traffic
         assert!(!filter.accepts(0x123, 0x10)); // master echo
+    }
+
+    #[test]
+    fn test_pop_first_cto_skips_and_requeues_dto_frames() {
+        // Queue: [DTO, DTO, RES, DTO] -> returns the RES, DTOs stay in order.
+        let dto = |pid: u8| (vec![pid, 0x11, 0x22], Some(1u64));
+        let res = (vec![0xFF, 0x00], Some(2u64));
+        let mut queue: VecDeque<(Vec<u8>, Option<u64>)> =
+            VecDeque::from(vec![dto(0x00), dto(0x60), res.clone(), dto(0x01)]);
+
+        let found = CanTransport::pop_first_cto(&mut queue).unwrap();
+        assert_eq!(found.0, vec![0xFF, 0x00]);
+        assert_eq!(found.1, Some(2));
+        // Leading DTOs requeued at the front, trailing DTO untouched.
+        let remaining: Vec<u8> = queue.iter().flat_map(|(d, _)| d.clone()).collect();
+        assert_eq!(
+            remaining,
+            vec![0x00, 0x11, 0x22, 0x60, 0x11, 0x22, 0x01, 0x11, 0x22]
+        );
+    }
+
+    #[test]
+    fn test_pop_first_cto_err_packet() {
+        // ERR (0xFE) is also a valid CTO response.
+        let mut queue: VecDeque<(Vec<u8>, Option<u64>)> =
+            VecDeque::from(vec![(vec![0x00, 0x01], None), (vec![0xFE, 0x22], None)]);
+        let found = CanTransport::pop_first_cto(&mut queue).unwrap();
+        assert_eq!(found.0, vec![0xFE, 0x22]);
+        assert_eq!(queue.len(), 1); // the DTO was requeued
+    }
+
+    #[test]
+    fn test_pop_first_cto_only_dtos_returns_none_and_keeps_order() {
+        let mut queue: VecDeque<(Vec<u8>, Option<u64>)> =
+            VecDeque::from(vec![(vec![0x00, 0x01], None), (vec![0x60, 0x02], None)]);
+        assert!(CanTransport::pop_first_cto(&mut queue).is_none());
+        // Queue unchanged (order and content preserved for the router).
+        assert_eq!(queue.pop_front().unwrap().0, vec![0x00, 0x01]);
+        assert_eq!(queue.pop_front().unwrap().0, vec![0x60, 0x02]);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_pop_first_cto_empty_queue() {
+        let mut queue: VecDeque<(Vec<u8>, Option<u64>)> = VecDeque::new();
+        assert!(CanTransport::pop_first_cto(&mut queue).is_none());
     }
 
     #[test]

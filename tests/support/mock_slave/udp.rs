@@ -17,6 +17,9 @@ use super::state::MockXcpState;
 pub struct MockXcpSlaveServer {
     stop_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
+    socket: Arc<UdpSocket>,
+    peer: Arc<Mutex<Option<SocketAddr>>>,
+    response_counter: Arc<AtomicU16>,
 }
 
 impl MockXcpSlaveServer {
@@ -25,6 +28,11 @@ impl MockXcpSlaveServer {
         let state = Arc::new(Mutex::new(MockXcpState::new(MockFixture::default())));
         let runtime = Arc::new(RuntimeState::new(socket.clone(), state));
         let (stop_tx, mut stop_rx) = watch::channel(false);
+        // Handles kept for `send_unsolicited` (must be cloned before the
+        // runtime is moved into the task).
+        let socket_handle = socket.clone();
+        let peer_handle = runtime.peer.clone();
+        let counter_handle = runtime.response_counter.clone();
 
         let task = tokio::spawn(async move {
             let mut buf = [0u8; 2048];
@@ -54,7 +62,28 @@ impl MockXcpSlaveServer {
             }
         });
 
-        Ok(Self { stop_tx, task })
+        Ok(Self {
+            stop_tx,
+            task,
+            socket: socket_handle,
+            peer: peer_handle,
+            response_counter: counter_handle,
+        })
+    }
+
+    /// Send an unsolicited XCP packet (e.g. an EV 0xFD or SERV 0xFC packet)
+    /// to the connected master, as a real slave may do asynchronously.
+    pub async fn send_unsolicited(&self, payload: &[u8]) -> io::Result<()> {
+        let peer = self.peer.lock().await;
+        let Some(peer) = *peer else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "mock slave has no peer yet",
+            ));
+        };
+        let counter = self.response_counter.fetch_add(1, Ordering::SeqCst);
+        let frame = build_frame(payload, counter);
+        self.socket.send_to(&frame, peer).await.map(|_| ())
     }
 
     pub async fn stop(self) -> io::Result<()> {

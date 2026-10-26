@@ -329,11 +329,43 @@ impl XcpSlave {
             }
         }
 
-        // Wait for response
+        // Wait for response.
+        //
+        // The CTO channel also carries asynchronous EV (0xFD) / SERV (0xFC)
+        // packets from the slave. Those are NOT responses to this command —
+        // consuming one as the response would leave the real RES in the
+        // channel to be misattributed to the NEXT command. Skip them and
+        // keep waiting for RES (0xFF) / ERR (0xFE) within the timeout.
         let mut rx = self.cto_rx.lock().await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
 
-        match timeout(Duration::from_secs(1), rx.recv()).await {
-            Ok(Some(msg)) => {
+        let response = loop {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break Err(SlaveError::ResponseTimeout);
+            }
+            match timeout(deadline - now, rx.recv()).await {
+                Ok(Some(msg)) => {
+                    let pid = msg.payload.first().copied().unwrap_or(0);
+                    if pid == 0xFF || pid == 0xFE {
+                        break Ok(msg);
+                    }
+                    tracing::warn!(
+                        "Skipping non-response CTO packet (pid=0x{:02X}) from {} while \
+                         waiting for response to cmd 0x{:02X}",
+                        pid,
+                        self.info.name,
+                        command.first().copied().unwrap_or(0xFF)
+                    );
+                    // keep waiting
+                }
+                Ok(None) => break Err(SlaveError::NotConnected),
+                Err(_) => break Err(SlaveError::ResponseTimeout),
+            }
+        };
+
+        match response {
+            Ok(msg) => {
                 // Capture incoming CTO
                 if let Some(log) = &self.packet_log {
                     if log.is_enabled() {
@@ -367,8 +399,7 @@ impl XcpSlave {
                 }
                 Ok(msg.payload)
             }
-            Ok(None) => Err(SlaveError::NotConnected),
-            Err(_) => Err(SlaveError::ResponseTimeout),
+            Err(e) => Err(e),
         }
     }
 
