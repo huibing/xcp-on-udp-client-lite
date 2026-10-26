@@ -323,6 +323,7 @@ Create a config file specifying the A2L, output files, connection, and measureme
 a2l = "ecu.a2l"                    # Path to A2L description file (required)
 
 [connection]
+type = "udp"                      # Optional: "udp" (default), "tcp" or "can"
 addr = "192.168.1.100:5555"        # Optional: falls back to A2L slave address
 
 [output]
@@ -342,11 +343,40 @@ channel = 1
 measurements = ["coolant_temp", "oil_temp"]
 ```
 
+- If `[connection]` is omitted, the transport is auto-selected from the A2L file
+  (priority: UDP > CAN > TCP)
 - If `[connection].addr` is omitted, the slave address is read from the A2L file
 - If `[[events]]` is omitted, all measurements from the A2L file are selected
 - Both MF4 and CSV can be recorded simultaneously; at least one `[output]` path is required
 - Invalid measurement names are warned and skipped (recording continues with valid ones)
 - On CTRL+C: recording stops → DAQ stops → `FREE_DAQ` restores the slave → disconnect
+
+##### CAN Transport
+
+Set `type = "can"` in `[connection]` to record over XCP-on-CAN (e.g. PCAN):
+
+```toml
+[connection]
+type = "can"
+channel = "auto"              # or e.g. "PCAN_USBBUS1"; "auto" picks the first free channel
+can_id = 0x7fb                # CAN_ID_MASTER (command CAN ID)
+baudrate = 500000             # Nominal bit rate in bit/s
+data_baudrate = 2000000       # Optional: presence enables CAN-FD
+slave_id = 0x7fc              # CAN_ID_SLAVE (response CAN ID)
+daq_ids = [0x7fd]             # DAQ DTO CAN IDs
+max_dlc_required = false      # Pad command frames to the maximum DLC
+#driver = "pcan"              # Optional: CAN driver id (default: "pcan")
+#device_id = "3"              # Optional: stable device id (overrides channel)
+#controller = 0               # Optional: controller index within the device
+```
+
+- Undeclared CAN fields fall back to the A2L `XCP_ON_CAN` block
+  (`BAUDRATE`, `CAN_FD_DATA_TRANSFER_BAUDRATE`, `CAN_ID_SLAVE`, `DAQ_LIST_CAN_ID`,
+  `MAX_DLC_REQUIRED`); `can_id` (`CAN_ID_MASTER`) is required from the config or the A2L
+- `channel`/`driver`/`device_id` select the local CAN adapter (no A2L equivalent);
+  `channel = "auto"` picks the first free channel
+- CAN environment variables (`PCAN_BASIC_DLL`, `PCAN_BITRATE`, `PCAN_FD_CLOCK`) apply
+  as documented in [Transport Configuration](#transport-configuration)
 
 ### Verify ECU Flash Checksums (CLI)
 

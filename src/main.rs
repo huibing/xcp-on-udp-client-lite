@@ -81,7 +81,18 @@ enum Mode {
     ///   a2l = "path/to/description.a2l"
     ///
     ///   [connection]
+    ///   type = "udp"                 # "udp" (default), "tcp" or "can"
     ///   addr = "192.168.1.100:5555"   # optional, falls back to A2L
+    ///
+    ///   # CAN example (undeclared fields fall back to the A2L XCP_ON_CAN block):
+    ///   # [connection]
+    ///   # type = "can"
+    ///   # channel = "auto"            # or e.g. "PCAN_USBBUS1"
+    ///   # can_id = 0x7fb              # CAN_ID_MASTER
+    ///   # baudrate = 500000
+    ///   # data_baudrate = 2000000     # presence enables CAN-FD
+    ///   # slave_id = 0x7fc            # CAN_ID_SLAVE
+    ///   # daq_ids = [0x7fd]           # DAQ DTO CAN IDs
     ///
     ///   [output]
     ///   mf4 = "recording.mf4"        # optional (at least one required)

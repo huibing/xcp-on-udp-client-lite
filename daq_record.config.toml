@@ -6,11 +6,31 @@
 # At least one output format must be specified.
 
 # Path to A2L description file (required)
-a2l = "abc.a2l"
+a2l = "pms-a.a2l"
 
 [connection]
-# Slave address (IP:port). If omitted, uses the address from the A2L file.
-addr = "192.168.1.100:5555"
+# Transport type: "udp" (default), "tcp" or "can".
+# When omitted, the transport is auto-selected from the A2L file
+# (priority: UDP > CAN > TCP).
+type = "can"
+
+# Slave address (IP:port) for UDP/TCP. If omitted, uses the address from the A2L file.
+# addr = "192.168.1.100:5555"
+
+# --- CAN transport (set type = "can") ---
+# Undeclared fields fall back to the A2L XCP_ON_CAN block
+# (BAUDRATE, CAN_ID_SLAVE, DAQ_LIST_CAN_ID, MAX_DLC_REQUIRED, ...).
+#type = "can"
+#driver = "pcan"               # CAN driver id (default: "pcan")
+#channel = "auto"              # CAN channel, e.g. "PCAN_USBBUS1" ("auto" = first free)
+#device_id = "3"               # Stable device id (overrides channel when set)
+#controller = 0                # Controller index within the device
+#can_id = 0x7fb                # CAN_ID_MASTER (required unless the A2L declares it)
+#baudrate = 500000             # Nominal bit rate in bit/s
+#data_baudrate = 2000000       # Data-phase bit rate; presence enables CAN-FD
+#slave_id = 0x7fc              # CAN_ID_SLAVE (response CAN ID)
+#daq_ids = [0x7fd]             # DAQ DTO CAN IDs
+#max_dlc_required = false      # Pad command frames to the maximum DLC
 
 [output]
 # Output files — specify one or both (at least one is required)
@@ -29,8 +49,8 @@ event_channel = 0
 
 [[events]]
 channel = 0
-measurements = ["g_ethxcp_tx_counter", "g_ethxcp_rx_counter"]
+measurements = ["CAN1_TX_PMS03_PMS_BATTMODEREQ", "CAN1_TX_PMS02_PMS_MAXTEMP", "CAN1_TX_PMS02_PMS_BUSVOLTAGE"]
 
 [[events]]
 channel = 1
-measurements = ["g_xcp_recv_cmd"]
+measurements = ["AIN_v_Voltage", "DIN_b_SwSts"]
