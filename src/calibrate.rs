@@ -8,11 +8,13 @@ use dcm_utils::block::Block as DcmBlock;
 use dcm_utils::value::Value as DcmValue;
 use dcm_utils::DcmData;
 use std::path::Path;
-use xcp_client::transport::TransportConfig;
+use xcp_client::transport::transport_display;
 use xcp_client::{
     matrix_to_flat, A2lReader, CalibrationManager, CalibrationParam, CalibrationType,
     CalibrationValue, PageMode, StorageOrder, XcpClient,
 };
+
+use crate::cli_connection::ConnectionArgs;
 
 /// Run the calibrate subcommand
 pub async fn run_calibrate(
@@ -20,7 +22,7 @@ pub async fn run_calibrate(
     var: Option<String>,
     value: Option<String>,
     dcm_path: Option<String>,
-    addr_override: Option<String>,
+    connection: &ConnectionArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Validate arguments
     let mode = match (&var, &value, &dcm_path) {
@@ -51,16 +53,11 @@ pub async fn run_calibrate(
     println!("Loading A2L file: {}", a2l_path);
     let reader = A2lReader::load(a2l_path).map_err(|e| format!("Failed to load A2L: {}", e))?;
 
-    // Get slave address (override or from A2L)
-    let slave_addr = if let Some(addr) = addr_override {
-        addr
-    } else {
-        let addrs = reader.get_slave_addresses();
-        addrs
-            .into_iter()
-            .next()
-            .ok_or("No slave address found in A2L file. Use --addr to specify one.")?
-    };
+    // Get the transport (flags merged with the A2L transport blocks).
+    // Auto-detection means an XCP-on-CAN-only ECU needs no extra flags.
+    let transport_config = connection
+        .resolve(&reader.get_transport_configs())
+        .map_err(|e| format!("Failed to resolve transport: {}", e))?;
 
     // Build calibration manager from A2L
     let cal_manager = CalibrationManager::from_a2l(a2l_path)
@@ -99,11 +96,8 @@ pub async fn run_calibrate(
     println!("  {} variable(s) to write", jobs.len());
 
     // Connect to slave
-    println!("\nConnecting to slave at {}...", slave_addr);
+    println!("\nConnecting via {}...", transport_display(&transport_config));
     let mut client = XcpClient::new();
-    let transport_config = TransportConfig::Udp {
-        addr: slave_addr.clone(),
-    };
     let slave_id = client
         .connect_slave("calibrate-target", transport_config, None)
         .await

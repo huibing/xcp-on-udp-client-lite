@@ -2,6 +2,7 @@
 
 mod can;
 mod message_router;
+mod resolve;
 mod tcp;
 mod transport;
 mod udp;
@@ -12,6 +13,9 @@ pub use can::{
     CanDeviceError, CanDeviceInfo, CanDriver, CanFrame,
 };
 pub use message_router::{MessageRouter, PacketType, XcpMessage};
+pub use resolve::{
+    parse_transport_type, resolve_transport_config, transport_display, TransportOverrides,
+};
 pub use tcp::TcpTransport;
 pub use transport::{Transport, TransportConfig, TransportError, TransportFactory, TransportType};
 pub use udp::UdpTransport;

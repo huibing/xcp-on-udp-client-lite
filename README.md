@@ -287,9 +287,23 @@ cargo run --release -- calibrate --a2l ecu.a2l --var my_params.delay --value 100
 # Write an array value (comma-separated)
 cargo run --release -- calibrate --a2l ecu.a2l --var my_params.array --value "1,2,3,4"
 
-# Override slave address (default is read from A2L)
+# Override the UDP/TCP slave address (default is read from A2L)
 cargo run --release -- calibrate --a2l ecu.a2l --var my_params.delay --value 100 --addr 192.168.1.10:5555
+
+# XCP-on-CAN ECU: transport is auto-detected from the A2L XCP_ON_CAN block
+cargo run --release -- calibrate --a2l ecu.a2l --var my_params.delay --value 100
+
+# XCP-on-CAN with an explicit adapter channel / CAN IDs
+cargo run --release -- calibrate --a2l ecu.a2l --var my_params.delay --value 100 \
+  --transport can --can-channel PCAN_USBBUS1 --can-id 0x550 --slave-id 0x551 --baudrate 500000
 ```
+
+The transport is auto-selected from the A2L file when no connection flags are
+given (priority: UDP > CAN > TCP), so an ECU described only by an
+`XCP_ON_CAN` block works without extra flags. Any CAN setting (`--can-id`,
+`--can-channel`, …) also selects CAN implicitly; `--transport udp|tcp|can`
+forces a specific transport. See [CAN Transport](#can-transport) for the full
+flag list.
 
 #### DCM File Mode
 
@@ -301,6 +315,9 @@ cargo run --release -- calibrate --a2l ecu.a2l --dcm calibration.DCM
 
 # With address override
 cargo run --release -- calibrate --a2l ecu.a2l --dcm calibration.DCM --addr 192.168.1.10:5555
+
+# Over XCP-on-CAN (transport auto-detected from the A2L)
+cargo run --release -- calibrate --a2l ecu.a2l --dcm calibration.DCM --transport can --can-channel auto
 ```
 
 DCM files contain physical values (display units). The tool automatically converts physical values to raw ECU representation using the COMPU_METHOD defined in the A2L file before writing.
@@ -378,6 +395,28 @@ max_dlc_required = false      # Pad command frames to the maximum DLC
 - CAN environment variables (`PCAN_BASIC_DLL`, `PCAN_BITRATE`, `PCAN_FD_CLOCK`) apply
   as documented in [Transport Configuration](#transport-configuration)
 
+#### CAN Flags for `calibrate` / `verify`
+
+`calibrate` and `verify` accept the same CAN settings as CLI flags (all optional;
+undeclared values fall back to the A2L `XCP_ON_CAN` block):
+
+```bash
+cargo run --release -- calibrate --a2l ecu.a2l --var my_param --value 1 \
+  --transport can \
+  --can-channel PCAN_USBBUS1 \   # or "auto" (default)
+  --can-driver pcan \            # optional driver id
+  --can-device 3 \               # optional stable device id
+  --can-controller 0 \           # optional controller index
+  --can-id 0x550 \               # CAN_ID_MASTER
+  --slave-id 0x551 \             # CAN_ID_SLAVE
+  --baudrate 500000 \            # nominal bit rate
+  --data-baudrate 2000000 \      # optional: enables CAN-FD
+  --daq-ids 0x7fd,0x7fe \        # optional DAQ DTO IDs
+  --max-dlc-required             # optional: pad command frames
+```
+
+CAN IDs and bit rates accept decimal or `0x`-prefixed hexadecimal values.
+
 ### Verify ECU Flash Checksums (CLI)
 
 Verify ECU flash memory integrity by comparing BUILD_CHECKSUM results against an Intel HEX reference file:
@@ -391,6 +430,9 @@ cargo run --release -- verify --a2l ecu.a2l --hex firmware.hex --max-block-size 
 
 # With address override
 cargo run --release -- verify --a2l ecu.a2l --hex firmware.hex --addr 192.168.1.10:5555
+
+# Over XCP-on-CAN (transport auto-detected from the A2L)
+cargo run --release -- verify --a2l ecu.a2l --hex firmware.hex
 ```
 
 The verify workflow:

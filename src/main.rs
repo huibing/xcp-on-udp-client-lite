@@ -1,12 +1,14 @@
 //! XCP Client - Terminal UI / Web UI Application
 
 mod calibrate;
+mod cli_connection;
 mod daq_record;
 mod tui;
 mod verify;
 
 use chrono::Local;
 use clap::{Parser, Subcommand};
+use cli_connection::ConnectionArgs;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::time::Duration;
@@ -39,6 +41,11 @@ enum Mode {
         port: u16,
     },
     /// Calibrate ECU parameters non-interactively
+    ///
+    /// The transport is auto-selected from the A2L file (UDP > CAN > TCP), so an
+    /// ECU that only supports XCP-on-CAN works without extra flags. Use
+    /// `--transport`, `--addr` or the `--can-*` flags to override.
+    #[command(verbatim_doc_comment)]
     Calibrate {
         /// Path to A2L description file
         #[arg(long)]
@@ -52,11 +59,13 @@ enum Mode {
         /// Path to DCM file with calibration values (DCM mode)
         #[arg(long)]
         dcm: Option<String>,
-        /// Slave address override (default: from A2L)
-        #[arg(long)]
-        addr: Option<String>,
+        #[command(flatten)]
+        connection: ConnectionArgs,
     },
     /// Verify ECU flash memory via BUILD_CHECKSUM
+    ///
+    /// The transport is auto-selected from the A2L file (UDP > CAN > TCP).
+    #[command(verbatim_doc_comment)]
     Verify {
         /// Path to A2L description file
         #[arg(long)]
@@ -64,12 +73,11 @@ enum Mode {
         /// Path to Intel HEX file
         #[arg(long)]
         hex: String,
-        /// Slave address override (default: from A2L)
-        #[arg(long)]
-        addr: Option<String>,
         /// Max block size for BUILD_CHECKSUM (default: 16 KiB)
         #[arg(long)]
         max_block_size: Option<u32>,
+        #[command(flatten)]
+        connection: ConnectionArgs,
     },
     /// Record DAQ measurements to MF4 and/or CSV files.
     ///
@@ -188,17 +196,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             var,
             value,
             dcm,
-            addr,
+            connection,
         }) => {
-            calibrate::run_calibrate(&a2l, var, value, dcm, addr).await?;
+            calibrate::run_calibrate(&a2l, var, value, dcm, &connection).await?;
         }
         Some(Mode::Verify {
             a2l,
             hex,
-            addr,
             max_block_size,
+            connection,
         }) => {
-            verify::run_verify(&a2l, &hex, addr, max_block_size).await?;
+            verify::run_verify(&a2l, &hex, &connection, max_block_size).await?;
         }
         Some(Mode::DaqRecord { config }) => {
             daq_record::run_daq_record(&config).await?;

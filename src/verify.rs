@@ -6,17 +6,20 @@
 //! Usage:
 //!   cargo run -- verify --a2l abc.a2l --hex firmware.hex
 //!   cargo run -- verify --a2l abc.a2l --hex firmware.hex --addr 192.168.1.100:5555
+//!   cargo run -- verify --a2l abc.a2l --hex firmware.hex --transport can --can-channel auto
 
 use xcp_client::checksum::{verify_segments, SegmentStatus, VerificationReport};
 use xcp_client::hex::HexImage;
-use xcp_client::transport::TransportConfig;
+use xcp_client::transport::transport_display;
 use xcp_client::{A2lReader, XcpClient};
+
+use crate::cli_connection::ConnectionArgs;
 
 /// Run the verify subcommand
 pub async fn run_verify(
     a2l_path: &str,
     hex_path: &str,
-    addr_override: Option<String>,
+    connection: &ConnectionArgs,
     max_block_size: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load A2L file
@@ -57,23 +60,14 @@ pub async fn run_verify(
         std::process::exit(1);
     }
 
-    // Get slave address
-    let slave_addr = if let Some(addr) = addr_override {
-        addr
-    } else {
-        let addrs = reader.get_slave_addresses();
-        addrs
-            .into_iter()
-            .next()
-            .ok_or("No slave address found in A2L file. Use --addr to specify one.")?
-    };
+    // Get the transport (flags merged with the A2L transport blocks)
+    let transport_config = connection
+        .resolve(&reader.get_transport_configs())
+        .map_err(|e| format!("Failed to resolve transport: {}", e))?;
 
     // Connect to slave
-    println!("\nConnecting to slave at {}...", slave_addr);
+    println!("\nConnecting via {}...", transport_display(&transport_config));
     let mut client = XcpClient::new();
-    let transport_config = TransportConfig::Udp {
-        addr: slave_addr.clone(),
-    };
     let slave_id = client
         .connect_slave("verify-target", transport_config, None)
         .await

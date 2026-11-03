@@ -9,7 +9,10 @@
 use serde::Deserialize;
 use tokio::io::AsyncBufReadExt;
 use xcp_client::a2l::A2lTransportConfig;
-use xcp_client::transport::{TransportConfig, TransportType};
+use xcp_client::transport::{
+    parse_transport_type, resolve_transport_config as resolve_transport, transport_display,
+    TransportConfig, TransportOverrides,
+};
 use xcp_client::{A2lReader, DaqManager, XcpClient};
 
 /// TOML config file structure
@@ -67,18 +70,22 @@ pub struct ConnectionConfig {
 }
 
 impl ConnectionConfig {
-    /// True when any CAN-specific field is declared.
-    fn has_can_fields(&self) -> bool {
-        self.driver.is_some()
-            || self.channel.is_some()
-            || self.device_id.is_some()
-            || self.controller.is_some()
-            || self.can_id.is_some()
-            || self.baudrate.is_some()
-            || self.data_baudrate.is_some()
-            || self.slave_id.is_some()
-            || self.daq_ids.is_some()
-            || self.max_dlc_required.is_some()
+    /// Convert the TOML `[connection]` section into transport overrides.
+    fn overrides(&self) -> Result<TransportOverrides, String> {
+        Ok(TransportOverrides {
+            transport_type: parse_transport_type(self.transport_type.as_deref())?,
+            addr: self.addr.clone(),
+            driver: self.driver.clone(),
+            channel: self.channel.clone(),
+            device_id: self.device_id.clone(),
+            controller: self.controller,
+            can_id: self.can_id,
+            baudrate: self.baudrate,
+            data_baudrate: self.data_baudrate,
+            slave_id: self.slave_id,
+            daq_ids: self.daq_ids.clone(),
+            max_dlc_required: self.max_dlc_required,
+        })
     }
 }
 
@@ -106,161 +113,17 @@ pub struct EventConfig {
 
 /// Resolve the XCP transport configuration from the config file and the A2L file.
 ///
-/// - When `[connection]` declares a transport `type`, that transport is used and
-///   undeclared fields fall back to the matching A2L transport block.
-/// - When `[connection]` is omitted (or declares neither `type` nor `addr`), the
-///   transport is auto-selected from the A2L file with UDP > CAN > TCP priority.
+/// Thin wrapper around the shared
+/// [`resolve_transport_config`](xcp_client::transport::resolve_transport_config)
+/// helper: the `[connection]` section becomes transport overrides, and anything
+/// not declared falls back to the A2L transport blocks (with UDP > CAN > TCP
+/// priority when no type is declared).
 fn resolve_transport_config(
     connection: Option<&ConnectionConfig>,
     a2l_configs: &[A2lTransportConfig],
 ) -> Result<TransportConfig, String> {
-    let Some(conn) = connection else {
-        return auto_select_transport(a2l_configs);
-    };
-
-    match parse_transport_type(conn.transport_type.as_deref())? {
-        Some(TransportType::Udp) => {
-            let addr = conn
-                .addr
-                .clone()
-                .or_else(|| find_ip_addr(a2l_configs, TransportType::Udp))
-                .ok_or(
-                    "UDP transport requires [connection].addr or an XCP_ON_UDP_IP block in the A2L file".to_string(),
-                )?;
-            Ok(TransportConfig::Udp { addr })
-        }
-        Some(TransportType::Tcp) => {
-            let addr = conn
-                .addr
-                .clone()
-                .or_else(|| find_ip_addr(a2l_configs, TransportType::Tcp))
-                .ok_or(
-                    "TCP transport requires [connection].addr or an XCP_ON_TCP_IP block in the A2L file".to_string(),
-                )?;
-            Ok(TransportConfig::Tcp { addr })
-        }
-        Some(TransportType::Can) => build_can_transport_config(conn, a2l_configs),
-        None => {
-            // No type declared: an explicit addr selects UDP (backward compatible).
-            if let Some(addr) = conn.addr.clone() {
-                return Ok(TransportConfig::Udp { addr });
-            }
-            if conn.has_can_fields() {
-                return Err(
-                    "[connection] declares CAN fields but no type — add `type = \"can\"`"
-                        .to_string(),
-                );
-            }
-            auto_select_transport(a2l_configs)
-        }
-    }
-}
-
-/// Parse the `[connection].type` value. `None` means "not declared".
-fn parse_transport_type(value: Option<&str>) -> Result<Option<TransportType>, String> {
-    match value.map(str::to_ascii_lowercase).as_deref() {
-        None => Ok(None),
-        Some("udp") => Ok(Some(TransportType::Udp)),
-        Some("tcp") => Ok(Some(TransportType::Tcp)),
-        Some("can") => Ok(Some(TransportType::Can)),
-        Some(other) => Err(format!(
-            "Unknown [connection].type '{}': expected \"udp\", \"tcp\" or \"can\"",
-            other
-        )),
-    }
-}
-
-/// Auto-select a transport from the A2L transport blocks (UDP > CAN > TCP).
-fn auto_select_transport(a2l_configs: &[A2lTransportConfig]) -> Result<TransportConfig, String> {
-    for ty in [TransportType::Udp, TransportType::Can, TransportType::Tcp] {
-        if let Some(config) = a2l_configs.iter().find(|c| c.transport_type() == ty) {
-            return Ok(config.to_transport_config());
-        }
-    }
-    Err("No transport found in config or A2L file".to_string())
-}
-
-/// Find an IP address for the given transport type in the A2L transport blocks.
-fn find_ip_addr(a2l_configs: &[A2lTransportConfig], ty: TransportType) -> Option<String> {
-    a2l_configs.iter().find_map(|config| match config {
-        A2lTransportConfig::Udp { addr } if ty == TransportType::Udp => Some(addr.clone()),
-        A2lTransportConfig::Tcp { addr } if ty == TransportType::Tcp => Some(addr.clone()),
-        _ => None,
-    })
-}
-
-/// Build a CAN transport config, merging `[connection]` fields over the A2L
-/// `XCP_ON_CAN` block (config values take precedence).
-fn build_can_transport_config(
-    conn: &ConnectionConfig,
-    a2l_configs: &[A2lTransportConfig],
-) -> Result<TransportConfig, String> {
-    // Fields from the A2L XCP_ON_CAN block, used as fallbacks.
-    let (a2l_can_id, a2l_baudrate, a2l_data_baudrate, a2l_slave_id, a2l_daq_ids, a2l_max_dlc) =
-        match a2l_configs
-            .iter()
-            .find(|config| matches!(config, A2lTransportConfig::Can { .. }))
-        {
-            Some(A2lTransportConfig::Can {
-                can_id,
-                baudrate,
-                data_baudrate,
-                slave_id,
-                daq_ids,
-                max_dlc_required,
-            }) => (
-                Some(*can_id),
-                *baudrate,
-                *data_baudrate,
-                *slave_id,
-                daq_ids.clone(),
-                *max_dlc_required,
-            ),
-            _ => (None, None, None, None, Vec::new(), false),
-        };
-
-    let can_id = conn.can_id.or(a2l_can_id).ok_or(
-        "CAN transport requires [connection].can_id (CAN_ID_MASTER) or an XCP_ON_CAN block in the A2L file",
-    )?;
-
-    Ok(TransportConfig::Can {
-        driver: conn.driver.clone(),
-        channel: conn
-            .channel
-            .clone()
-            .unwrap_or_else(|| "auto".to_string()),
-        device_id: conn.device_id.clone(),
-        controller: conn.controller,
-        can_id,
-        baudrate: conn.baudrate.or(a2l_baudrate),
-        data_baudrate: conn.data_baudrate.or(a2l_data_baudrate),
-        slave_id: conn.slave_id.or(a2l_slave_id),
-        daq_ids: conn.daq_ids.clone().unwrap_or(a2l_daq_ids),
-        max_dlc_required: conn.max_dlc_required.unwrap_or(a2l_max_dlc),
-    })
-}
-
-/// Human-readable one-line description of a transport configuration.
-fn transport_display(config: &TransportConfig) -> String {
-    match config {
-        TransportConfig::Udp { addr } => format!("UDP {}", addr),
-        TransportConfig::Tcp { addr } => format!("TCP {}", addr),
-        TransportConfig::Can {
-            channel,
-            can_id,
-            baudrate,
-            data_baudrate,
-            ..
-        } => {
-            let mode = if data_baudrate.is_some() { "CAN-FD" } else { "CAN" };
-            let rate = match (baudrate, data_baudrate) {
-                (Some(nom), Some(data)) => format!(" {}/{} bit/s", nom, data),
-                (Some(nom), None) => format!(" {} bit/s", nom),
-                _ => String::new(),
-            };
-            format!("{} channel {} ID 0x{:X}{}", mode, channel, can_id, rate)
-        }
-    }
+    let overrides = connection.map(ConnectionConfig::overrides).transpose()?;
+    resolve_transport(overrides.as_ref(), a2l_configs)
 }
 
 /// Run the daq-record subcommand
@@ -816,7 +679,11 @@ csv = "recording.csv"
             max_dlc_required: None,
         };
         let err = resolve_transport_config(Some(&conn), &[]).unwrap_err();
-        assert!(err.contains("can_id"), "unexpected error: {}", err);
+        assert!(
+            err.contains("CAN_ID_MASTER"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
@@ -907,6 +774,8 @@ csv = "recording.csv"
 
     #[test]
     fn test_parse_transport_type() {
+        use xcp_client::transport::TransportType;
+
         assert_eq!(parse_transport_type(None).unwrap(), None);
         assert_eq!(
             parse_transport_type(Some("udp")).unwrap(),
