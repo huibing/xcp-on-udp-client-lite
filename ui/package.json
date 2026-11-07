@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "dev:harness": "vite --config vite.harness.config.js --port 5200"
   },
   "dependencies": {
     "@tauri-apps/cli": "^2.11.4",

@@ -96,6 +96,12 @@
                         @click.stop="toggleGraph(v)"
                         title="Toggle signal graph">📈</span>
                       <span class="card-info-btn" @click.stop="showInfo(v)">ℹ</span>
+                      <StylePicker
+                        v-if="hasStyleChoices(kindOf(v))"
+                        :kind="kindOf(v)"
+                        :model-value="styleOf(v)"
+                        @update:model-value="id => setDisplayStyle(v, id)"
+                      />
                       <span
                         class="card-event-btn"
                         :class="{ 'card-locked': mode !== 'idle' }"
@@ -114,8 +120,14 @@
                     ⏱ {{ getEventName(v.config_device_id || v.device_id, v.event_channel) }}
                   </div>
                   <div class="card-value">
-                    <span class="val-num">{{ getLiveValue(v) }}</span>
-                    <span v-if="v.unit" class="val-unit">{{ v.unit }}</span>
+                    <CardDisplay
+                      :kind="kindOf(v)"
+                      :style-id="styleOf(v)"
+                      :state="boolStateOf(v)"
+                      :text="getLiveValue(v)"
+                      :labels="boolLabelsOf(v)"
+                      :unit="v.unit || ''"
+                    />
                   </div>
                 </div>
               </div>
@@ -141,6 +153,12 @@
                     <span class="card-device">{{ v.device_name }}</span>
                     <div class="card-actions">
                       <span class="card-info-btn" @click.stop="showInfo(v)">ℹ</span>
+                      <StylePicker
+                        v-if="hasStyleChoices(kindOf(v))"
+                        :kind="kindOf(v)"
+                        :model-value="styleOf(v)"
+                        @update:model-value="id => setDisplayStyle(v, id)"
+                      />
                       <span
                         class="card-remove"
                         :class="{ 'card-locked': mode !== 'idle' }"
@@ -150,9 +168,18 @@
                   </div>
                   <div class="card-name">{{ v.name }}</div>
                   <div class="card-value">
-                    <span class="val-num">{{ calValues[calKey(v)] ?? '—' }}</span>
+                    <CardDisplay
+                      :kind="kindOf(v)"
+                      :style-id="styleOf(v)"
+                      :state="boolStateOf(v)"
+                      :text="calValues[calKey(v)] ?? '—'"
+                      :labels="boolLabelsOf(v)"
+                      :unit="v.unit || ''"
+                      :editable="canToggleBoolean(v)"
+                      :busy="!!toggleBusy[varKey(v)]"
+                      @select="next => onBooleanSelect(v, next)"
+                    />
                     <span class="change-mark" :class="getChangeMark(v)">{{ getChangeMarkChar(v) }}</span>
-                    <span v-if="v.unit" class="val-unit">{{ v.unit }}</span>
                   </div>
                 </div>
               </div>
@@ -840,6 +867,11 @@ import SignalChart from './SignalChart.vue'
 import XcpPacketBrowser from './XcpPacketBrowser.vue'
 import { useTheme } from '../composables/useTheme.js'
 import { useMf4Settings } from '../composables/useMf4Settings.js'
+import CardDisplay from '../experiment/components/CardDisplay.vue'
+import StylePicker from '../experiment/components/StylePicker.vue'
+import { VALUE_KIND, resolveValueKind } from '../experiment/display/kinds.js'
+import { hasStyleChoices, styleIdFor } from '../experiment/display/styles.js'
+import { booleanLabels, booleanState, booleanWriteValue } from '../experiment/display/boolean.js'
 
 const STORAGE_KEY = 'exp_tauri_state_v3'
 
@@ -1340,6 +1372,75 @@ function startHistResize(e) {
 // cal device_id for commands that need config dev.id (cal_read / cal_write etc.)
 function configId(v) { return v.config_device_id || v.device_id }
 
+// ── Card display styles ───────────────────────────────────────────────────────
+// Which renderer a card uses is stored per variable as `v.display_style` (a
+// plain id from the registry in ../experiment/display/styles.js). Only boolean
+// variables offer a choice today; every other kind falls through to the plain
+// text renderer, and adding renderers for them needs no change in this file.
+// The choice travels with the tab state (localStorage) and with the saved
+// experiment file, so a reload or a colleague's file restores the same layout.
+
+/** Per-variable write-in-flight flag for the inline boolean controls. */
+const toggleBusy = reactive({})
+
+function kindOf(v) {
+  return resolveValueKind(v)
+}
+
+function styleOf(v) {
+  return styleIdFor(v, kindOf(v))
+}
+
+/** Keep a user's style choice when the variable object is refreshed from the backend. */
+function styleCarry(v) {
+  return v && v.display_style ? { display_style: v.display_style } : {}
+}
+
+/** Persist a style choice. `watch(tabs, saveState)` picks up the deep change. */
+function setDisplayStyle(v, id) {
+  if (!id || styleOf(v) === id) return
+  v.display_style = id
+  saveState()
+}
+
+/** Raw value behind a card: DAQ stream for measurements, read-back text for cals. */
+function rawValueOf(v) {
+  if (v.kind === 'measurement') return liveValues[`${v.device_id}:${v.name}`]
+  return calValues[calKey(v)]
+}
+
+function boolStateOf(v) {
+  return booleanState(rawValueOf(v), v)
+}
+
+function boolLabelsOf(v) {
+  return booleanLabels(v)
+}
+
+/**
+ * Inline writes are only allowed where the backend accepts a calibration write:
+ * working page, connected device, and a boolean parameter.
+ */
+function canToggleBoolean(v) {
+  return v.kind === 'calibration'
+    && kindOf(v) === VALUE_KIND.BOOLEAN
+    && pageMode.value === 'working'
+    && v.connected === true
+}
+
+async function onBooleanSelect(v, next) {
+  if (!canToggleBoolean(v)) return
+  const key = varKey(v)
+  if (toggleBusy[key]) return
+  toggleBusy[key] = true
+  try {
+    const res = await writeCalValue(v, booleanWriteValue(v, next))
+    if (!res.ok) toast(res.error || 'Write failed', true)
+  } finally {
+    toggleBusy[key] = false
+  }
+}
+
 // ── Tab management ────────────────────────────────────────────────────────────
 function addTab() {
   const id = `tab-${Date.now()}`
@@ -1555,56 +1656,72 @@ function editCal(v) {
   calEditErr.value = false
 }
 
+/**
+ * Write one calibration value and keep every side effect in a single place:
+ * read-back into `calValues`, DCM change tracking and the calibration history
+ * row (the working-page HEX patch happens Rust-side inside `cal_write`).
+ * Shared by the edit modal and the inline boolean toggle so the two paths can
+ * never drift apart.
+ *
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+async function writeCalValue(v, value) {
+  const originalVal = calValues[calKey(v)]
+  try {
+    const res = await invoke('cal_write', {
+      deviceId: configId(v),
+      idx: v.idx,
+      value,
+    })
+    if (!res.success) return { ok: false, error: res.error || 'Write failed' }
+
+    const rr = await invoke('cal_read', { deviceId: configId(v), idx: v.idx })
+    if (rr.success) calValues[calKey(v)] = rr.display_value ?? rr.value
+
+    // Track modification for DCM export
+    const cpKey = `${configId(v)}:${v.name}`
+    changedParams[cpKey] = {
+      original_value: originalVal != null ? String(originalVal) : '',
+      current_value: String(value),
+    }
+
+    // Append to calibration history
+    calHistory.value.push({
+      ts: Date.now(),
+      device_name: v.device_name,
+      var_name: v.name,
+      calType: v.calType || v.characteristic_type || 'VALUE',
+      kind: 'scalar',
+      original: originalVal != null ? String(originalVal) : '—',
+      newVal: String(value),
+      element: null,
+      deviceId: configId(v),
+      rawDeviceId: v.device_id,
+      idx: v.idx,
+      undoLoading: false,
+      undone: false,
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+}
+
 async function saveCal() {
   if (!calEditTarget.value) return
   calWriting.value = true
   calEditMsg.value = ''
   calEditErr.value = false
   const v = calEditTarget.value
-  try {
-    const originalVal = calValues[calKey(v)]
-    const res = await invoke('cal_write', {
-      deviceId: configId(v),
-      idx: v.idx,
-      value: calEditValue.value
-    })
-    if (res.success) {
-      const rr = await invoke('cal_read', { deviceId: configId(v), idx: v.idx })
-      if (rr.success) calValues[calKey(v)] = rr.display_value ?? rr.value
-      // Track modification for DCM export
-      const cpKey = `${configId(v)}:${v.name}`
-      changedParams[cpKey] = {
-        original_value: originalVal != null ? String(originalVal) : '',
-        current_value: calEditValue.value,
-      }
-      // Append to calibration history
-      calHistory.value.push({
-        ts: Date.now(),
-        device_name: v.device_name,
-        var_name: v.name,
-        calType: v.calType || v.characteristic_type || 'VALUE',
-        kind: 'scalar',
-        original: originalVal != null ? String(originalVal) : '—',
-        newVal: calEditValue.value,
-        element: null,
-        deviceId: configId(v),
-        rawDeviceId: v.device_id,
-        idx: v.idx,
-        undoLoading: false,
-        undone: false,
-      })
-      calEditMsg.value = '✓ Written successfully'
-      calEditErr.value = false
-      setTimeout(() => { calEditTarget.value = null }, 700)
-    } else {
-      calEditMsg.value = res.error || 'Write failed'
-      calEditErr.value = true
-    }
-  } catch (e) {
-    calEditMsg.value = String(e)
+  const res = await writeCalValue(v, calEditValue.value)
+  calWriting.value = false
+  if (res.ok) {
+    calEditMsg.value = '✓ Written successfully'
+    calEditErr.value = false
+    setTimeout(() => { calEditTarget.value = null }, 700)
+  } else {
+    calEditMsg.value = res.error || 'Write failed'
     calEditErr.value = true
-  } finally {
-    calWriting.value = false
   }
 }
 
@@ -2021,7 +2138,7 @@ async function remapStaleDeviceIds() {
           p.name === v.name &&
           ((p.config_device_id || p.device_id) === devId || p.device_name === v.device_name)
         )
-        newVars.push(fresh ? { ...fresh } : { ...v })
+        newVars.push(fresh ? { ...fresh, ...styleCarry(v) } : { ...v })
         continue
       }
 
@@ -2035,7 +2152,7 @@ async function remapStaleDeviceIds() {
       }
 
       if (fresh) {
-        newVars.push({ ...fresh })
+        newVars.push({ ...fresh, ...styleCarry(v) })
         remapped++
       } else {
         removed.push({
@@ -2644,7 +2761,9 @@ function buildExpSnapshot() {
     }
   }
   return {
-    version: 1,
+    // v2 adds the optional per-variable `display_style`. v1 files still load:
+    // a missing style simply resolves to the kind's default renderer.
+    version: 2,
     title: expTitle.value,
     savedAt: new Date().toISOString(),
     devices: deviceMap,
@@ -2656,6 +2775,9 @@ function buildExpSnapshot() {
         name: v.name,
         device_id: v.config_device_id || v.device_id || '',
         device_name: v.device_name || '',
+        // Omitted unless the user picked a non-default renderer, so files that
+        // never touched the style picker stay identical to v1 output.
+        ...(v.display_style ? { display_style: v.display_style } : {}),
       })),
     })),
   }
@@ -2778,12 +2900,16 @@ function applyLoadedExp(data, deviceIdMap) {
       // Re-resolve the variable by name + device_id from live lists
       const pool = sv.kind === 'measurement' ? allMeasurements.value : allCalibrations.value
       const found = pool.find(v => v.name === sv.name && (v.config_device_id || v.device_id) === newDevId)
+      // The style choice is not derivable from the A2L, so carry it over from
+      // the file; the rest of the variable object is re-resolved from the live
+      // pool above (indices and addresses must come from the current A2L).
+      const style = sv.display_style ? { display_style: sv.display_style } : {}
       if (found) {
-        resolvedVars.push({ ...found })
+        resolvedVars.push({ ...found, ...style })
       } else {
         // Try name-only match (fallback)
         const nameOnly = pool.find(v => v.name === sv.name)
-        if (nameOnly) resolvedVars.push({ ...nameOnly })
+        if (nameOnly) resolvedVars.push({ ...nameOnly, ...style })
       }
     }
     newTabs.push({ ...savedTab, variables: resolvedVars })
