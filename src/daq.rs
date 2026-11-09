@@ -94,6 +94,11 @@ pub struct Measurement {
     pub data_type: A2lDataType,
     /// Unit for display
     pub unit: Option<String>,
+    /// A2L LOWER_LIMIT / UPPER_LIMIT (physical). Used by the UI as the default
+    /// display range for gauge / level-bar renderers; `None` when the A2L does
+    /// not declare limits.
+    pub min: Option<f64>,
+    pub max: Option<f64>,
     /// COMPU_METHOD for converting raw to physical values
     pub compu_method: CompuMethod,
 }
@@ -174,6 +179,8 @@ impl Measurement {
             size,
             data_type: A2lDataType::U32,
             unit: None,
+            min: None,
+            max: None,
             compu_method: CompuMethod::Identical,
         }
     }
@@ -195,6 +202,8 @@ impl Measurement {
             size,
             data_type,
             unit,
+            min: None,
+            max: None,
             compu_method,
         }
     }
@@ -676,6 +685,9 @@ impl DaqManager {
             size,
             data_type: m.data_type,
             unit: m.unit,
+            // A2L limits are physical values; keep them for the UI range default.
+            min: Some(m.min).filter(|v| v.is_finite()),
+            max: Some(m.max).filter(|v| v.is_finite()),
             compu_method,
         })
     }
@@ -2635,6 +2647,8 @@ mod tests {
                 size: 4,
                 data_type: A2lDataType::U32,
                 unit: None,
+                min: None,
+                max: None,
                 compu_method: CompuMethod::Identical,
             })
             .collect();
@@ -2776,6 +2790,8 @@ mod tests {
             size: 16, // 16 bytes
             data_type: A2lDataType::U8,
             unit: None,
+            min: None,
+            max: None,
             compu_method: CompuMethod::Identical,
         });
         mgr.selected_indices = vec![0];
@@ -2897,6 +2913,8 @@ mod tests {
                 size: 1,
                 data_type: A2lDataType::U8,
                 unit: None,
+                min: None,
+                max: None,
                 compu_method: CompuMethod::Identical,
             },
             Measurement {
@@ -2906,6 +2924,8 @@ mod tests {
                 size: 2,
                 data_type: A2lDataType::U16,
                 unit: None,
+                min: None,
+                max: None,
                 compu_method: CompuMethod::Identical,
             },
             Measurement {
@@ -2915,6 +2935,8 @@ mod tests {
                 size: 4,
                 data_type: A2lDataType::U32,
                 unit: None,
+                min: None,
+                max: None,
                 compu_method: CompuMethod::Identical,
             },
         ];
@@ -2936,6 +2958,8 @@ mod tests {
                 size: 4,
                 data_type: A2lDataType::U32,
                 unit: None,
+                min: None,
+                max: None,
                 compu_method: CompuMethod::Identical,
             },
             Measurement {
@@ -2945,6 +2969,8 @@ mod tests {
                 size: 8,
                 data_type: A2lDataType::F64,
                 unit: None,
+                min: None,
+                max: None,
                 compu_method: CompuMethod::Identical,
             },
         ];
@@ -3147,6 +3173,8 @@ mod tests {
                 size: 2, // 2 bytes, but aligned to 4 with granularity=4
                 data_type: A2lDataType::U16,
                 unit: None,
+                min: None,
+                max: None,
                 compu_method: CompuMethod::default(),
             })
             .collect();

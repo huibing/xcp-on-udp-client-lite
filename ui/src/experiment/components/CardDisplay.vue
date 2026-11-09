@@ -1,14 +1,6 @@
 <template>
   <div class="card-display" :class="{ interactive }" @click="onWrapClick">
-    <component
-      :is="style.component"
-      :state="state"
-      :text="text"
-      :labels="labels"
-      :editable="interactive"
-      :busy="busy"
-      @select="$emit('select', $event)"
-    />
+    <component :is="style.component" v-bind="rendererProps" @select="$emit('select', $event)" />
     <span v-if="showUnit" class="unit">{{ unit }}</span>
   </div>
 </template>
@@ -26,15 +18,37 @@ const props = defineProps({
   unit: { type: String, default: '' },
   editable: { type: Boolean, default: false },
   busy: { type: Boolean, default: false },
+  /** Raw numeric value (numeric kinds only) — parsed from the DAQ / cal_read text. */
+  value: { default: null },
+  /** Resolved numeric config: { min, max, rangeSource, orientation, color, segments }. */
+  config: { type: Object, default: () => ({}) },
 })
 defineEmits(['select'])
 
 const style = computed(() => resolveStyle(props.kind, props.styleId))
 
-/** A renderer may be a plain display (text) or an input (toggle/radio/bulb). */
+/** A renderer may be a plain display (text/gauge/bar) or an input (toggle/radio/bulb). */
 const interactive = computed(() => props.editable && style.value.interactive)
 
-/** Units belong to the numeric readout; a switch or lamp does not carry one. */
+/**
+ * The renderer contract is the boolean one (state/text/labels/editable/busy)
+ * plus, for numeric renderers, the raw value, the resolved range config and the
+ * unit. Numeric props are *not* forwarded to other renderers: they would land
+ * on the DOM as stray attributes (the plain `text` style is shared by kinds).
+ */
+const rendererProps = computed(() => {
+  const base = {
+    state: props.state,
+    text: props.text,
+    labels: props.labels,
+    editable: interactive.value,
+    busy: props.busy,
+  }
+  if (!style.value.numeric) return base
+  return { ...base, value: props.value, config: props.config, unit: props.unit }
+})
+
+/** Numeric renderers draw their own unit; the plain text readout gets it appended. */
 const showUnit = computed(() => !!props.unit && style.value.id === 'text')
 
 /**

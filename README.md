@@ -594,7 +594,7 @@ The main working page. Combines calibration browsing and DAQ recording in a sing
 - **Left panel (Calibration)**: Browse parameters, read/write values, switch Working/Reference page mode, export changes to DCM
 - **Right panel (DAQ)**: Select measurements, set event channels, start/stop recording; live values update in real time
 - **Checksum tab**: Load HEX file and run `BUILD_CHECKSUM` verification per memory segment
-- **Card display styles**: boolean variables can render as text, toggle, radio or bulb (pick it with the ◈ button on the card). Calibration booleans toggle in place on the Working page; measurements stay read-only. The choice is stored per variable in the experiment JSON (`display_style`, file version 2) — see [docs/experiment-display-styles.md](docs/experiment-display-styles.md).
+- **Card display styles**: boolean variables can render as text, toggle, radio or bulb, and numeric ones as text, gauge or level bar (pick it with the ◈ button on the card). The ⚙ button tunes the renderer: display range (empty = A2L limits), gauge/bar colour, bar orientation and cell count. Calibration booleans toggle in place on the Working page; measurements stay read-only. Choices are stored per variable in the experiment JSON (`display_style` + `display_config`, file version 3) — see [docs/experiment-display-styles.md](docs/experiment-display-styles.md).
 
 #### Compare
 

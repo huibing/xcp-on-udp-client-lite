@@ -3,7 +3,10 @@ const state = {
   calls: [],
   written: null,      // content passed to write_text_file
   fileContent: null,  // content returned by read_text_file
-  calValue: '1',
+  calValue: '1',      // last value passed to cal_write (kept for quick inspection)
+  // Scripted calibration read-back, keyed "deviceId:idx". cal_write updates it,
+  // so a write round-trip shows up on the card exactly like the real backend.
+  calValues: { 'dev1:0': '1', 'dev1:1': '42.5', 'dev1:2': 'Enabled' },
 }
 
 export async function invoke(cmd, args) {
@@ -20,11 +23,16 @@ export async function invoke(cmd, args) {
       return []
     case 'experiment_cal_original':
       return { success: true, value: '0' }
-    case 'cal_read':
-      return { success: true, display_value: state.calValue, value: Number(state.calValue) }
-    case 'cal_write':
-      state.calValue = String(args?.value ?? '0')
+    case 'cal_read': {
+      const value = state.calValues[`${args?.deviceId}:${args?.idx}`] ?? '0'
+      return { success: true, display_value: value, value: Number(value) }
+    }
+    case 'cal_write': {
+      const value = String(args?.value ?? '0')
+      state.calValue = value
+      state.calValues[`${args?.deviceId}:${args?.idx}`] = value
       return { success: true }
+    }
     case 'read_text_file':
       return { success: true, content: state.fileContent }
     case 'write_text_file':
@@ -50,6 +58,9 @@ const CALIBRATIONS = [
 const MEASUREMENTS = [
   { device_id: 'dev1', config_device_id: 'dev1', device_name: 'ECU1', idx: 0, name: 'Flg_Boost',
     type: 'U8', min: 0, max: 1, connected: true, unit: '', is_enum: false, enum_options: [], address_hex: '0x20000000' },
+  // Numeric measurement with A2L limits → gauge / level bar default to 0..8000 rpm
+  { device_id: 'dev1', config_device_id: 'dev1', device_name: 'ECU1', idx: 1, name: 'Sig_Rpm',
+    type: 'U16', min: 0, max: 8000, connected: true, unit: 'rpm', is_enum: false, enum_options: [], address_hex: '0x20000002' },
 ]
 
 window.__MOCK__ = state

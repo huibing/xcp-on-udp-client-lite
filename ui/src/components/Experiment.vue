@@ -102,6 +102,13 @@
                         :model-value="styleOf(v)"
                         @update:model-value="id => setDisplayStyle(v, id)"
                       />
+                      <DisplayOptions
+                        :kind="kindOf(v)"
+                        :style-id="styleOf(v)"
+                        :variable="v"
+                        :model-value="displayConfigOf(v)"
+                        @update:model-value="cfg => setDisplayConfig(v, cfg)"
+                      />
                       <span
                         class="card-event-btn"
                         :class="{ 'card-locked': mode !== 'idle' }"
@@ -127,6 +134,8 @@
                       :text="getLiveValue(v)"
                       :labels="boolLabelsOf(v)"
                       :unit="v.unit || ''"
+                      :value="numericValueOf(v)"
+                      :config="numericConfigOf(v)"
                     />
                   </div>
                 </div>
@@ -159,6 +168,13 @@
                         :model-value="styleOf(v)"
                         @update:model-value="id => setDisplayStyle(v, id)"
                       />
+                      <DisplayOptions
+                        :kind="kindOf(v)"
+                        :style-id="styleOf(v)"
+                        :variable="v"
+                        :model-value="displayConfigOf(v)"
+                        @update:model-value="cfg => setDisplayConfig(v, cfg)"
+                      />
                       <span
                         class="card-remove"
                         :class="{ 'card-locked': mode !== 'idle' }"
@@ -175,6 +191,8 @@
                       :text="calValues[calKey(v)] ?? '—'"
                       :labels="boolLabelsOf(v)"
                       :unit="v.unit || ''"
+                      :value="numericValueOf(v)"
+                      :config="numericConfigOf(v)"
                       :editable="canToggleBoolean(v)"
                       :busy="!!toggleBusy[varKey(v)]"
                       @select="next => onBooleanSelect(v, next)"
@@ -869,9 +887,11 @@ import { useTheme } from '../composables/useTheme.js'
 import { useMf4Settings } from '../composables/useMf4Settings.js'
 import CardDisplay from '../experiment/components/CardDisplay.vue'
 import StylePicker from '../experiment/components/StylePicker.vue'
+import DisplayOptions from '../experiment/components/DisplayOptions.vue'
 import { VALUE_KIND, resolveValueKind } from '../experiment/display/kinds.js'
 import { hasStyleChoices, styleIdFor } from '../experiment/display/styles.js'
 import { booleanLabels, booleanState, booleanWriteValue } from '../experiment/display/boolean.js'
+import { numericValue, resolveNumericConfig } from '../experiment/display/numeric.js'
 
 const STORAGE_KEY = 'exp_tauri_state_v3'
 
@@ -1374,11 +1394,11 @@ function configId(v) { return v.config_device_id || v.device_id }
 
 // ── Card display styles ───────────────────────────────────────────────────────
 // Which renderer a card uses is stored per variable as `v.display_style` (a
-// plain id from the registry in ../experiment/display/styles.js). Only boolean
-// variables offer a choice today; every other kind falls through to the plain
-// text renderer, and adding renderers for them needs no change in this file.
-// The choice travels with the tab state (localStorage) and with the saved
-// experiment file, so a reload or a colleague's file restores the same layout.
+// plain id from the registry in ../experiment/display/styles.js), and that
+// style's tunable settings (display range, orientation, colour …) as
+// `v.display_config`. Both travel with the tab state (localStorage) and with the
+// saved experiment file, so a reload or a colleague's file restores the same
+// layout. Adding a renderer never needs a change in this file.
 
 /** Per-variable write-in-flight flag for the inline boolean controls. */
 const toggleBusy = reactive({})
@@ -1391,15 +1411,32 @@ function styleOf(v) {
   return styleIdFor(v, kindOf(v))
 }
 
-/** Keep a user's style choice when the variable object is refreshed from the backend. */
+/** User-tuned settings of the card's current style (never mutated in place). */
+function displayConfigOf(v) {
+  return v?.display_config || {}
+}
+
+/** Carry the user's display choices across a backend refresh of the variable. */
 function styleCarry(v) {
-  return v && v.display_style ? { display_style: v.display_style } : {}
+  const carried = {}
+  if (v?.display_style) carried.display_style = v.display_style
+  if (v?.display_config && Object.keys(v.display_config).length > 0) {
+    carried.display_config = { ...v.display_config }
+  }
+  return carried
 }
 
 /** Persist a style choice. `watch(tabs, saveState)` picks up the deep change. */
 function setDisplayStyle(v, id) {
   if (!id || styleOf(v) === id) return
   v.display_style = id
+  saveState()
+}
+
+/** Persist a settings change; an empty object means "back to defaults". */
+function setDisplayConfig(v, config) {
+  if (config && Object.keys(config).length > 0) v.display_config = config
+  else delete v.display_config
   saveState()
 }
 
@@ -1415,6 +1452,18 @@ function boolStateOf(v) {
 
 function boolLabelsOf(v) {
   return booleanLabels(v)
+}
+
+/** The card's number as a number (gauge / level bar), `null` when unknown. */
+function numericValueOf(v) {
+  if (kindOf(v) !== VALUE_KIND.NUMERIC) return null
+  return numericValue(rawValueOf(v))
+}
+
+/** Range + colour + orientation the numeric renderers draw against. */
+function numericConfigOf(v) {
+  if (kindOf(v) !== VALUE_KIND.NUMERIC) return {}
+  return resolveNumericConfig(v, displayConfigOf(v))
 }
 
 /**
@@ -2761,9 +2810,10 @@ function buildExpSnapshot() {
     }
   }
   return {
-    // v2 adds the optional per-variable `display_style`. v1 files still load:
-    // a missing style simply resolves to the kind's default renderer.
-    version: 2,
+    // v3 adds the optional per-variable `display_config` (style settings such as
+    // the gauge / level-bar range). v2 added `display_style`; v1 files still
+    // load: a missing style resolves to the kind's default renderer.
+    version: 3,
     title: expTitle.value,
     savedAt: new Date().toISOString(),
     devices: deviceMap,
@@ -2778,6 +2828,9 @@ function buildExpSnapshot() {
         // Omitted unless the user picked a non-default renderer, so files that
         // never touched the style picker stay identical to v1 output.
         ...(v.display_style ? { display_style: v.display_style } : {}),
+        ...(v.display_config && Object.keys(v.display_config).length > 0
+          ? { display_config: v.display_config }
+          : {}),
       })),
     })),
   }
@@ -2900,10 +2953,11 @@ function applyLoadedExp(data, deviceIdMap) {
       // Re-resolve the variable by name + device_id from live lists
       const pool = sv.kind === 'measurement' ? allMeasurements.value : allCalibrations.value
       const found = pool.find(v => v.name === sv.name && (v.config_device_id || v.device_id) === newDevId)
-      // The style choice is not derivable from the A2L, so carry it over from
-      // the file; the rest of the variable object is re-resolved from the live
-      // pool above (indices and addresses must come from the current A2L).
-      const style = sv.display_style ? { display_style: sv.display_style } : {}
+      // The style choice and its settings are not derivable from the A2L, so
+      // carry them over from the file; the rest of the variable object is
+      // re-resolved from the live pool above (indices and addresses must come
+      // from the current A2L).
+      const style = styleCarry(sv)
       if (found) {
         resolvedVars.push({ ...found, ...style })
       } else {
@@ -3341,7 +3395,9 @@ onUnmounted(() => {
 }
 .card-value {
   display: flex;
-  align-items: baseline;
+  /* centre, not baseline: gauge / level-bar renderers are taller than a line of
+     text and would otherwise hang below the value line */
+  align-items: center;
   gap: 5px;
 }
 .val-num {

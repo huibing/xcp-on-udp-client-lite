@@ -49,6 +49,10 @@ pub async fn experiment_variables(state: State<'_, SharedState>) -> Result<Value
                 "address_hex": format!("{:08X}", m.address),
                 "connected": connected,
                 "unit": m.unit.as_deref().unwrap_or(""),
+                // A2L LOWER_LIMIT / UPPER_LIMIT (physical). The UI uses them as
+                // the default range for gauge / level-bar card styles.
+                "min": m.min,
+                "max": m.max,
                 "bytes": m.size,
                 "is_enum": m.compu_method.is_enum(),
                 "enum_options": enum_options,
