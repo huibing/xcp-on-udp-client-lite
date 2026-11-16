@@ -27,12 +27,19 @@
 //! write only the documented field offsets (see [`cfg`], [`cap`], [`msg`]). That
 //! keeps the driver compatible with future BOA releases without recompiling.
 //!
+//! Receiving uses the OCI `onFrame` callback (see [`RxContext`]): BOA pushes
+//! every frame that passes the hardware filters from its own receive thread, so
+//! `recv_frame` only drains a local queue. Polling (`OCI_ReadCANDataEx`) costs a
+//! USB round trip per frame and is only kept as `ES582_RX_MODE=poll` for
+//! comparison.
+//!
 //! Environment variables:
 //! - `BOA_DLL_DIR` — directory holding `dll-ocdProxy.dll` / `dll-csiBind.dll`
 //!   (defaults to `%ProgramFiles%\ETAS\BOA_V2\Bin\x64\Dll\Framework`).
 //! - `BOA_OCD_DIR` — OCD plugin directory added to the DLL search path
 //!   (defaults to `%ProgramFiles%\ETAS\ED-EBI_V2\Bin\x64\Dll\OCDs`).
 //! - `ES582_URI` — channel URI to use when the config does not pin one.
+//! - `ES582_RX_MODE` — `callback` (default) or `poll` (diagnostics only).
 //! - `ES582_SELF_RECEPTION`, `ES582_*_BTL_CYCLES`, `ES582_*_SAMPLE_POINT`,
 //!   `ES582_*_SJW` — bring-up/timing overrides (see [`CanTiming`]).
 
@@ -42,8 +49,9 @@ use super::device::{
 use libloading::{Library, Symbol};
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CString};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -122,17 +130,34 @@ const DEFAULT_BAUDRATE: u32 = 500_000;
 /// release appends fields.
 const STRUCT_BUF: usize = 512;
 
-/// Messages fetched per `OCI_ReadCANData*` call.
+/// Messages fetched per `OCI_ReadCANData*` call in polling mode.
 const RX_BATCH: usize = 16;
 
-/// Timeout used by the "non-blocking" receive path.
+/// Timeout used by the polling receive path.
 ///
 /// A zero-timeout OCI read costs one USB round trip (~18 ms on an ES582) and
 /// returns a single frame, so polling with `timeout = 0` caps the driver at
 /// ~55 frames/s and lets the OCD's receive queue overflow on a busy bus
 /// (150 frames/s of periodic traffic is enough). A short blocking read returns
-/// as soon as data is available and delivers the whole batch instead.
+/// as soon as data is available.
+///
+/// The default receive path is the OCI callback (see [`RxContext`]); polling is
+/// only a fallback for comparison (`ES582_RX_MODE=poll`).
 const RX_POLL_TIMEOUT_MS: u64 = 10;
+
+/// Maximum number of frames buffered between the OCI callback and
+/// [`CanDevice::recv_frame`]. Beyond this the oldest frames are dropped (and
+/// counted) so a stalled consumer cannot exhaust memory.
+const RX_QUEUE_CAPACITY: usize = 200_000;
+
+/// `sizeof(OCI_CANMessageEx)` — the buffer size the receive callback is given.
+const CAN_MESSAGE_EX_SIZE: usize = 96;
+
+/// How long a "non-blocking" `recv_frame(None)` waits for a frame.
+///
+/// The OCI callback already queues frames, so this only lets the transport's
+/// reader thread sleep on the condition variable instead of spinning.
+const RX_WAIT_SLICE: Duration = Duration::from_millis(1);
 
 /// `sizeof(OCI_CANMessage)` — the stride used by `OCI_ReadCANData` (the
 /// non-Ex entry point takes an array of structs, not of pointers).
@@ -201,6 +226,10 @@ const ES582_URI_ENV: &str = "ES582_URI";
 /// Set to `1` to receive self-transmitted frames (bring-up/loopback tests).
 const ES582_SELF_RECEPTION_ENV: &str = "ES582_SELF_RECEPTION";
 
+/// Receive path: `callback` (default, OCI `onFrame` callback) or `poll`
+/// (`OCI_ReadCANDataEx`).
+const ES582_RX_MODE_ENV: &str = "ES582_RX_MODE";
+
 /// Bit timing overrides (nominal phase): `BTL_CYCLES`, `SAMPLE_POINT`, `SJW`.
 const ES582_BTL_ENV: &str = "ES582_BTL_CYCLES";
 const ES582_SAMPLE_POINT_ENV: &str = "ES582_SAMPLE_POINT";
@@ -262,12 +291,15 @@ mod cfg {
     pub const FD_TX_SSP_FILTER_WINDOW: usize = CAN_FD_CONFIG + 36;
 }
 
-/// Offsets inside `OCI_CANRxQueueConfiguration` (sizeof = 40: two callback
-/// structs of two function pointers each, then the self-reception mode).
+/// Offsets inside `OCI_CANRxQueueConfiguration` (sizeof = 40, verified with
+/// `offsetof`). Each callback slot is an `OCI_CANRxCallbackSingleMsg`: a union
+/// of `function`/`functionEx` (8 bytes) followed by `userData` (8 bytes).
 #[allow(dead_code)]
 mod rx_queue {
-    pub const ON_FRAME: usize = 0;
-    pub const ON_EVENT: usize = 16;
+    pub const ON_FRAME_EX: usize = 0;
+    pub const ON_FRAME_USER_DATA: usize = 8;
+    pub const ON_EVENT_EX: usize = 16;
+    pub const ON_EVENT_USER_DATA: usize = 24;
     pub const SELF_RECEPTION_MODE: usize = 32;
 }
 
@@ -406,6 +438,10 @@ type WriteCanDataFn = unsafe extern "system" fn(i32, i64, *mut u8, u32, *mut u32
 type WriteCanDataExFn = unsafe extern "system" fn(i32, i64, *mut *mut u8, u32, *mut u32) -> u32;
 type GetErrorFn = unsafe extern "system" fn(i32, u32, *mut c_char, u32) -> u32;
 type GetTimerCapabilitiesFn = unsafe extern "system" fn(i32, *mut u8) -> u32;
+
+/// `OCI_CANRxCallbackFunctionSingleMsgEx`: called by BOA from its own receive
+/// thread for every frame that passes the hardware filters.
+type CanRxCallbackExFn = unsafe extern "system" fn(*mut c_void, *mut u8);
 
 /// Wrapper around the loaded BOA framework DLLs and their function pointers.
 struct BoaApi {
@@ -832,6 +868,12 @@ fn set_u32(buf: &mut [u8], offset: usize, value: u32) {
     }
 }
 
+fn set_u64(buf: &mut [u8], offset: usize, value: u64) {
+    if let Some(slot) = buf.get_mut(offset..offset + 8) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
 fn set_u16(buf: &mut [u8], offset: usize, value: u16) {
     if let Some(slot) = buf.get_mut(offset..offset + 2) {
         slot.copy_from_slice(&value.to_le_bytes());
@@ -1134,6 +1176,8 @@ impl Es582Driver {
             fd: false,
             bitrate: String::new(),
             tick_hz: 0,
+            rx_mode: RxMode::from_env(),
+            rx_context: Arc::new(RxContext::new()),
             pending: Mutex::new(VecDeque::new()),
             closed: AtomicBool::new(false),
         };
@@ -1358,6 +1402,218 @@ fn resolve_uri(api: &BoaApi, config: &CanDeviceConfig) -> Result<String, CanDevi
 }
 
 // ---------------------------------------------------------------------------
+// Receive path
+// ---------------------------------------------------------------------------
+
+/// How frames are taken off the OCI receive queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RxMode {
+    /// OCI `onFrame` callback (default). BOA pushes every accepted frame from
+    /// its own receive thread; `recv_frame` then only drains a local queue.
+    Callback,
+    /// `OCI_ReadCANDataEx` polling. Each call costs one USB round trip and
+    /// returns a single frame, so this is only useful for comparison/debugging.
+    Poll,
+}
+
+impl RxMode {
+    /// Read the mode from `ES582_RX_MODE` (defaults to `callback`).
+    fn from_env() -> Self {
+        match std::env::var(ES582_RX_MODE_ENV) {
+            Ok(value) => {
+                let value = value.trim().to_ascii_lowercase();
+                if value == "poll" || value == "read" || value == "polling" {
+                    RxMode::Poll
+                } else {
+                    RxMode::Callback
+                }
+            }
+            Err(_) => RxMode::Callback,
+        }
+    }
+}
+
+/// Shared state between the OCI receive callback and `recv_frame`.
+///
+/// BOA may invoke the callback one last time *after* `OCI_DestroyCANController`
+/// has returned, so the device never frees this allocation: on teardown it only
+/// sets [`RxContext::closed`] and leaks one reference (a few hundred bytes per
+/// opened channel). The callback checks that flag and returns immediately.
+struct RxContext {
+    /// Buffered frames, oldest first.
+    queue: Mutex<RxQueue>,
+    /// Signalled whenever a frame is pushed or the context is closed.
+    ready: Condvar,
+    /// Controller clock in ticks per second (0 = unknown), used to convert the
+    /// hardware timestamps to microseconds.
+    tick_hz: AtomicU32,
+    /// Frames discarded because the queue was full.
+    dropped: AtomicU64,
+    /// Set on teardown; the callback becomes a no-op.
+    closed: AtomicBool,
+}
+
+#[derive(Default)]
+struct RxQueue {
+    frames: VecDeque<CanFrame>,
+}
+
+impl RxContext {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(RxQueue::default()),
+            ready: Condvar::new(),
+            tick_hz: AtomicU32::new(0),
+            dropped: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    /// Queue one frame (called from the BOA receive thread).
+    fn push(&self, frame: CanFrame) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        {
+            let mut queue = match self.queue.lock() {
+                Ok(queue) => queue,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if queue.frames.len() >= RX_QUEUE_CAPACITY {
+                queue.frames.pop_front();
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            queue.frames.push_back(frame);
+        }
+        self.ready.notify_one();
+    }
+
+    /// Wait up to `timeout` for a frame. `None` waits [`RX_WAIT_SLICE`].
+    fn wait(&self, timeout: Option<Duration>) -> Option<CanFrame> {
+        let deadline = Instant::now() + timeout.unwrap_or(RX_WAIT_SLICE);
+        let mut queue = match self.queue.lock() {
+            Ok(queue) => queue,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        loop {
+            if self.closed.load(Ordering::SeqCst) {
+                return None;
+            }
+            if let Some(frame) = queue.frames.pop_front() {
+                return Some(frame);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            let (guard, _) = match self.ready.wait_timeout(queue, deadline - now) {
+                Ok(result) => result,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            queue = guard;
+        }
+    }
+
+    /// Wake every waiter and make the callback a no-op.
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.ready.notify_all();
+    }
+
+    fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+/// `OCI_CANRxCallbackFunctionSingleMsgEx` implementation.
+///
+/// Runs on a BOA-internal thread: it must not block, must not call back into
+/// OCI and must not unwind, so the body only copies the frame into the local
+/// queue. The message pointer is only valid for the duration of the call.
+unsafe extern "system" fn es582_rx_callback(user_data: *mut c_void, message: *mut u8) {
+    if user_data.is_null() || message.is_null() {
+        return;
+    }
+    let context = &*(user_data as *const RxContext);
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if context.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let buffer = std::slice::from_raw_parts(message, CAN_MESSAGE_EX_SIZE);
+        let tick_hz = context.tick_hz.load(Ordering::Relaxed);
+        if let Some(frame) = decode_frame(buffer, tick_hz) {
+            context.push(frame);
+        }
+    }));
+}
+
+/// Convert controller ticks into microseconds.
+fn ticks_to_micros(ticks: i64, tick_hz: u32) -> Option<u64> {
+    if tick_hz == 0 || ticks < 0 {
+        return None;
+    }
+    Some((ticks as u128 * 1_000_000 / tick_hz as u128) as u64)
+}
+
+/// Decode one `OCI_CANMessage` / `OCI_CANMessageEx` buffer.
+///
+/// Classic CAN and CAN-FD messages share the same prefix, so one decoder
+/// handles both; error frames and bus events are surfaced with an empty payload
+/// (the XCP layer ignores them, but they show up in the trace log).
+fn decode_frame(buffer: &[u8], tick_hz: u32) -> Option<CanFrame> {
+    let message_type = get_u32(buffer, msg::TYPE);
+    match message_type {
+        CAN_RX_MESSAGE => {
+            let id = get_u32(buffer, msg::RX_FRAME_ID);
+            let flags = get_u16(buffer, msg::RX_FLAGS);
+            let dlc = get_u8(buffer, msg::RX_LEN) as usize;
+            let len = dlc.min(8).min(msg::RX_DATA_MAX);
+            let timestamp_us = ticks_to_micros(get_i64(buffer, msg::RX_TIMESTAMP), tick_hz);
+            Some(CanFrame {
+                id,
+                extended: flags & CAN_MSG_FLAG_EXTENDED != 0,
+                data: buffer[msg::RX_DATA..msg::RX_DATA + len].to_vec(),
+                timestamp_us,
+            })
+        }
+        CANFDRX_MESSAGE => {
+            let id = get_u32(buffer, msg::RX_FRAME_ID);
+            let flags = get_u16(buffer, msg::RX_FLAGS);
+            let size = get_u8(buffer, msg::RX_LEN) as usize;
+            let len = size.min(msg::RX_DATA_MAX);
+            let timestamp_us = ticks_to_micros(get_i64(buffer, msg::RX_TIMESTAMP), tick_hz);
+            Some(CanFrame {
+                id,
+                extended: flags & CAN_MSG_FLAG_EXTENDED != 0,
+                data: buffer[msg::RX_DATA..msg::RX_DATA + len].to_vec(),
+                timestamp_us,
+            })
+        }
+        CAN_ERROR_FRAME | CAN_BUS_EVENT => {
+            let id = get_u32(buffer, msg::RX_FRAME_ID);
+            let event = get_u32(buffer, msg::EVENT_CODE);
+            let timestamp_us = ticks_to_micros(get_i64(buffer, msg::EVENT_TIMESTAMP), tick_hz);
+            tracing::debug!(
+                "ES582: message type {} id=0x{:X} code=0x{:X}",
+                message_type,
+                id,
+                event
+            );
+            Some(CanFrame {
+                id,
+                extended: false,
+                data: Vec::new(),
+                timestamp_us,
+            })
+        }
+        other => {
+            tracing::trace!("ES582: ignoring message type {}", other);
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Device
 // ---------------------------------------------------------------------------
 
@@ -1382,7 +1638,11 @@ pub struct Es582Device {
     bitrate: String,
     /// Controller clock in ticks per second.
     tick_hz: u32,
-    /// Frames read in one batch but not yet handed to the caller.
+    /// How frames are taken off the OCI receive queue.
+    rx_mode: RxMode,
+    /// Callback receive path state (shared with the OCI `onFrame` callback).
+    rx_context: Arc<RxContext>,
+    /// Frames read in one batch but not yet handed to the caller (poll mode).
     pending: Mutex<VecDeque<CanFrame>>,
     /// Closed flag (guards double destroy).
     closed: AtomicBool,
@@ -1491,7 +1751,34 @@ impl Es582Device {
 
         // Rx queue with NULL callbacks: frames are queued and drained by
         // OCI_ReadCANData* instead of a C callback.
+        // Controller clock: needed to turn the hardware timestamps into
+        // microseconds. Query it before the receive queue is created so the
+        // callback never sees tick_hz == 0.
+        self.tick_hz = self.api.timer_tick_hz(self.controller);
+        self.rx_context
+            .tick_hz
+            .store(self.tick_hz, Ordering::Relaxed);
+
+        // Receive queue. In callback mode BOA pushes every accepted frame from
+        // its own receive thread into `self.rx_context`; in poll mode the
+        // callbacks stay NULL and frames are drained with
+        // `OCI_ReadCANDataEx`. `onEvent` stays NULL either way, which makes BOA
+        // deliver events through the frame callback / data queue.
         let mut rx_conf = vec![0u8; STRUCT_BUF];
+        if self.rx_mode == RxMode::Callback {
+            let context = Arc::as_ptr(&self.rx_context) as *mut c_void;
+            let callback: CanRxCallbackExFn = es582_rx_callback;
+            set_u64(
+                &mut rx_conf,
+                rx_queue::ON_FRAME_EX,
+                callback as usize as u64,
+            );
+            set_u64(
+                &mut rx_conf,
+                rx_queue::ON_FRAME_USER_DATA,
+                context as usize as u64,
+            );
+        }
         set_u32(&mut rx_conf, rx_queue::SELF_RECEPTION_MODE, self_reception);
         let mut rx_queue: i32 = OCI_NO_HANDLE;
         let status = unsafe {
@@ -1506,6 +1793,11 @@ impl Es582Device {
             )));
         }
         self.rx_queue = rx_queue;
+        tracing::debug!(
+            "ES582 {}: receive queue created in {:?} mode",
+            self.uri,
+            self.rx_mode
+        );
 
         // Frame filters. OCI OR-combines them, so one filter per accepted CAN ID
         // gives the union the XCP transport asked for. Without any accepted IDs
@@ -1560,7 +1852,6 @@ impl Es582Device {
         self.tx_queue = tx_queue;
 
         self.fd = fd;
-        self.tick_hz = self.api.timer_tick_hz(self.controller);
         self.bitrate = if fd {
             format!(
                 "CAN-FD {}k/{}k",
@@ -1671,14 +1962,6 @@ impl Es582Device {
         can_config
     }
 
-    /// Convert controller ticks into microseconds.
-    fn ticks_to_micros(&self, ticks: i64) -> Option<u64> {
-        if self.tick_hz == 0 || ticks < 0 {
-            return None;
-        }
-        Some((ticks as u128 * 1_000_000 / self.tick_hz as u128) as u64)
-    }
-
     /// Convert a millisecond timeout into controller ticks.
     fn millis_to_ticks(&self, millis: u64) -> i64 {
         if self.tick_hz == 0 {
@@ -1688,10 +1971,7 @@ impl Es582Device {
         ((millis as u128 * self.tick_hz as u128) / 1000) as i64
     }
 
-    /// Read one batch of frames from the receive queue.
-    ///
-    /// `timeout_ms == 0` polls without blocking. Returns the decoded frames in
-    /// arrival order.
+    /// Read one batch of frames from the receive queue (poll mode only).
     fn read_frames(&self, timeout_ms: u64) -> Result<Vec<CanFrame>, CanDeviceError> {
         if self.rx_queue == OCI_NO_HANDLE {
             return Err(CanDeviceError::RecvFailed(
@@ -1781,66 +2061,44 @@ impl Es582Device {
 
         let mut frames = Vec::with_capacity(count as usize);
         for buffer in buffers.iter().take(count as usize) {
-            if let Some(frame) = self.decode_frame(buffer) {
+            if let Some(frame) = decode_frame(buffer, self.tick_hz) {
                 frames.push(frame);
             }
         }
         Ok(frames)
     }
 
-    /// Decode one `OCI_CANMessage` / `OCI_CANMessageEx` buffer.
-    fn decode_frame(&self, buffer: &[u8]) -> Option<CanFrame> {
-        let message_type = get_u32(buffer, msg::TYPE);
-        match message_type {
-            CAN_RX_MESSAGE => {
-                let id = get_u32(buffer, msg::RX_FRAME_ID);
-                let flags = get_u16(buffer, msg::RX_FLAGS);
-                let dlc = get_u8(buffer, msg::RX_LEN) as usize;
-                let len = dlc.min(8).min(msg::RX_DATA_MAX);
-                let timestamp_us = self.ticks_to_micros(get_i64(buffer, msg::RX_TIMESTAMP));
-                Some(CanFrame {
-                    id,
-                    extended: flags & CAN_MSG_FLAG_EXTENDED != 0,
-                    data: buffer[msg::RX_DATA..msg::RX_DATA + len].to_vec(),
-                    timestamp_us,
-                })
+    /// Polling receive path (`ES582_RX_MODE=poll`).
+    fn recv_frame_polled(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<Option<CanFrame>, CanDeviceError> {
+        if let Some(frame) = self.pending.lock().expect("ES582 rx mutex").pop_front() {
+            return Ok(Some(frame));
+        }
+
+        match timeout {
+            None => {
+                let frames = self.read_frames(RX_POLL_TIMEOUT_MS)?;
+                let mut pending = self.pending.lock().expect("ES582 rx mutex");
+                pending.extend(frames);
+                Ok(pending.pop_front())
             }
-            CANFDRX_MESSAGE => {
-                let id = get_u32(buffer, msg::RX_FRAME_ID);
-                let flags = get_u16(buffer, msg::RX_FLAGS);
-                let size = get_u8(buffer, msg::RX_LEN) as usize;
-                let len = size.min(msg::RX_DATA_MAX);
-                let timestamp_us = self.ticks_to_micros(get_i64(buffer, msg::RX_TIMESTAMP));
-                Some(CanFrame {
-                    id,
-                    extended: flags & CAN_MSG_FLAG_EXTENDED != 0,
-                    data: buffer[msg::RX_DATA..msg::RX_DATA + len].to_vec(),
-                    timestamp_us,
-                })
-            }
-            CAN_ERROR_FRAME | CAN_BUS_EVENT => {
-                // Reported with an empty payload: the XCP layer ignores these,
-                // but they are visible in the trace log.
-                let id = get_u32(buffer, msg::RX_FRAME_ID);
-                let event = get_u32(buffer, msg::EVENT_CODE);
-                let timestamp_us = self.ticks_to_micros(get_i64(buffer, msg::EVENT_TIMESTAMP));
-                tracing::debug!(
-                    "ES582 {}: message type {} id=0x{:X} code=0x{:X}",
-                    self.uri,
-                    message_type,
-                    id,
-                    event
-                );
-                Some(CanFrame {
-                    id,
-                    extended: false,
-                    data: Vec::new(),
-                    timestamp_us,
-                })
-            }
-            other => {
-                tracing::trace!("ES582 {}: ignoring message type {}", self.uri, other);
-                None
+            Some(limit) => {
+                let deadline = Instant::now() + limit;
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let wait_ms = remaining.as_millis().min(100) as u64;
+                    let frames = self.read_frames(wait_ms.max(1))?;
+                    if !frames.is_empty() {
+                        let mut pending = self.pending.lock().expect("ES582 rx mutex");
+                        pending.extend(frames);
+                        return Ok(pending.pop_front());
+                    }
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                }
             }
         }
     }
@@ -1922,6 +2180,23 @@ impl Es582Device {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
+
+        // Stop the callback before the queue goes away: BOA may still invoke it
+        // once after `OCI_DestroyCANController` returns, so the context is
+        // intentionally never freed (see `RxContext`).
+        self.rx_context.close();
+        let dropped = self.rx_context.dropped();
+        if dropped > 0 {
+            tracing::warn!(
+                "ES582 {}: dropped {} frame(s) because the receive queue was full",
+                self.uri,
+                dropped
+            );
+        }
+        // Leak one reference: the allocation must outlive any late callback.
+        let leaked = Arc::clone(&self.rx_context);
+        std::mem::forget(leaked);
+
         // Destroying the controller also releases its queues and filters.
         if self.controller != OCI_NO_HANDLE {
             unsafe {
@@ -1931,6 +2206,19 @@ impl Es582Device {
         }
         self.tx_queue = OCI_NO_HANDLE;
         self.rx_queue = OCI_NO_HANDLE;
+    }
+
+    /// Number of frames discarded because the receive queue was full.
+    pub fn dropped_frames(&self) -> u64 {
+        self.rx_context.dropped()
+    }
+
+    /// Receive path in use (callback or polling).
+    pub fn rx_mode(&self) -> &'static str {
+        match self.rx_mode {
+            RxMode::Callback => "callback",
+            RxMode::Poll => "poll",
+        }
     }
 
     /// OCI URI of this channel.
@@ -1960,33 +2248,11 @@ impl CanDevice for Es582Device {
     }
 
     fn recv_frame(&self, timeout: Option<Duration>) -> Result<Option<CanFrame>, CanDeviceError> {
-        if let Some(frame) = self.pending.lock().expect("ES582 rx mutex").pop_front() {
-            return Ok(Some(frame));
-        }
-
-        match timeout {
-            None => {
-                let frames = self.read_frames(RX_POLL_TIMEOUT_MS)?;
-                let mut pending = self.pending.lock().expect("ES582 rx mutex");
-                pending.extend(frames);
-                Ok(pending.pop_front())
-            }
-            Some(limit) => {
-                let deadline = Instant::now() + limit;
-                loop {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    let wait_ms = remaining.as_millis().min(100) as u64;
-                    let frames = self.read_frames(wait_ms.max(1))?;
-                    if !frames.is_empty() {
-                        let mut pending = self.pending.lock().expect("ES582 rx mutex");
-                        pending.extend(frames);
-                        return Ok(pending.pop_front());
-                    }
-                    if Instant::now() >= deadline {
-                        return Ok(None);
-                    }
-                }
-            }
+        match self.rx_mode {
+            // BOA already pushed the frames from its own receive thread; the
+            // only work left is draining the local queue (no USB round trip).
+            RxMode::Callback => Ok(self.rx_context.wait(timeout)),
+            RxMode::Poll => self.recv_frame_polled(timeout),
         }
     }
 
@@ -2156,5 +2422,134 @@ mod tests {
         assert_eq!(CAN_MESSAGE_SIZE, 40);
         assert!(msg::RX_DATA + msg::RX_DATA_MAX <= STRUCT_BUF);
         assert!(msg::TX_DATA + msg::TX_DATA_MAX <= STRUCT_BUF);
+
+        // The receive callback is handed an `OCI_CANMessageEx`; the decoder
+        // reads exactly this many bytes.
+        assert_eq!(CAN_MESSAGE_EX_SIZE, 96);
+        assert_eq!(msg::RX_DATA + msg::RX_DATA_MAX, CAN_MESSAGE_EX_SIZE);
+
+        // `OCI_CANRxQueueConfiguration`: two callback slots of 16 bytes, then
+        // the self-reception mode at offset 32 (sizeof 40).
+        assert_eq!(rx_queue::ON_FRAME_EX, 0);
+        assert_eq!(rx_queue::ON_FRAME_USER_DATA, 8);
+        assert_eq!(rx_queue::ON_EVENT_EX, 16);
+        assert_eq!(rx_queue::ON_EVENT_USER_DATA, 24);
+        assert_eq!(rx_queue::SELF_RECEPTION_MODE, 32);
+        assert!(rx_queue::SELF_RECEPTION_MODE + 4 <= STRUCT_BUF);
+    }
+
+    /// Build a synthetic `OCI_CANMessageEx` holding a classic CAN frame.
+    fn classic_rx_buffer(id: u32, flags: u16, data: &[u8], ticks: i64) -> Vec<u8> {
+        let mut buffer = vec![0u8; CAN_MESSAGE_EX_SIZE];
+        set_u32(&mut buffer, msg::TYPE, CAN_RX_MESSAGE);
+        set_i64(&mut buffer, msg::RX_TIMESTAMP, ticks);
+        set_u32(&mut buffer, msg::RX_FRAME_ID, id);
+        set_u16(&mut buffer, msg::RX_FLAGS, flags);
+        set_u8(&mut buffer, msg::RX_LEN, data.len() as u8);
+        buffer[msg::RX_DATA..msg::RX_DATA + data.len()].copy_from_slice(data);
+        buffer
+    }
+
+    #[test]
+    fn test_decode_classic_frame() {
+        let buffer = classic_rx_buffer(0x551, 0, &[0xFF, 0x01, 0x02], 2_000_000);
+        let frame = decode_frame(&buffer, 2_000_000).expect("frame");
+        assert_eq!(frame.id, 0x551);
+        assert!(!frame.extended);
+        assert_eq!(frame.data, vec![0xFF, 0x01, 0x02]);
+        // 2 MHz ticks -> 500 ns per tick.
+        assert_eq!(frame.timestamp_us, Some(1_000_000));
+    }
+
+    #[test]
+    fn test_decode_extended_and_fd_frames() {
+        let buffer = classic_rx_buffer(
+            0x18DAF110,
+            CAN_MSG_FLAG_EXTENDED,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            0,
+        );
+        let frame = decode_frame(&buffer, 0).expect("frame");
+        assert_eq!(frame.id, 0x18DAF110);
+        assert!(frame.extended);
+        assert_eq!(frame.data.len(), 8);
+        assert_eq!(
+            frame.timestamp_us, None,
+            "tick rate unknown -> no timestamp"
+        );
+
+        let mut buffer = vec![0u8; CAN_MESSAGE_EX_SIZE];
+        set_u32(&mut buffer, msg::TYPE, CANFDRX_MESSAGE);
+        set_u32(&mut buffer, msg::RX_FRAME_ID, 0x700);
+        set_u8(&mut buffer, msg::RX_LEN, 16);
+        for (index, slot) in buffer[msg::RX_DATA..msg::RX_DATA + 16]
+            .iter_mut()
+            .enumerate()
+        {
+            *slot = index as u8;
+        }
+        let frame = decode_frame(&buffer, 0).expect("fd frame");
+        assert_eq!(frame.data.len(), 16);
+        assert_eq!(frame.data[15], 15);
+    }
+
+    #[test]
+    fn test_decode_ignores_unknown_message_type() {
+        let mut buffer = vec![0u8; CAN_MESSAGE_EX_SIZE];
+        set_u32(&mut buffer, msg::TYPE, 42);
+        assert!(decode_frame(&buffer, 0).is_none());
+    }
+
+    #[test]
+    fn test_rx_context_push_wait_and_close() {
+        let context = RxContext::new();
+        context.tick_hz.store(2_000_000, Ordering::Relaxed);
+
+        // Nothing queued: `None` only waits the short slice.
+        let start = Instant::now();
+        assert!(context.wait(None).is_none());
+        assert!(start.elapsed() >= RX_WAIT_SLICE);
+
+        context.push(CanFrame::new(0x551, vec![0xFF]));
+        context.push(CanFrame::new(0x552, vec![0xFE]));
+        let first = context.wait(None).expect("first frame");
+        assert_eq!(first.id, 0x551);
+        let second = context
+            .wait(Some(Duration::from_millis(10)))
+            .expect("second frame");
+        assert_eq!(second.id, 0x552);
+
+        // After close, waiters return immediately and the callback no-ops.
+        context.close();
+        let start = Instant::now();
+        assert!(context.wait(Some(Duration::from_secs(5))).is_none());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        context.push(CanFrame::new(0x553, vec![0x00]));
+        assert!(context.wait(None).is_none());
+    }
+
+    #[test]
+    fn test_rx_context_drops_oldest_when_full() {
+        let context = RxContext::new();
+        for index in 0..(RX_QUEUE_CAPACITY + 5) {
+            context.push(CanFrame::new(index as u32, vec![0u8]));
+        }
+        assert_eq!(context.dropped(), 5);
+        // The five oldest frames were dropped.
+        let first = context.wait(None).expect("frame");
+        assert_eq!(first.id, 5);
+    }
+
+    #[test]
+    fn test_rx_mode_from_env_defaults_to_callback() {
+        // The environment is process-wide, so only assert the default mapping
+        // (an unset variable) and the explicit poll aliases.
+        std::env::remove_var(ES582_RX_MODE_ENV);
+        assert_eq!(RxMode::from_env(), RxMode::Callback);
+        std::env::set_var(ES582_RX_MODE_ENV, "poll");
+        assert_eq!(RxMode::from_env(), RxMode::Poll);
+        std::env::set_var(ES582_RX_MODE_ENV, "callback");
+        assert_eq!(RxMode::from_env(), RxMode::Callback);
+        std::env::remove_var(ES582_RX_MODE_ENV);
     }
 }

@@ -250,9 +250,16 @@ ES582 environment variables:
 
 The driver programs hardware acceptance filters from
 `CanDeviceConfig::accept_ids` (the CAN transport fills it with `CAN_ID_SLAVE`
-plus the DAQ DTO IDs). That matters on an ES582: one OCI read call returns a
-single frame and costs a USB round trip, so unfiltered periodic bus traffic
-would push command responses out of the device queue.
+plus the DAQ DTO IDs). That matters on an ES582: polling costs a USB round trip
+per frame, so unfiltered periodic bus traffic would push command responses out
+of the device queue.
+
+Frames are received through the OCI `onFrame` callback (BOA pushes them from its
+own thread; `recv_frame` only drains a local queue). This is not an optimisation
+detail: with `OCI_ReadCANDataEx` polling, one call returns a single frame and
+costs a USB round trip, so a 150 frames/s bus lost ~80 % of its frames and DAQ
+samples lagged behind by minutes. `ES582_RX_MODE=poll` restores the old polling
+path for comparison.
 
 #### XCP smoke test (connect, pages, upload)
 
@@ -1254,6 +1261,25 @@ This project is provided as-is for educational and development purposes.
 Contributions are welcome! Please feel free to submit pull requests.
 
 ## Recent Changes
+
+### v0.6.2 - ES582 callback receive path
+
+- ✅ **ES582 receives through the OCI `onFrame` callback** instead of
+  `OCI_ReadCANDataEx` polling. A poll call returns one frame and costs a USB
+  round trip (~7.5 ms busy, ~15-20 ms idle), so the driver fell behind the bus:
+  150 frames/s of traffic lost ~80 % of its frames, DAQ ran at 65-88 samples/s
+  instead of 100, and the desktop app showed variable updates lagging by
+  minutes. With the callback BOA pushes whole batches: 750/750 frames captured,
+  100.0 DAQ samples/s, `dropped_frames()` stays 0.
+  - callback safety: no blocking, no re-entrant OCI calls, `catch_unwind`
+    around the body, frame copied out immediately (the message pointer is only
+    valid during the call), bounded queue with drop-oldest accounting, and the
+    callback context is leaked on teardown because BOA may fire it once after
+    `OCI_DestroyCANController` returns
+  - `ES582_RX_MODE=poll` keeps the old path for comparison; `recv_frame` now
+    blocks on a condition variable instead of sleeping in a poll loop
+- ✅ `Es582Device::rx_mode()` / `dropped_frames()` expose the receive-path state
+  (printed by `examples/es582_verify.rs`)
 
 ### v0.6.1 - XCP-on-CAN bring-up fixes
 

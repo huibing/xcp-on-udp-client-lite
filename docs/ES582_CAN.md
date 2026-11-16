@@ -24,13 +24,17 @@ runtime from the BOA V2 installation:
    open elsewhere reports `available = false`.
 2. **Open** – `OCI_CreateCANControllerVersion` is called with the newest
    supported API version (1.6 → 1.0), then `OCI_OpenCANController` with the bit
-   rate and timing, an Rx queue with **no** callbacks (frames are polled with
-   `OCI_ReadCANData*`), an accept-all frame filter (`mask = 0`) and a Tx queue.
-3. **Receive** – up to 16 messages are read per call into a small backlog queue;
-   classic CAN frames (`OCI_CAN_RX_MESSAGE`) and CAN-FD frames
-   (`OCI_CANFDRX_MESSAGE`) are decoded into [`CanFrame`], error frames/bus events
-   are surfaced with an empty payload. Timestamps are converted from controller
-   ticks to microseconds using the timer tick frequency (2 MHz on an ES582).
+   rate and timing, an Rx queue carrying the `onFrame` callback, the hardware
+   frame filters and a Tx queue.
+3. **Receive** – the OCI `onFrame` callback (`OCI_CANRxCallbackFunctionSingleMsgEx`)
+   is registered on the Rx queue, so BOA pushes every frame that passes the
+   hardware filters from its own receive thread. The callback copies the frame
+   into a bounded local queue (`RxContext`) and `recv_frame` only drains that
+   queue — no USB round trip per frame. Classic CAN (`OCI_CAN_RX_MESSAGE`) and
+   CAN-FD (`OCI_CANFDRX_MESSAGE`) frames share one decoder; error frames/bus
+   events are surfaced with an empty payload. Timestamps are converted from
+   controller ticks to microseconds using the timer tick frequency (2 MHz on an
+   ES582).
 4. **Transmit** – classic CAN for payloads ≤ 8 bytes, CAN-FD (`FD_DATA` +
    `FD_DATA_BIT_RATE`) for longer payloads when the channel was opened in FD
    mode. The write uses a zero timeout: `OCI_WriteCANData*` blocks while the Tx
@@ -40,21 +44,45 @@ runtime from the BOA V2 installation:
 The XCP framing itself (one packet per frame, PID filtering, `MAX_DLC_REQUIRED`
 padding) is unchanged and lives in `CanTransport`.
 
-## Receive throughput and hardware filtering
+## Why the callback, not `OCI_ReadCANDataEx`
 
-`OCI_ReadCANDataEx` returns **one frame per call** on an ES582, and each call
-costs a USB round trip (~15-20 ms measured). A tight poll loop therefore tops
-out at ~50-85 frames/s, which is below the 150 frames/s of a typical periodic
-CAN network — the device's receive queue grows and every XCP response is delayed
-by the backlog (observed: latencies climbing 0.3 s → 1.4 s → 2.9 s, then
-timeouts).
+Polling was the first implementation and it does not work on a real bus.
+Measured on an ES582.1 (500 kbit/s, 150 frames/s of periodic traffic):
 
-The fix is to never let unrelated traffic reach the host: `CanTransport` passes
-`CAN_ID_SLAVE` + the DAQ DTO IDs to the driver in
+| Path | `OCI_ReadCANDataEx` (poll) | `onFrame` callback (default) |
+|------|---------------------------|------------------------------|
+| Frames per call | **1** (even with `size = 16`) | whole batch, pushed by BOA |
+| Cost per call | ~7.5 ms busy / ~15-20 ms idle (USB round trip) | ~0 (a mutex push) |
+| Capture of 150 frames/s | 354 of 750 frames in 5 s (~80 % lost) | **750 of 750** |
+| DAQ, 10 ms event | 65-88 samples/s (expected 100), jittery | **100.0 samples/s**, steady |
+
+A poll loop therefore falls behind the bus, the device queue grows, and every
+XCP response / DAQ sample is delayed by the backlog — in the desktop app this
+showed up as variable updates lagging by minutes.
+
+The callback runs on a BOA-internal thread, so the implementation keeps the
+contract tight:
+
+- the body never blocks, never calls back into OCI, and is wrapped in
+  `catch_unwind` (a panic must not unwind across the FFI boundary);
+- the `OCI_CANMessageEx*` is only valid during the call, so the frame is copied
+  immediately (fixed 96-byte view, `sizeof(OCI_CANMessageEx)`);
+- the queue is capped (`RX_QUEUE_CAPACITY`); on overflow the oldest frame is
+  dropped and counted (`dropped_frames()`);
+- BOA may invoke the callback once **after** `OCI_DestroyCANController` returns,
+  so `RxContext` is never freed: teardown sets `closed` (the callback then
+  no-ops), wakes waiters and leaks one reference.
+
+`ES582_RX_MODE=poll` switches back to the polling path for comparison/debugging;
+`callback` is the default.
+
+## Hardware filtering still matters
+
+Even with the callback path, unrelated traffic is pointless work. `CanTransport`
+passes `CAN_ID_SLAVE` + the DAQ DTO IDs to the driver in
 `CanDeviceConfig::accept_ids`, and the driver programs one
-`OCI_AddCANFrameFilter` per ID (exact 29-bit match). With that, only XCP frames
-are queued, the per-frame read cost is irrelevant, and responses arrive within
-~20 ms.
+`OCI_AddCANFrameFilter` per ID (exact 29-bit match), so only XCP frames are
+queued.
 
 When `accept_ids` is empty (e.g. `examples/es582_verify.rs`, which monitors the
 raw bus) the driver falls back to a single accept-all filter.
@@ -109,6 +137,7 @@ ES582_FD_BTL_CYCLES=12 ES582_FD_SAMPLE_POINT=60 ES582_FD_SJW=3
 | `BOA_DLL_DIR` | directory with `dll-ocdProxy.dll` / `dll-csiBind.dll` (default `%ProgramFiles%\ETAS\BOA_V2\Bin\x64\Dll\Framework`) |
 | `BOA_OCD_DIR` | OCD plugin directory (default `%ProgramFiles%\ETAS\ED-EBI_V2\Bin\x64\Dll\OCDs`) |
 | `ES582_URI` | channel URI to use when the config pins none |
+| `ES582_RX_MODE` | `callback` (default) or `poll` (`OCI_ReadCANDataEx`, diagnostics only) |
 | `ES582_SELF_RECEPTION` | `1` also delivers self-transmitted frames (loopback bring-up) |
 | `ES582_BTL_CYCLES`, `ES582_SAMPLE_POINT`, `ES582_SJW` | nominal phase timing override |
 | `ES582_FD_BTL_CYCLES`, `ES582_FD_SAMPLE_POINT`, `ES582_FD_SJW` | CAN-FD data phase timing override |
@@ -160,4 +189,5 @@ baudrate = 500000
 | `OCI_OpenCANController … invalid parameter` for every candidate | bit rate/timing not representable; pin `ES582_BTL_CYCLES`/`ES582_SAMPLE_POINT` |
 | Frames received but state goes `error-passive`/`bus-off` after transmit | no other node acknowledges — wrong bus or wrong bit rate |
 | No frames at all | bus is idle or the bit rate differs; verify with `ES582_SELF_RECEPTION=1` plus a self-transmitted frame |
-| XCP commands time out although the slave answers | bus traffic floods the device queue — check that `accept_ids` reached the driver (`RUST_LOG=debug` logs `N hardware frame filter(s)`), and raise the CTO timeout for slow slaves (`XcpClient::set_command_timeout`) |
+| XCP commands time out although the slave answers | bus traffic floods the device queue — check that `accept_ids` reached the driver (`RUST_LOG=debug` logs `N hardware frame filter(s)`) and that the receive path is the callback (`RUST_LOG=info` logs `rx=callback` / `receive queue created in Callback mode`), and raise the CTO timeout for slow slaves (`XcpClient::set_command_timeout`) |
+| DAQ/变量更新滞后、丢帧 | the polling path was in use (`ES582_RX_MODE=poll`) — it loses ~80 % of frames on a 150 frames/s bus; drop the variable and restart, `dropped_frames()` must stay 0 |

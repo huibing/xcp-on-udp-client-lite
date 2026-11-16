@@ -19,7 +19,8 @@
 use std::time::{Duration, Instant};
 
 use xcp_client::transport::{
-    es582::Es582Driver, find_driver, list_can_devices, CanDeviceConfig, CanDeviceError, CanFrame,
+    es582::Es582Driver, find_driver, list_can_devices, CanDevice, CanDeviceConfig, CanDeviceError,
+    CanFrame,
 };
 
 fn env_or(key: &str, default: &str) -> String {
@@ -192,22 +193,26 @@ fn main() {
         data_baudrate: fd_bitrate,
         accept_ids: Vec::new(),
     };
-    let mut device = match driver.open(&config) {
+    // The concrete device type exposes the receive-path diagnostics
+    // (`rx_mode`, `dropped_frames`) that the boxed trait object hides.
+    let mut device = match Es582Driver::new().open_device(&config) {
         Ok(device) => device,
         Err(error) => {
             println!("    FAIL: {}", error);
             std::process::exit(1);
         }
     };
+    let _ = &driver;
     let info = device.info();
     println!(
-        "    OK: {} device {} channel {} (ctrl {}, fd={}, bitrate={})",
+        "    OK: {} device {} channel {} (ctrl {}, fd={}, bitrate={}, rx={})",
         info.device_type,
         info.device_id,
         info.channel,
         info.controller,
         device.is_fd(),
-        device.bitrate_description()
+        device.bitrate_description(),
+        device.rx_mode()
     );
     println!();
 
@@ -313,7 +318,11 @@ fn main() {
     }
 
     match device.close() {
-        Ok(()) => println!("    OK: channel closed"),
+        Ok(()) => println!(
+            "    OK: channel closed (rx={}, dropped={})",
+            device.rx_mode(),
+            device.dropped_frames()
+        ),
         Err(error) => println!("    FAIL: close: {}", error),
     }
     drop(device);
