@@ -1,0 +1,125 @@
+# Sample DAQ live-print configuration
+#
+# Usage: cargo run --release -- daq-print --config daq_print.config.toml
+#
+# Prints the latest value of every selected measurement to stdout instead of
+# writing MF4/CSV files. Each event group is printed on its own line:
+#
+#   [12:00:01.234] inverter ev0  A=1  B=25.5  C=ON
+#
+# Lines starting with '#' are the startup header (safe to filter with grep -v '^#').
+# Data lines can be captured with e.g.  ... | tee capture.log
+#
+# Press CTRL+C to stop (or type "q" + Enter when stdin is a terminal).
+
+[print]
+# Output mode:
+#   "line"        append one line per event per print tick (default, capture friendly)
+#   "single-line" keep one line per event and redraw that block in place, so the
+#                 terminal never scrolls. Only the latest values stay visible.
+#                 Requires a terminal; falls back to "line" when redirected.
+mode = "line"
+
+# Default decimation for events that don't declare their own.
+# 1 = print every sample.
+decimation = 1
+# Prefix data lines with the wall-clock time.
+timestamp = true
+# Print the startup header (# lines).
+header = true
+# How often the live snapshots are polled (milliseconds).
+# This bounds the maximum print rate: with refresh_ms = 10 at most 100 lines
+# per second and event are printed.
+refresh_ms = 10
+
+# ---------------------------------------------------------------------------
+# One [[slaves]] table per XCP slave. Each slave has its own A2L file,
+# transport, DAQ defaults and event groups.
+#
+# NOTE for CAN: every slave opens its own CAN device/channel, so multiple CAN
+# slaves need distinct `channel` (or `device_id`/`controller`) settings.
+# UDP/TCP slaves are independent and can share one config freely.
+# ---------------------------------------------------------------------------
+
+[[slaves]]
+name = "inverter"                # label used in the printed lines
+a2l = "pms-a.a2l"
+
+[slaves.connection]
+# Transport type: "udp" (default), "tcp" or "can".
+# When omitted, the transport is auto-selected from the A2L file
+# (priority: UDP > CAN > TCP).
+type = "can"
+
+# Undeclared fields fall back to the A2L XCP_ON_CAN block
+# (BAUDRATE, CAN_ID_SLAVE, DAQ_LIST_CAN_ID, MAX_DLC_REQUIRED, ...).
+#driver = "pcan"                 # CAN driver id (default: "pcan")
+#channel = "auto"                # CAN channel, e.g. "PCAN_USBBUS1" ("auto" = first free)
+#device_id = "3"                 # Stable device id (overrides channel when set)
+#controller = 0                  # Controller index within the device
+#can_id = 0x7fb                  # CAN_ID_MASTER (required unless the A2L declares it)
+#baudrate = 500000               # Nominal bit rate in bit/s
+#data_baudrate = 2000000         # Data-phase bit rate; presence enables CAN-FD
+#slave_id = 0x7fc                # CAN_ID_SLAVE (response CAN ID)
+#daq_ids = [0x7fd]               # DAQ DTO CAN IDs
+#max_dlc_required = false        # Pad command frames to the maximum DLC
+
+# For UDP/TCP use the slave address instead:
+# [slaves.connection]
+# type = "udp"
+# addr = "192.168.1.100:5555"
+
+[slaves.daq]
+# Default event channel for measurements without an explicit [[slaves.events]]
+# entry. Event channels are defined in the A2L file (e.g. 0 = 5ms, 1 = 10ms).
+event_channel = 0
+
+# Group measurements by event channel. Each event is printed independently.
+# If this section is omitted, ALL measurements are printed on event_channel.
+[[slaves.events]]
+channel = 0
+# Print every 100th sample. For a 10 ms event this prints once per second.
+decimation = 100
+measurements = ["CAN1_TX_PMS03_PMS_BATTMODEREQ", "CAN1_TX_PMS02_PMS_MAXTEMP", "CAN1_TX_PMS02_PMS_BUSVOLTAGE"]
+
+[[slaves.events]]
+channel = 1
+# Print every 10th sample (e.g. 100 ms for a 10 ms event).
+decimation = 10
+measurements = ["AIN_v_Voltage", "DIN_b_SwSts"]
+
+# ---------------------------------------------------------------------------
+# A second, independent slave. Uncomment to acquire two ECUs at once.
+# ---------------------------------------------------------------------------
+#[[slaves]]
+#name = "charger"
+#a2l = "charger.a2l"
+#
+#[slaves.connection]
+#addr = "192.168.1.20:5555"
+#
+#[slaves.daq]
+#event_channel = 2
+#
+#[[slaves.events]]
+#channel = 2
+#decimation = 50
+#measurements = ["CHG_Voltage", "CHG_Current", "CHG_State"]
+
+# ---------------------------------------------------------------------------
+# Single-slave shorthand: instead of [[slaves]] you may use the same top-level
+# layout as daq_record.config.toml:
+#
+#   a2l = "pms-a.a2l"
+#
+#   [connection]
+#   type = "can"
+#
+#   [daq]
+#   event_channel = 0
+#
+#   [[events]]
+#   channel = 0
+#   decimation = 100
+#   measurements = ["CAN1_TX_PMS02_PMS_MAXTEMP"]
+# ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 - **Checksum Verification**: BUILD_CHECKSUM with 9 XCP algorithms (ADD, CRC)
 - **A2L Integration**: Each slave has independent A2L calibration/measurement data
 - **HEX File Support**: Intel HEX parser for firmware reference images
-- **CLI Subcommands**: Non-interactive `calibrate`, `verify`, and `daq-record` for CI/automation
+- **CLI Subcommands**: Non-interactive `calibrate`, `verify`, `daq-record` and `daq-print` for CI/automation
 - **Web UI**: Browser-based interface with multi-slave management
 - **Desktop App (Tauri)**: Native cross-platform GUI with Experiment and Compare workflows
 - **TUI**: Interactive terminal UI for single-device debugging
@@ -61,6 +61,8 @@ lib.rs → client.rs (XcpClient - Multi-Slave Manager)
     ├── calibrate.rs       # CLI calibrate subcommand
     ├── verify.rs          # CLI verify subcommand
     ├── daq_record.rs      # CLI daq-record subcommand
+    ├── daq_print.rs       # CLI daq-print subcommand (live stdout)
+    ├── cli_connection.rs  # Shared CLI/TOML connection settings
     │
     ├── a2l.rs             # A2L description file support entrypoint
     │   └── a2l/
@@ -416,6 +418,127 @@ cargo run --release -- calibrate --a2l ecu.a2l --var my_param --value 1 \
 ```
 
 CAN IDs and bit rates accept decimal or `0x`-prefixed hexadecimal values.
+
+### Print Live DAQ Values (CLI)
+
+Print DAQ measurements to **stdout** instead of writing files — useful for quick
+checks and shell capture (`grep`, `tee`, `awk`). One line is printed per event
+group and per print tick:
+
+```bash
+cargo run --release -- daq-print --config daq_print.config.toml
+
+# capture to a file (header lines start with '#')
+cargo run --release -- daq-print --config daq_print.config.toml | tee capture.log
+```
+
+Example output:
+
+```text
+# xcp-client daq-print | 1 slave(s) | refresh 10ms | mode line | CTRL+C to stop
+# [inverter] pms-a.a2l via CAN PCAN_USBBUS1 0x7FB
+# [inverter] ev0 "Task_10ms" | 10ms | every 100 sample(s) (~1000ms) | 3 signal(s)
+# [inverter]   CAN1_TX_PMS03_PMS_BATTMODEREQ, CAN1_TX_PMS02_PMS_MAXTEMP, CAN1_TX_PMS02_PMS_BUSVOLTAGE
+[12:00:01.234] inverter ev0  CAN1_TX_PMS03_PMS_BATTMODEREQ=3  CAN1_TX_PMS02_PMS_MAXTEMP=25.5  CAN1_TX_PMS02_PMS_BUSVOLTAGE=48.2
+```
+
+- Values are **physical values** (A2L `COMPU_METHOD` applied); enumerations
+  (`COMPU_VTAB`) print as text
+- Header lines start with `#` so data lines are easy to filter
+- Signals not yet received are printed as `NAME=-`
+- Runs until CTRL+C (or `q` + Enter when stdin is a terminal)
+
+#### Decimation (print rate)
+
+Printing every sample of a 10 ms event is noisy. Each event can declare a
+`decimation` — the number of samples between prints:
+
+```toml
+[[slaves.events]]
+channel = 0
+measurements = ["CAN1_TX_PMS02_PMS_MAXTEMP"]
+decimation = 100        # 10 ms event → printed once per second
+```
+
+`[print].decimation` sets the default for events without their own value, and
+`[print].refresh_ms` bounds the polling rate (default 10 ms).
+
+#### Output modes
+
+`[print].mode` selects how lines reach the terminal:
+
+| mode | behaviour |
+|------|-----------|
+| `line` (default) | appends one line per event per print tick — every sample is kept, so the output can be captured |
+| `single-line` | keeps a fixed block with one line per event and redraws it in place (ANSI cursor-up), so the terminal never scrolls |
+
+```toml
+[print]
+mode = "single-line"     # live dashboard: latest values only
+refresh_ms = 50
+```
+
+In `single-line` mode each event still honours its `decimation`, so a 10 ms
+event with `decimation = 100` refreshes its line once per second while other
+events keep updating. Lines longer than the terminal width are truncated, and
+if there are more events than terminal rows the block is capped with a
+`... (+N more event(s))` line.
+
+> `single-line` needs a terminal. When stdout is redirected (e.g. `| tee`), the
+> tool warns and falls back to `line` mode, because in-place updates would only
+> leave the last frame in the file.
+
+#### Multiple slaves
+
+Each `[[slaves]]` table is an independent acquisition session with its own A2L,
+transport, DAQ defaults and event groups. Slave labels default to the A2L file
+stem.
+
+```toml
+[print]
+mode = "line"          # or "single-line" for an in-place dashboard
+decimation = 1
+refresh_ms = 10
+
+[[slaves]]
+name = "inverter"
+a2l = "pms-a.a2l"
+
+[slaves.connection]
+type = "can"
+can_id = 0x7fb
+slave_id = 0x7fc
+daq_ids = [0x7fd]
+
+[slaves.daq]
+event_channel = 0
+
+[[slaves.events]]
+channel = 0
+decimation = 100
+measurements = ["CAN1_TX_PMS02_PMS_MAXTEMP"]
+
+[[slaves]]
+name = "charger"
+a2l = "charger.a2l"
+
+[slaves.connection]
+addr = "192.168.1.20:5555"
+
+[[slaves.events]]
+channel = 2
+decimation = 50
+measurements = ["CHG_Voltage", "CHG_Current"]
+```
+
+A single-slave config may also use the top-level `a2l`, `[connection]`, `[daq]`
+and `[[events]]` layout of `daq-record` (see `daq_print.config.toml`).
+
+> **CAN note:** every slave opens its own CAN device/channel, so multiple CAN
+> slaves need distinct `channel` (or `device_id`/`controller`) settings.
+> UDP/TCP slaves are independent and can be combined freely.
+
+See `daq_print.config.toml` for a fully commented example.
 
 ### Verify ECU Flash Checksums (CLI)
 
@@ -957,6 +1080,8 @@ cargo test test_name -- --nocapture
 │   ├── calibrate.rs     # CLI calibrate subcommand
 │   ├── verify.rs        # CLI verify subcommand
 │   ├── daq_record.rs    # CLI daq-record subcommand
+│   ├── daq_print.rs     # CLI daq-print subcommand (live stdout)
+│   ├── cli_connection.rs # Shared CLI/TOML connection settings
 │   ├── a2l/             # A2L file support
 │   ├── protocol/        # XCP protocol implementation
 │   ├── transport/       # Transport abstraction (UDP/TCP/CAN + CAN device drivers)

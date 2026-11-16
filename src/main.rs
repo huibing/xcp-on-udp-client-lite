@@ -2,6 +2,7 @@
 
 mod calibrate;
 mod cli_connection;
+mod daq_print;
 mod daq_record;
 mod tui;
 mod verify;
@@ -122,6 +123,80 @@ enum Mode {
         #[arg(long)]
         config: String,
     },
+    /// Print live DAQ measurements to stdout (no files written).
+    ///
+    /// Connects to one or more XCP slaves, starts DAQ and prints the latest
+    /// value of every selected measurement as one line per event group.
+    /// Output is `#`-prefixed header lines plus data lines, e.g.:
+    ///
+    ///   [12:00:01.234] ecu1 ev0  RPM=1500  TEMP=25.5  STATE=ON
+    ///
+    /// Values are physical values (A2L COMPU_METHOD applied); enums print as
+    /// text. Runs until CTRL+C (or "q" + Enter when stdin is a terminal).
+    ///
+    /// `decimation` limits how often an event is printed: a 10 ms event with
+    /// `decimation = 100` prints once per second.
+    ///
+    /// `[print].mode` selects the output style: `"line"` (default) appends one
+    /// line per event per print tick — capture friendly. `"single-line"` keeps
+    /// one line per event and redraws that block in place, so the terminal never
+    /// scrolls; only the latest values remain visible. Single-line mode needs a
+    /// terminal and falls back to `"line"` when stdout is redirected.
+    ///
+    /// Config file format (TOML) — multiple slaves:
+    ///
+    ///   [print]
+    ///   mode = "line"                 # "line" (append) or "single-line" (in place)
+    ///   decimation = 1                # default decimation for all events
+    ///   timestamp = true              # [HH:MM:SS.mmm] prefix on data lines
+    ///   header = true                 # print the startup header
+    ///   refresh_ms = 10               # snapshot polling interval
+    ///
+    ///   [[slaves]]
+    ///   name = "inverter"             # optional label (default: A2L file stem)
+    ///   a2l = "pms-a.a2l"
+    ///
+    ///   [slaves.connection]
+    ///   type = "can"                  # "udp" (default), "tcp" or "can"
+    ///   channel = "auto"              # or e.g. "PCAN_USBBUS1"
+    ///   can_id = 0x7fb                # CAN_ID_MASTER
+    ///   baudrate = 500000
+    ///   data_baudrate = 2000000       # presence enables CAN-FD
+    ///   slave_id = 0x7fc              # CAN_ID_SLAVE
+    ///   daq_ids = [0x7fd]             # DAQ DTO CAN IDs
+    ///
+    ///   [slaves.daq]
+    ///   event_channel = 0             # default event channel
+    ///
+    ///   [[slaves.events]]
+    ///   channel = 0
+    ///   decimation = 100              # print every 100th sample (~1 s @10 ms)
+    ///   measurements = ["speed", "rpm", "state"]
+    ///
+    ///   [[slaves.events]]
+    ///   channel = 1
+    ///   decimation = 10
+    ///   measurements = ["coolant_temp"]
+    ///
+    ///   [[slaves]]                    # second slave, independent config
+    ///   name = "charger"
+    ///   a2l = "charger.a2l"
+    ///
+    ///   [slaves.connection]
+    ///   addr = "192.168.1.20:5555"
+    ///
+    ///   [[slaves.events]]
+    ///   channel = 2
+    ///   measurements = ["voltage", "current"]
+    ///
+    /// A single-slave config can also use top-level `a2l`, `[connection]`,
+    /// `[daq]` and `[[events]]` exactly like `daq-record`.
+    #[command(verbatim_doc_comment)]
+    DaqPrint {
+        /// Path to TOML config file
+        #[arg(long)]
+        config: String,
+    },
 }
 
 /// Derive a short mode label from the CLI arguments for log naming.
@@ -131,6 +206,7 @@ fn mode_label(mode: &Option<Mode>) -> &'static str {
         Some(Mode::Calibrate { .. }) => "calibrate",
         Some(Mode::Verify { .. }) => "verify",
         Some(Mode::DaqRecord { .. }) => "daq_record",
+        Some(Mode::DaqPrint { .. }) => "daq_print",
         Some(Mode::Tui) | None => "tui",
     }
 }
@@ -210,6 +286,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Mode::DaqRecord { config }) => {
             daq_record::run_daq_record(&config).await?;
+        }
+        Some(Mode::DaqPrint { config }) => {
+            daq_print::run_daq_print(&config).await?;
         }
         _ => {
             run_tui().await?;

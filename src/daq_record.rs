@@ -9,11 +9,10 @@
 use serde::Deserialize;
 use tokio::io::AsyncBufReadExt;
 use xcp_client::a2l::A2lTransportConfig;
-use xcp_client::transport::{
-    parse_transport_type, resolve_transport_config as resolve_transport, transport_display,
-    TransportConfig, TransportOverrides,
-};
+use xcp_client::transport::{transport_display, TransportConfig};
 use xcp_client::{A2lReader, DaqManager, XcpClient};
+
+pub use crate::cli_connection::ConnectionConfig;
 
 /// TOML config file structure
 #[derive(Debug, Deserialize)]
@@ -25,68 +24,6 @@ pub struct DaqRecordConfig {
     pub daq: Option<DaqConfig>,
     /// Event-based measurement grouping
     pub events: Option<Vec<EventConfig>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ConnectionConfig {
-    /// Transport type: `"udp"` (default), `"tcp"` or `"can"`.
-    /// When omitted, an explicit `addr` selects UDP; otherwise the transport
-    /// is auto-selected from the A2L file (priority UDP > CAN > TCP).
-    #[serde(rename = "type", alias = "transport")]
-    pub transport_type: Option<String>,
-    /// Slave address (`IP:port`) for UDP/TCP transports.
-    /// Falls back to the matching address from the A2L file.
-    pub addr: Option<String>,
-    /// CAN driver id (e.g. `"pcan"`); `None` uses the default driver.
-    #[serde(default)]
-    pub driver: Option<String>,
-    /// CAN driver channel (e.g. `"PCAN_USBBUS1"`); defaults to `"auto"`.
-    #[serde(default)]
-    pub channel: Option<String>,
-    /// Stable CAN device id (takes precedence over `channel` when set).
-    #[serde(default)]
-    pub device_id: Option<String>,
-    /// Controller index within the CAN device (used with `device_id`).
-    #[serde(default)]
-    pub controller: Option<u8>,
-    /// Command CAN ID (`CAN_ID_MASTER`). Falls back to the A2L `XCP_ON_CAN` block.
-    #[serde(default)]
-    pub can_id: Option<u32>,
-    /// Nominal (arbitration-phase) bit rate in bit/s.
-    #[serde(default)]
-    pub baudrate: Option<u32>,
-    /// CAN-FD data-phase bit rate in bit/s. Presence selects CAN-FD mode.
-    #[serde(default)]
-    pub data_baudrate: Option<u32>,
-    /// Slave response CAN ID (`CAN_ID_SLAVE`).
-    #[serde(default)]
-    pub slave_id: Option<u32>,
-    /// DAQ DTO CAN IDs (`DAQ_LIST_CAN_ID`).
-    #[serde(default)]
-    pub daq_ids: Option<Vec<u32>>,
-    /// Pad command frames to the maximum DLC (`MAX_DLC_REQUIRED`).
-    #[serde(default)]
-    pub max_dlc_required: Option<bool>,
-}
-
-impl ConnectionConfig {
-    /// Convert the TOML `[connection]` section into transport overrides.
-    fn overrides(&self) -> Result<TransportOverrides, String> {
-        Ok(TransportOverrides {
-            transport_type: parse_transport_type(self.transport_type.as_deref())?,
-            addr: self.addr.clone(),
-            driver: self.driver.clone(),
-            channel: self.channel.clone(),
-            device_id: self.device_id.clone(),
-            controller: self.controller,
-            can_id: self.can_id,
-            baudrate: self.baudrate,
-            data_baudrate: self.data_baudrate,
-            slave_id: self.slave_id,
-            daq_ids: self.daq_ids.clone(),
-            max_dlc_required: self.max_dlc_required,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,8 +59,7 @@ fn resolve_transport_config(
     connection: Option<&ConnectionConfig>,
     a2l_configs: &[A2lTransportConfig],
 ) -> Result<TransportConfig, String> {
-    let overrides = connection.map(ConnectionConfig::overrides).transpose()?;
-    resolve_transport(overrides.as_ref(), a2l_configs)
+    crate::cli_connection::resolve_connection_config(connection, a2l_configs)
 }
 
 /// Run the daq-record subcommand
@@ -774,8 +710,7 @@ csv = "recording.csv"
 
     #[test]
     fn test_parse_transport_type() {
-        use xcp_client::transport::TransportType;
-
+        use xcp_client::transport::{parse_transport_type, TransportType};
         assert_eq!(parse_transport_type(None).unwrap(), None);
         assert_eq!(
             parse_transport_type(Some("udp")).unwrap(),

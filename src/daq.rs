@@ -398,6 +398,24 @@ impl DaqRecord {
     }
 }
 
+/// Live snapshot of one DAQ list (event group), used by the `daq-print` CLI.
+///
+/// Unlike [`DaqRecord`], which holds the values of a single DTO packet, a
+/// snapshot keeps the latest known value of *every* signal of a DAQ list, so a
+/// consumer polling at a lower rate always sees a complete set of values.
+#[derive(Debug, Clone, Default)]
+pub struct DaqEventSnapshot {
+    /// Number of complete samples received for this DAQ list.
+    ///
+    /// Incremented once per sample cycle (i.e. on ODT 0 packets), so this is a
+    /// true sample counter even when a DAQ list is split across several ODTs.
+    pub samples: u64,
+    /// Latest known physical value per signal name
+    pub values: HashMap<String, f64>,
+    /// Seconds since DAQ start when the snapshot was last updated
+    pub timestamp_s: f64,
+}
+
 /// Parsed DTO packet data
 #[derive(Debug, Clone)]
 pub struct DtoData {
@@ -514,6 +532,10 @@ pub struct DaqManager {
     available_events: Vec<crate::a2l::DaqEvent>,
     /// Latest DAQ sample (for UI display)
     latest_sample: Arc<RwLock<Option<DaqRecord>>>,
+    /// Whether per-DAQ-list live snapshots are collected (daq-print mode)
+    snapshots_enabled: Arc<AtomicBool>,
+    /// Live per-DAQ-list snapshots (DAQ list number → snapshot)
+    event_snapshots: Arc<RwLock<HashMap<u16, DaqEventSnapshot>>>,
     /// timestamp mode and size
     timestamp_fixed: bool,
     timestamp_size: Option<u8>,
@@ -586,6 +608,8 @@ impl DaqManager {
             measurement_events: HashMap::new(),
             available_events: Vec::new(),
             latest_sample: Arc::new(RwLock::new(None)),
+            snapshots_enabled: Arc::new(AtomicBool::new(false)),
+            event_snapshots: Arc::new(RwLock::new(HashMap::new())),
             timestamp_fixed: false,
             timestamp_size: None,
             indentification_field_type: IdentificationFieldType::AbosulteODT, // most commonly used
@@ -643,6 +667,8 @@ impl DaqManager {
             measurement_events: HashMap::new(),
             available_events: Vec::new(),
             latest_sample: Arc::new(RwLock::new(None)),
+            snapshots_enabled: Arc::new(AtomicBool::new(false)),
+            event_snapshots: Arc::new(RwLock::new(HashMap::new())),
             timestamp_fixed: false,
             timestamp_size: None,
             indentification_field_type: IdentificationFieldType::AbosulteODT,
@@ -1080,6 +1106,29 @@ impl DaqManager {
         self.latest_sample.read().await.clone()
     }
 
+    /// Enable or disable per-DAQ-list live snapshot collection.
+    ///
+    /// Snapshots are only collected while enabled, so modes that do not need
+    /// them (TUI, Web UI, file recording) pay no cost. `daq-print` enables them
+    /// before starting DAQ and polls [`live_snapshots`](Self::live_snapshots).
+    pub fn set_live_snapshots_enabled(&mut self, enabled: bool) {
+        self.snapshots_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Latest live snapshot per DAQ list (DAQ list number → snapshot).
+    ///
+    /// Each snapshot holds the most recent value of every signal of that DAQ
+    /// list plus a sample counter, which lets a slow consumer (e.g. printing
+    /// once per second) know how many samples it skipped.
+    pub async fn live_snapshots(&self) -> HashMap<u16, DaqEventSnapshot> {
+        self.event_snapshots.read().await.clone()
+    }
+
+    /// Drop all live snapshots (e.g. before a DAQ restart)
+    pub async fn clear_live_snapshots(&self) {
+        self.event_snapshots.write().await.clear();
+    }
+
     pub async fn get_timestamp_mode(&mut self, slave: &XcpSlave) -> Result<(), String> {
         tracing::trace!("Getting timestamp mode...");
         // Get timestamp mode from slave through GET_DAQ_RESOLUTION_INFO
@@ -1458,6 +1507,9 @@ impl DaqManager {
         // Configure DAQ (always clears via FREE_DAQ and rebuilds from scratch)
         self.configure(slave).await?;
 
+        // Reset live snapshots so a DAQ restart begins from a clean state
+        self.clear_live_snapshots().await;
+
         // Get DTO receiver for DAQ reception (must be done before starting DAQ)
         let dto_rx = slave.get_dto_receiver();
 
@@ -1524,6 +1576,8 @@ impl DaqManager {
         let running = self.running.clone();
         let recording = self.recording.clone();
         let latest_sample = self.latest_sample.clone();
+        let snapshots_enabled = self.snapshots_enabled.clone();
+        let event_snapshots = self.event_snapshots.clone();
         let daq_config = self.daq_config.clone();
         let timestamp_size = self.timestamp_size.unwrap_or(0);
         let iden_field_type = self.indentification_field_type.clone();
@@ -1712,6 +1766,22 @@ impl DaqManager {
                                         }
                                         *latest = Some(r);
                                     }
+                                }
+                            }
+
+                            // Publish a live snapshot for this DAQ list (daq-print).
+                            // Merge the ODT values into the list's accumulated
+                            // snapshot so signals carried by other ODTs keep their
+                            // last known value.
+                            if snapshots_enabled.load(Ordering::Relaxed) {
+                                let mut snaps = event_snapshots.write().await;
+                                let snap = snaps.entry(resolved_daq_list).or_default();
+                                for (name, value) in &record.values {
+                                    snap.values.insert(name.clone(), *value);
+                                }
+                                snap.timestamp_s = display_timestamp_s;
+                                if resolved_odt == 0 {
+                                    snap.samples = snap.samples.saturating_add(1);
                                 }
                             }
 

@@ -111,10 +111,7 @@ async fn send_command_and_wait_skips_unsolicited_ev_and_serv_packets() {
 
     // And the next command must not receive the stale GET_ID response
     // misattributed from the previous exchange.
-    assert_eq!(
-        slave.get_id(0).await.expect("next get id"),
-        MOCK_ID_STRING
-    );
+    assert_eq!(slave.get_id(0).await.expect("next get id"), MOCK_ID_STRING);
 
     drop(slave);
     client.disconnect_all().await.expect("disconnect");
@@ -262,5 +259,224 @@ async fn daq_streaming_reaches_latest_sample_and_event_metadata() {
 
     drop(slave);
     client.disconnect_all().await.expect("disconnect");
+    server.stop().await.expect("stop mock server");
+}
+
+/// The `daq-print` CLI relies on `DaqManager` live snapshots: per-DAQ-list
+/// values merged across ODTs plus a sample counter that decimation uses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daq_live_snapshots_track_values_and_sample_count() {
+    let _guard = PORT_LOCK.lock().await;
+    let server = MockXcpSlaveServer::start()
+        .await
+        .expect("start mock server");
+
+    let mut client = XcpClient::new();
+    let slave_id = client
+        .connect_slave_udp("mock", MOCK_SLAVE_ADDR)
+        .await
+        .expect("connect slave");
+    client
+        .load_a2l_for_slave(slave_id, "hello_xcp.a2l")
+        .await
+        .expect("load a2l");
+
+    let slave = client.get_slave(slave_id).expect("get slave");
+    let slave = slave.lock().await;
+
+    let events = slave.get_daq_events(1).await.expect("daq events");
+
+    {
+        let mut daq = slave.daq_manager.lock().await;
+        daq.set_available_events(events);
+        daq.set_csv_enabled(false);
+        daq.set_mf4_enabled(false);
+        daq.set_live_snapshots_enabled(true);
+        daq.start(&slave, 10).await.expect("start daq");
+    }
+
+    // Wait until a couple of samples have been accumulated.
+    let mut snapshots = std::collections::HashMap::new();
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        snapshots = slave.daq_manager.lock().await.live_snapshots().await;
+        if snapshots.values().any(|snapshot| snapshot.samples >= 2) {
+            break;
+        }
+    }
+
+    {
+        let daq = slave.daq_manager.lock().await;
+        daq.stop(&slave).await.expect("stop daq");
+    }
+
+    let snapshot = snapshots
+        .values()
+        .max_by_key(|snapshot| snapshot.samples)
+        .expect("at least one live snapshot");
+    assert!(
+        snapshot.samples >= 2,
+        "expected multiple samples, got {}",
+        snapshot.samples
+    );
+    assert!(
+        snapshot.values.contains_key("counter"),
+        "snapshot values: {:?}",
+        snapshot.values.keys().collect::<Vec<_>>()
+    );
+    assert!(snapshot.timestamp_s >= 0.0);
+
+    drop(slave);
+    client.disconnect_all().await.expect("disconnect");
+    server.stop().await.expect("stop mock server");
+}
+
+/// End-to-end smoke test of `daq-print`: the CLI must print header lines plus
+/// at least one data line carrying a live measurement value to stdout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daq_print_cli_prints_live_values_to_stdout() {
+    let _guard = PORT_LOCK.lock().await;
+    let server = MockXcpSlaveServer::start()
+        .await
+        .expect("start mock server");
+
+    let dir = std::env::temp_dir().join(format!("xcp-daq-print-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let config_path = dir.join("daq_print.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+a2l = "hello_xcp.a2l"
+
+[connection]
+addr = "{MOCK_SLAVE_ADDR}"
+
+[print]
+decimation = 1
+refresh_ms = 10
+
+[[events]]
+channel = 0
+measurements = ["counter"]
+"#
+        ),
+    )
+    .expect("write config");
+
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xcp_client"))
+        .arg("daq-print")
+        .arg("--config")
+        .arg(&config_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn daq-print");
+
+    // Give the CLI time to connect, start DAQ and print a few samples.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    child.kill().await.expect("kill daq-print");
+    let output = child.wait_with_output().await.expect("collect output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("# xcp-client daq-print"),
+        "missing header in stdout: {}",
+        stdout
+    );
+    let data_line = stdout
+        .lines()
+        .find(|line| !line.starts_with('#'))
+        .unwrap_or("");
+    assert!(
+        data_line.contains("counter="),
+        "no data line with 'counter=' in stdout: {}",
+        stdout
+    );
+    assert!(
+        data_line.contains("ev0"),
+        "data line is not tagged with the event: {}",
+        data_line
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    server.stop().await.expect("stop mock server");
+}
+
+/// `single-line` mode must fall back to appended lines when stdout is not a
+/// terminal (piped), so captures never contain raw ANSI escape sequences.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daq_print_cli_single_line_mode_falls_back_when_piped() {
+    let _guard = PORT_LOCK.lock().await;
+    let server = MockXcpSlaveServer::start()
+        .await
+        .expect("start mock server");
+
+    let dir = std::env::temp_dir().join(format!("xcp-daq-print-inline-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let config_path = dir.join("daq_print_inline.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+a2l = "hello_xcp.a2l"
+
+[connection]
+addr = "{MOCK_SLAVE_ADDR}"
+
+[print]
+mode = "single-line"
+decimation = 1
+refresh_ms = 10
+
+[[events]]
+channel = 0
+measurements = ["counter"]
+"#
+        ),
+    )
+    .expect("write config");
+
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xcp_client"))
+        .arg("daq-print")
+        .arg("--config")
+        .arg(&config_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn daq-print");
+
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    child.kill().await.expect("kill daq-print");
+    let output = child.wait_with_output().await.expect("collect output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("mode line"),
+        "header should report the fallback mode: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "piped output must not contain ANSI escapes: {:?}",
+        stdout
+    );
+    let data_lines = stdout.lines().filter(|line| !line.starts_with('#')).count();
+    assert!(
+        data_lines > 1,
+        "expected appended data lines, got {} in: {}",
+        data_lines,
+        stdout
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
     server.stop().await.expect("stop mock server");
 }

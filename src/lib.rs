@@ -21,7 +21,9 @@ pub use calibration::{
     CalibrationParam, CalibrationType, CalibrationValue,
 };
 pub use client::XcpClient;
-pub use daq::{DaqConfiguration, DaqManager, DaqRecord, Measurement, OdtEntryConfig};
+pub use daq::{
+    DaqConfiguration, DaqEventSnapshot, DaqManager, DaqRecord, Measurement, OdtEntryConfig,
+};
 // Use types from a2l module
 pub use a2l::{
     A2lCharacteristic, A2lDataType, A2lMeasurement, A2lMemorySegment, A2lReader, AxisInfo,

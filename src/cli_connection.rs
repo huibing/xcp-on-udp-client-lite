@@ -4,8 +4,13 @@
 //! against ECUs that only speak XCP-on-CAN. [`ConnectionArgs`] adds optional
 //! transport flags that are merged with the A2L `IF_DATA` transport blocks by
 //! [`resolve_transport_config`](xcp_client::transport::resolve_transport_config).
+//!
+//! [`ConnectionConfig`] is the same information expressed as a TOML
+//! `[connection]` section for the config-file driven subcommands
+//! (`daq-record`, `daq-print`).
 
 use clap::Args;
+use serde::Deserialize;
 use xcp_client::a2l::A2lTransportConfig;
 use xcp_client::transport::{
     parse_transport_type, resolve_transport_config, TransportConfig, TransportOverrides,
@@ -124,6 +129,86 @@ fn parse_number(value: &str) -> Result<u32, String> {
         None => (10, text),
     };
     u32::from_str_radix(&digits, radix).map_err(|e| format!("invalid number '{}': {}", value, e))
+}
+
+/// TOML `[connection]` section shared by the config-file driven subcommands.
+///
+/// Every field is optional: whatever is not declared falls back to the matching
+/// A2L `IF_DATA` transport block, and with no declaration at all the transport
+/// is auto-selected from the A2L file (UDP > CAN > TCP).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConnectionConfig {
+    /// Transport type: `"udp"` (default), `"tcp"` or `"can"`.
+    /// When omitted, an explicit `addr` selects UDP; otherwise the transport
+    /// is auto-selected from the A2L file (priority UDP > CAN > TCP).
+    #[serde(rename = "type", alias = "transport")]
+    pub transport_type: Option<String>,
+    /// Slave address (`IP:port`) for UDP/TCP transports.
+    /// Falls back to the matching address from the A2L file.
+    pub addr: Option<String>,
+    /// CAN driver id (e.g. `"pcan"`); `None` uses the default driver.
+    #[serde(default)]
+    pub driver: Option<String>,
+    /// CAN driver channel (e.g. `"PCAN_USBBUS1"`); defaults to `"auto"`.
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// Stable CAN device id (takes precedence over `channel` when set).
+    #[serde(default)]
+    pub device_id: Option<String>,
+    /// Controller index within the CAN device (used with `device_id`).
+    #[serde(default)]
+    pub controller: Option<u8>,
+    /// Command CAN ID (`CAN_ID_MASTER`). Falls back to the A2L `XCP_ON_CAN` block.
+    #[serde(default)]
+    pub can_id: Option<u32>,
+    /// Nominal (arbitration-phase) bit rate in bit/s.
+    #[serde(default)]
+    pub baudrate: Option<u32>,
+    /// CAN-FD data-phase bit rate in bit/s. Presence selects CAN-FD mode.
+    #[serde(default)]
+    pub data_baudrate: Option<u32>,
+    /// Slave response CAN ID (`CAN_ID_SLAVE`).
+    #[serde(default)]
+    pub slave_id: Option<u32>,
+    /// DAQ DTO CAN IDs (`DAQ_LIST_CAN_ID`).
+    #[serde(default)]
+    pub daq_ids: Option<Vec<u32>>,
+    /// Pad command frames to the maximum DLC (`MAX_DLC_REQUIRED`).
+    #[serde(default)]
+    pub max_dlc_required: Option<bool>,
+}
+
+impl ConnectionConfig {
+    /// Convert the TOML `[connection]` section into transport overrides.
+    pub fn overrides(&self) -> Result<TransportOverrides, String> {
+        Ok(TransportOverrides {
+            transport_type: parse_transport_type(self.transport_type.as_deref())?,
+            addr: self.addr.clone(),
+            driver: self.driver.clone(),
+            channel: self.channel.clone(),
+            device_id: self.device_id.clone(),
+            controller: self.controller,
+            can_id: self.can_id,
+            baudrate: self.baudrate,
+            data_baudrate: self.data_baudrate,
+            slave_id: self.slave_id,
+            daq_ids: self.daq_ids.clone(),
+            max_dlc_required: self.max_dlc_required,
+        })
+    }
+}
+
+/// Resolve the XCP transport configuration from a TOML `[connection]` section
+/// and the A2L transport blocks.
+///
+/// Anything not declared in the config falls back to the A2L file (with
+/// UDP > CAN > TCP priority when no type is declared).
+pub fn resolve_connection_config(
+    connection: Option<&ConnectionConfig>,
+    a2l_configs: &[A2lTransportConfig],
+) -> Result<TransportConfig, String> {
+    let overrides = connection.map(ConnectionConfig::overrides).transpose()?;
+    resolve_transport_config(overrides.as_ref(), a2l_configs)
 }
 
 #[cfg(test)]
