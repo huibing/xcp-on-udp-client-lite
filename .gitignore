@@ -52,3 +52,9 @@ web_test/screenshots/
 ui/node_modules/
 ui/dist/
 src-tauri/output/data.json
+
+# Local runtime state written by the desktop app (device list, A2L paths)
+src-tauri/config.toml
+
+# Agent session data
+.pi/
