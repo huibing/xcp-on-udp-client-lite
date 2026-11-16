@@ -3,7 +3,7 @@
 //! Core data types for A2L characteristics, measurements, and conversion methods.
 
 /// Data type information extracted from A2L
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum A2lDataType {
     // Scalar types
     U8,
@@ -118,8 +118,14 @@ impl A2lDataType {
     }
 
     /// Check if this is a float type
+    ///
+    /// Array/matrix types report the element type's signedness/floatness, so
+    /// callers can inspect a block type before expanding it.
     pub fn is_float(&self) -> bool {
-        matches!(self, A2lDataType::F32 | A2lDataType::F64)
+        match self.element_type() {
+            Some((element, _)) => element.is_float(),
+            None => matches!(self, A2lDataType::F32 | A2lDataType::F64),
+        }
     }
 
     /// Check if this is an integer type
@@ -129,10 +135,68 @@ impl A2lDataType {
 
     /// Check if this integer type should be decoded as signed
     pub fn is_signed_integer(&self) -> bool {
-        matches!(
-            self,
-            A2lDataType::I8 | A2lDataType::I16 | A2lDataType::I32 | A2lDataType::I64
-        )
+        match self.element_type() {
+            Some((element, _)) => element.is_signed_integer(),
+            None => matches!(
+                self,
+                A2lDataType::I8 | A2lDataType::I16 | A2lDataType::I32 | A2lDataType::I64
+            ),
+        }
+    }
+
+    /// Element type and element count for array/matrix types.
+    ///
+    /// Returns `None` for scalar types. Used to expand block measurements into
+    /// one scalar measurement per element, because DAQ lists, CSV columns and
+    /// MF4 channels can only carry scalars.
+    pub fn element_type(&self) -> Option<(A2lDataType, usize)> {
+        let (element, count) = match self {
+            // Array types
+            A2lDataType::U8Array(n) => (A2lDataType::U8, *n),
+            A2lDataType::U16Array(n) => (A2lDataType::U16, *n),
+            A2lDataType::U32Array(n) => (A2lDataType::U32, *n),
+            A2lDataType::U64Array(n) => (A2lDataType::U64, *n),
+            A2lDataType::I8Array(n) => (A2lDataType::I8, *n),
+            A2lDataType::I16Array(n) => (A2lDataType::I16, *n),
+            A2lDataType::I32Array(n) => (A2lDataType::I32, *n),
+            A2lDataType::I64Array(n) => (A2lDataType::I64, *n),
+            A2lDataType::F32Array(n) => (A2lDataType::F32, *n),
+            A2lDataType::F64Array(n) => (A2lDataType::F64, *n),
+            A2lDataType::BoolArray(n) => (A2lDataType::Bool, *n),
+            // Matrix types (row-major order)
+            A2lDataType::U8Matrix(r, c) => (A2lDataType::U8, r * c),
+            A2lDataType::U16Matrix(r, c) => (A2lDataType::U16, r * c),
+            A2lDataType::U32Matrix(r, c) => (A2lDataType::U32, r * c),
+            A2lDataType::U64Matrix(r, c) => (A2lDataType::U64, r * c),
+            A2lDataType::I8Matrix(r, c) => (A2lDataType::I8, r * c),
+            A2lDataType::I16Matrix(r, c) => (A2lDataType::I16, r * c),
+            A2lDataType::I32Matrix(r, c) => (A2lDataType::I32, r * c),
+            A2lDataType::I64Matrix(r, c) => (A2lDataType::I64, r * c),
+            A2lDataType::F32Matrix(r, c) => (A2lDataType::F32, r * c),
+            A2lDataType::F64Matrix(r, c) => (A2lDataType::F64, r * c),
+            A2lDataType::BoolMatrix(r, c) => (A2lDataType::Bool, r * c),
+            // Scalar types
+            _ => return None,
+        };
+        Some((element, count))
+    }
+
+    /// Matrix dimensions `(rows, cols)` for matrix types, `None` otherwise.
+    pub fn matrix_dims(&self) -> Option<(usize, usize)> {
+        match self {
+            A2lDataType::U8Matrix(r, c)
+            | A2lDataType::U16Matrix(r, c)
+            | A2lDataType::U32Matrix(r, c)
+            | A2lDataType::U64Matrix(r, c)
+            | A2lDataType::I8Matrix(r, c)
+            | A2lDataType::I16Matrix(r, c)
+            | A2lDataType::I32Matrix(r, c)
+            | A2lDataType::I64Matrix(r, c)
+            | A2lDataType::F32Matrix(r, c)
+            | A2lDataType::F64Matrix(r, c)
+            | A2lDataType::BoolMatrix(r, c) => Some((*r, *c)),
+            _ => None,
+        }
     }
 }
 

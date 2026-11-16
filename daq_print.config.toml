@@ -32,6 +32,11 @@ header = true
 # per second and event are printed.
 refresh_ms = 10
 
+# Array/matrix measurements are printed as one compact field, e.g.
+#   DTC=[1, 2, 3]   MAP=[[1, 2], [3, 4]]  (flattened: MAP=[1, 2, 3, 4])
+# This limits how many values are shown per block (0 = show all).
+max_block_items = 16
+
 # ---------------------------------------------------------------------------
 # One [[slaves]] table per XCP slave. Each slave has its own A2L file,
 # transport, DAQ defaults and event groups.

@@ -22,7 +22,8 @@ pub use calibration::{
 };
 pub use client::XcpClient;
 pub use daq::{
-    DaqConfiguration, DaqEventSnapshot, DaqManager, DaqRecord, Measurement, OdtEntryConfig,
+    is_block_element, DaqConfiguration, DaqEventSnapshot, DaqManager, DaqRecord, Measurement,
+    OdtEntryConfig,
 };
 // Use types from a2l module
 pub use a2l::{

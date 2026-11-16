@@ -176,7 +176,13 @@ enum Mode {
     ///   [12:00:01.234] ecu1 ev0  RPM=1500  TEMP=25.5  STATE=ON
     ///
     /// Values are physical values (A2L COMPU_METHOD applied); enums print as
-    /// text. Runs until CTRL+C (or "q" + Enter when stdin is a terminal).
+    /// text. Struct measurements are flattened by the A2L reader into their
+    /// members (`INSTANCE.MEMBER`), and arrays/matrices are expanded into one
+    /// entry per element but shown as a single compact field:
+    ///
+    ///   [12:00:01.234] ecu1 ev0  SPEED=1500  DTC=[1, 2, 3]  MAP=[1, 2, 3, 4]
+    ///
+    /// Runs until CTRL+C (or "q" + Enter when stdin is a terminal).
     ///
     /// `decimation` limits how often an event is printed: a 10 ms event with
     /// `decimation = 100` prints once per second.
@@ -195,6 +201,7 @@ enum Mode {
     ///   timestamp = true              # [HH:MM:SS.mmm] prefix on data lines
     ///   header = true                 # print the startup header
     ///   refresh_ms = 10               # snapshot polling interval
+    ///   max_block_items = 16         # array/matrix values shown per block (0 = all)
     ///
     ///   [[slaves]]
     ///   name = "inverter"             # optional label (default: A2L file stem)

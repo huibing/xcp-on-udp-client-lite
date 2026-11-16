@@ -211,6 +211,56 @@ impl Measurement {
     pub fn mta(&self) -> Mta {
         Mta::new(self.address, self.address_ext)
     }
+
+    /// Split an array/matrix measurement into one scalar measurement per element.
+    ///
+    /// DAQ lists, CSV columns and MF4 channels are scalar-only, so a block
+    /// measurement (typically a struct component declared with `MATRIX_DIM`)
+    /// is recorded as `NAME[0]`, `NAME[1]`, … for arrays and `NAME[r][c]` for
+    /// matrices (row-major, matching the A2L storage order). Element addresses
+    /// are `address + index * element_size`.
+    ///
+    /// Scalar measurements are returned unchanged (a one-element vector).
+    pub fn expand(self) -> Vec<Measurement> {
+        let Some((element_type, count)) = self.data_type.element_type() else {
+            return vec![self];
+        };
+        if count == 0 {
+            return Vec::new();
+        }
+
+        let element_size = element_type.size();
+        let matrix_dims = self.data_type.matrix_dims().filter(|(_, cols)| *cols > 0);
+        let mut elements = Vec::with_capacity(count);
+        for index in 0..count {
+            let name = match matrix_dims {
+                Some((_, cols)) => format!("{}[{}][{}]", self.name, index / cols, index % cols),
+                None => format!("{}[{}]", self.name, index),
+            };
+            elements.push(Measurement {
+                name,
+                address: self.address.wrapping_add((index * element_size) as u32),
+                address_ext: self.address_ext,
+                size: element_size,
+                data_type: element_type.clone(),
+                unit: self.unit.clone(),
+                min: self.min,
+                max: self.max,
+                compu_method: self.compu_method.clone(),
+            });
+        }
+        elements
+    }
+}
+
+/// True when `name` is one element of the expanded block measurement `base`.
+///
+/// Lets config files select a whole array/matrix by its A2L name
+/// (`measurements = ["MAP"]`) even though the DAQ list holds `MAP[r][c]`
+/// elements.
+pub fn is_block_element(name: &str, base: &str) -> bool {
+    name.strip_prefix(base)
+        .is_some_and(|suffix| suffix.starts_with('['))
 }
 
 /// ODT Entry configuration - tracks a single measurement's position in DAQ structure
@@ -646,6 +696,7 @@ impl DaqManager {
         let all_measurements: Vec<Measurement> = a2l_measurements
             .into_iter()
             .filter_map(Self::convert_measurement)
+            .flat_map(Measurement::expand)
             .collect();
 
         // By default, select first 8 measurements or all if less than 8
@@ -1042,6 +1093,33 @@ impl DaqManager {
         }
     }
 
+    /// Select every measurement matching `name` on `event_channel`.
+    ///
+    /// An exact name match selects that single measurement. When nothing
+    /// matches exactly, all elements of an expanded array/matrix whose base
+    /// name is `name` are selected (`MAP` → `MAP[0][0]`, `MAP[0][1]`, …), so a
+    /// config file can request a whole block by its A2L name.
+    ///
+    /// Returns the number of measurements selected by this call.
+    pub fn select_by_name(&mut self, name: &str, event_channel: u16) -> usize {
+        let indices: Vec<usize> = match self.all_measurements.iter().position(|m| m.name == name) {
+            Some(index) => vec![index],
+            None => self
+                .all_measurements
+                .iter()
+                .enumerate()
+                .filter(|(_, measurement)| is_block_element(&measurement.name, name))
+                .map(|(index, _)| index)
+                .collect(),
+        };
+
+        for &index in &indices {
+            self.select_measurement(index);
+            self.set_measurement_event(index, event_channel);
+        }
+        indices.len()
+    }
+
     /// Deselect a measurement (with restart flag)
     pub fn deselect_measurement(&mut self, index: usize) {
         let was_running = self.running.load(Ordering::SeqCst);
@@ -1064,8 +1142,12 @@ impl DaqManager {
     }
 
     /// Add a measurement to available list
+    ///
+    /// Array/matrix measurements are split into one scalar measurement per
+    /// element (see [`Measurement::expand`]); scalar measurements are added
+    /// unchanged.
     pub fn add_measurement(&mut self, measurement: Measurement) {
-        self.all_measurements.push(measurement);
+        self.all_measurements.extend(measurement.expand());
     }
 
     /// Set slave address for DAQ
@@ -1803,8 +1885,7 @@ impl DaqManager {
                                 let rec_ts = {
                                     let mut tracker = recording_ts_tracker.write().await;
                                     let start_instant = recording_start_instant.read().await;
-                                    let mut dev_start =
-                                        recording_start_device_ts_us.write().await;
+                                    let mut dev_start = recording_start_device_ts_us.write().await;
                                     let dev_ts = msg.device_timestamp_us;
                                     if let Some(ref mut tracker) = *tracker {
                                         if let Some(raw_ts) = data.timestamp {
@@ -2572,7 +2653,10 @@ impl DaqManager {
                             // Stop recording first (finalizes CSV and MF4 files)
                             if self.recording.load(Ordering::SeqCst) {
                                 if let Err(e) = self.stop_recording().await {
-                                    tracing::warn!("Error stopping recording during stdin quit: {}", e);
+                                    tracing::warn!(
+                                        "Error stopping recording during stdin quit: {}",
+                                        e
+                                    );
                                 }
                             }
 
@@ -3463,5 +3547,171 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Block (array/matrix) measurement expansion ─────────────
+
+    fn block_measurement(name: &str, data_type: A2lDataType) -> Measurement {
+        Measurement::with_type(
+            name,
+            0x2000,
+            1,
+            data_type,
+            Some("V".into()),
+            CompuMethod::linear(0.5, 1.0),
+        )
+    }
+
+    #[test]
+    fn test_element_type_scalars_have_none() {
+        assert!(A2lDataType::U8.element_type().is_none());
+        assert!(A2lDataType::F32.element_type().is_none());
+        assert!(A2lDataType::Bool.element_type().is_none());
+        assert!(A2lDataType::U8.matrix_dims().is_none());
+    }
+
+    #[test]
+    fn test_element_type_arrays_and_matrices() {
+        assert_eq!(
+            A2lDataType::U16Array(4).element_type(),
+            Some((A2lDataType::U16, 4))
+        );
+        assert_eq!(
+            A2lDataType::F32Array(2).element_type(),
+            Some((A2lDataType::F32, 2))
+        );
+        assert_eq!(
+            A2lDataType::I8Matrix(2, 3).element_type(),
+            Some((A2lDataType::I8, 6))
+        );
+        assert_eq!(A2lDataType::I8Matrix(2, 3).matrix_dims(), Some((2, 3)));
+        assert_eq!(A2lDataType::I8Array(3).matrix_dims(), None);
+    }
+
+    #[test]
+    fn test_block_types_report_element_floatness() {
+        assert!(A2lDataType::F32Array(3).is_float());
+        assert!(!A2lDataType::U16Array(3).is_float());
+        assert!(A2lDataType::I32Matrix(2, 2).is_signed_integer());
+        assert!(!A2lDataType::U32Matrix(2, 2).is_signed_integer());
+    }
+
+    #[test]
+    fn test_expand_scalar_is_unchanged() {
+        let measurement = block_measurement("speed", A2lDataType::U16);
+        let expanded = measurement.clone().expand();
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].name, "speed");
+        assert_eq!(expanded[0].address, measurement.address);
+        assert_eq!(expanded[0].size, 2);
+        assert_eq!(expanded[0].data_type, A2lDataType::U16);
+    }
+
+    #[test]
+    fn test_expand_array_into_elements() {
+        let expanded = block_measurement("DTC", A2lDataType::U16Array(3)).expand();
+        assert_eq!(expanded.len(), 3);
+
+        let names: Vec<&str> = expanded.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["DTC[0]", "DTC[1]", "DTC[2]"]);
+
+        // Addresses advance by the element size (2 bytes for U16).
+        let addresses: Vec<u32> = expanded.iter().map(|m| m.address).collect();
+        assert_eq!(addresses, vec![0x2000, 0x2002, 0x2004]);
+
+        // Element metadata is preserved.
+        for element in &expanded {
+            assert_eq!(element.size, 2);
+            assert_eq!(element.data_type, A2lDataType::U16);
+            assert_eq!(element.address_ext, 1);
+            assert_eq!(element.unit.as_deref(), Some("V"));
+            assert!(matches!(element.compu_method, CompuMethod::Linear { .. }));
+        }
+    }
+
+    #[test]
+    fn test_expand_matrix_uses_row_column_names() {
+        let expanded = block_measurement("MAP", A2lDataType::I8Matrix(2, 2)).expand();
+        let names: Vec<&str> = expanded.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["MAP[0][0]", "MAP[0][1]", "MAP[1][0]", "MAP[1][1]"]
+        );
+        let addresses: Vec<u32> = expanded.iter().map(|m| m.address).collect();
+        assert_eq!(addresses, vec![0x2000, 0x2001, 0x2002, 0x2003]);
+    }
+
+    #[test]
+    fn test_expand_empty_block_yields_nothing() {
+        assert!(block_measurement("EMPTY", A2lDataType::U8Array(0))
+            .expand()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_add_measurement_expands_blocks() {
+        let mut manager = DaqManager::new();
+        manager.add_measurement(block_measurement("SPEED", A2lDataType::U16));
+        manager.add_measurement(block_measurement("DTC", A2lDataType::U8Array(4)));
+
+        let names: Vec<&str> = manager
+            .all_measurements()
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["SPEED", "DTC[0]", "DTC[1]", "DTC[2]", "DTC[3]"]);
+    }
+
+    #[test]
+    fn test_is_block_element() {
+        assert!(is_block_element("MAP[0][1]", "MAP"));
+        assert!(is_block_element("DTC[12]", "DTC"));
+        assert!(!is_block_element("MAP", "MAP"));
+        assert!(!is_block_element("MAPX[0]", "MAP"));
+        assert!(!is_block_element("OTHER", "MAP"));
+    }
+
+    #[test]
+    fn test_select_by_name_exact_match() {
+        let mut manager = DaqManager::new();
+        manager.add_measurement(block_measurement("SPEED", A2lDataType::U16));
+        manager.add_measurement(block_measurement("RPM", A2lDataType::U16));
+        manager.deselect_all();
+
+        assert_eq!(manager.select_by_name("RPM", 1), 1);
+        assert_eq!(manager.selected_count(), 1);
+        let selected = manager.selected_measurements();
+        assert_eq!(selected[0].name, "RPM");
+        assert_eq!(manager.get_measurement_event(1), 1);
+    }
+
+    #[test]
+    fn test_select_by_name_selects_whole_block() {
+        let mut manager = DaqManager::new();
+        manager.add_measurement(block_measurement("SPEED", A2lDataType::U16));
+        manager.add_measurement(block_measurement("DTC", A2lDataType::U8Array(3)));
+        manager.deselect_all();
+
+        assert_eq!(manager.select_by_name("DTC", 2), 3);
+        assert_eq!(manager.selected_count(), 3);
+        let names: Vec<String> = manager
+            .selected_measurements()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect();
+        assert_eq!(names, vec!["DTC[0]", "DTC[1]", "DTC[2]"]);
+        for index in 1..=3 {
+            assert_eq!(manager.get_measurement_event(index), 2);
+        }
+    }
+
+    #[test]
+    fn test_select_by_name_unknown_returns_zero() {
+        let mut manager = DaqManager::new();
+        manager.add_measurement(block_measurement("SPEED", A2lDataType::U16));
+        manager.deselect_all();
+
+        assert_eq!(manager.select_by_name("NOPE", 0), 0);
+        assert_eq!(manager.selected_count(), 0);
     }
 }

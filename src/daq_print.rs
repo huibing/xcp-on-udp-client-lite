@@ -107,6 +107,8 @@ pub struct PrintConfig {
     pub header: Option<bool>,
     /// Snapshot polling interval in milliseconds (default: 10)
     pub refresh_ms: Option<u64>,
+    /// Array/matrix values shown per block before `, …` (default: 16, 0 = all)
+    pub max_block_items: Option<usize>,
 }
 
 impl PrintConfig {
@@ -132,6 +134,12 @@ impl PrintConfig {
     /// Snapshot polling interval.
     pub fn refresh(&self) -> Duration {
         Duration::from_millis(self.refresh_ms.unwrap_or(DEFAULT_REFRESH_MS).max(1))
+    }
+
+    /// How many array/matrix elements are shown per block field.
+    /// `0` means "show all".
+    pub fn max_block_items(&self) -> usize {
+        self.max_block_items.unwrap_or(DEFAULT_MAX_BLOCK_ITEMS)
     }
 }
 
@@ -233,21 +241,107 @@ fn resolve_slaves(config: DaqPrintConfig) -> Result<(PrintConfig, Vec<ResolvedSl
 
 // ============================ Printing ============================
 
-/// Everything needed to render one signal of an event line.
+/// Default number of array/matrix elements shown per block field.
+const DEFAULT_MAX_BLOCK_ITEMS: usize = 16;
+
+/// One DAQ entry (snapshot key) and how to render its value.
 #[derive(Debug, Clone)]
-pub struct SignalFormat {
-    pub name: String,
+pub struct SignalEntry {
+    /// Key in [`DaqEventSnapshot::values`](xcp_client::DaqEventSnapshot):
+    /// `NAME`, `NAME[3]` or `NAME[r][c]`
+    pub key: String,
     /// Float data types are printed with up to 6 decimals.
     pub is_float: bool,
     /// Used for enum text (COMPU_VTAB).
     pub compu_method: CompuMethod,
 }
 
-impl SignalFormat {
+impl SignalEntry {
     /// Render one physical value the way it is printed on stdout.
     pub fn format_value(&self, value: f64) -> String {
         format_value(value, self.is_float, &self.compu_method)
     }
+}
+
+/// One printable field of an event line: a scalar or an array/matrix block.
+///
+/// Block measurements are expanded into one DAQ entry per element
+/// (`MAP[r][c]`), but are shown as a single compact field `MAP=[v0, v1, …]`
+/// unless `[print].max_block_items = 0` and the values are many.
+#[derive(Debug, Clone)]
+pub struct SignalFormat {
+    /// Field name shown in the output
+    pub name: String,
+    /// Entries in display order; a scalar has exactly one
+    pub entries: Vec<SignalEntry>,
+    /// True when this field is an expanded array/matrix
+    pub is_block: bool,
+}
+
+impl SignalFormat {
+    /// A single scalar field.
+    pub fn scalar(name: &str, is_float: bool, compu_method: CompuMethod) -> Self {
+        Self {
+            name: name.to_string(),
+            entries: vec![SignalEntry {
+                key: name.to_string(),
+                is_float,
+                compu_method,
+            }],
+            is_block: false,
+        }
+    }
+}
+
+/// Group DAQ entries into printable fields.
+///
+/// Entries whose names carry an element suffix (`MAP[0]`, `MAP[r][c]`) are
+/// collected into one block field named after the base (`MAP`); everything
+/// else stays a scalar field. First-seen order is preserved and duplicate keys
+/// are ignored.
+pub fn group_signal_formats<I>(entries: I) -> Vec<SignalFormat>
+where
+    I: IntoIterator<Item = (String, bool, CompuMethod)>,
+{
+    let mut fields: Vec<SignalFormat> = Vec::new();
+    let mut index_of: HashMap<String, usize> = HashMap::new();
+    let mut seen_keys: HashSet<String> = HashSet::new();
+
+    for (name, is_float, compu_method) in entries {
+        if !seen_keys.insert(name.clone()) {
+            continue;
+        }
+        let (base, is_element) = match name.find('[') {
+            Some(pos) => (name[..pos].to_string(), true),
+            None => (name.clone(), false),
+        };
+        let entry = SignalEntry {
+            key: name,
+            is_float,
+            compu_method,
+        };
+
+        match index_of.get(&base) {
+            Some(&index) => {
+                fields[index].entries.push(entry);
+                fields[index].is_block |= is_element;
+            }
+            None => {
+                index_of.insert(base.clone(), fields.len());
+                let field = if is_element {
+                    SignalFormat {
+                        name: base,
+                        entries: vec![entry],
+                        is_block: true,
+                    }
+                } else {
+                    SignalFormat::scalar(&base, entry.is_float, entry.compu_method.clone())
+                };
+                fields.push(field);
+            }
+        }
+    }
+    fields
 }
 
 /// Render a physical value: enum text when available, else a trimmed number.
@@ -285,12 +379,15 @@ fn trim_float(mut text: String) -> String {
 
 /// Build one output line: `[ts] tag  NAME=value  NAME2=value2 ...`
 ///
-/// Signals that have not been received yet are rendered as `NAME=-`.
+/// Array/matrix fields are rendered as `NAME=[v0, v1, …]`, truncated after
+/// `max_block_items` values (`0` = show all). Scalars that have not been
+/// received yet are rendered as `NAME=-`.
 pub fn format_line(
     timestamp: Option<&str>,
     tag: &str,
     signals: &[SignalFormat],
     values: &HashMap<String, f64>,
+    max_block_items: usize,
 ) -> String {
     let mut line = String::with_capacity(64 + signals.len() * 24);
     if let Some(ts) = timestamp {
@@ -299,13 +396,40 @@ pub fn format_line(
         line.push_str("] ");
     }
     line.push_str(tag);
-    for signal in signals {
+    for field in signals {
         line.push_str("  ");
-        line.push_str(&signal.name);
+        line.push_str(&field.name);
         line.push('=');
-        match values.get(&signal.name) {
-            Some(value) => line.push_str(&signal.format_value(*value)),
-            None => line.push('-'),
+
+        if field.is_block {
+            let limit = if max_block_items == 0 {
+                usize::MAX
+            } else {
+                max_block_items
+            };
+            line.push('[');
+            let mut shown = 0usize;
+            for entry in &field.entries {
+                let Some(value) = values.get(&entry.key) else {
+                    continue;
+                };
+                if shown == limit {
+                    line.push_str(", …");
+                    break;
+                }
+                if shown > 0 {
+                    line.push_str(", ");
+                }
+                line.push_str(&entry.format_value(*value));
+                shown += 1;
+            }
+            line.push(']');
+        } else {
+            let entry = &field.entries[0];
+            match values.get(&entry.key) {
+                Some(value) => line.push_str(&entry.format_value(*value)),
+                None => line.push('-'),
+            }
         }
     }
     line
@@ -585,6 +709,7 @@ pub async fn run_daq_print(config_path: &str) -> Result<(), Box<dyn std::error::
                     &tag,
                     &printer.signals,
                     &snapshot.values,
+                    print.max_block_items(),
                 );
 
                 match mode {
@@ -708,7 +833,6 @@ async fn open_slave(config: ResolvedSlave, print: &PrintConfig) -> Result<SlaveS
         );
         daq.select_all();
     } else {
-        let all_measurements = daq.all_measurements().to_vec();
         for event in &config.events {
             if !event_channels.is_empty() && !event_channels.contains(&event.channel) {
                 return Err(format!(
@@ -727,15 +851,12 @@ async fn open_slave(config: ResolvedSlave, print: &PrintConfig) -> Result<SlaveS
                 continue;
             }
             for name in &event.measurements {
-                match all_measurements.iter().position(|m| &m.name == name) {
-                    Some(idx) => {
-                        daq.select_measurement(idx);
-                        daq.set_measurement_event(idx, event.channel);
-                    }
-                    None => eprintln!(
+                // Exact name, or every element of an expanded array/matrix.
+                if daq.select_by_name(name, event.channel) == 0 {
+                    eprintln!(
                         "  [{}] measurement '{}' not found in A2L — skipped",
                         config.name, name
-                    ),
+                    );
                 }
             }
         }
@@ -780,21 +901,19 @@ async fn open_slave(config: ResolvedSlave, print: &PrintConfig) -> Result<SlaveS
         let config_guard = daq_config.read().await;
         for (list_idx, &channel) in config_guard.event_channel_per_list.iter().enumerate() {
             let daq_list = list_idx as u16;
-            let mut signals = Vec::new();
-            let mut seen = HashSet::new();
-            for entry in config_guard
+            // Group expanded array/matrix entries back into compact fields.
+            let entries = config_guard
                 .odt_entries
                 .iter()
-                .filter(|e| e.daq_list == daq_list)
-            {
-                if seen.insert(entry.name.clone()) {
-                    signals.push(SignalFormat {
-                        name: entry.name.clone(),
-                        is_float: entry.data_type.is_float(),
-                        compu_method: entry.compu_method.clone(),
-                    });
-                }
-            }
+                .filter(|entry| entry.daq_list == daq_list)
+                .map(|entry| {
+                    (
+                        entry.name.clone(),
+                        entry.data_type.is_float(),
+                        entry.compu_method.clone(),
+                    )
+                });
+            let signals = group_signal_formats(entries);
 
             let event = events.iter().find(|e| e.channel == channel);
             let decimation = decimation_per_channel
@@ -866,7 +985,20 @@ fn header_lines(sessions: &[SlaveSession], print: &PrintConfig, mode: PrintMode)
                 ),
                 None => format!("every {} sample(s)", printer.decimation),
             });
-            parts.push(format!("{} signal(s)", printer.signals.len()));
+            let entries: usize = printer
+                .signals
+                .iter()
+                .map(|field| field.entries.len())
+                .sum();
+            if entries == printer.signals.len() {
+                parts.push(format!("{} signal(s)", printer.signals.len()));
+            } else {
+                parts.push(format!(
+                    "{} field(s) / {} signal(s)",
+                    printer.signals.len(),
+                    entries
+                ));
+            }
             lines.push(format!(
                 "# [{}] {} | {}",
                 session.label,
@@ -921,11 +1053,7 @@ mod tests {
     use crate::cli_slave::default_slave_name;
 
     fn signal(name: &str, is_float: bool) -> SignalFormat {
-        SignalFormat {
-            name: name.to_string(),
-            is_float,
-            compu_method: CompuMethod::identical(),
-        }
+        SignalFormat::scalar(name, is_float, CompuMethod::identical())
     }
 
     #[test]
@@ -1127,10 +1255,10 @@ a2l = "third.a2l"
         values.insert("SPEED".to_string(), 12.5);
         values.insert("STATE".to_string(), 1.0);
 
-        let line = format_line(Some("12:00:01.234"), "ecu1 ev0", &signals, &values);
+        let line = format_line(Some("12:00:01.234"), "ecu1 ev0", &signals, &values, 16);
         assert_eq!(line, "[12:00:01.234] ecu1 ev0  SPEED=12.5  STATE=1");
 
-        let line = format_line(None, "ecu1 ev0", &signals, &values);
+        let line = format_line(None, "ecu1 ev0", &signals, &values, 16);
         assert_eq!(line, "ecu1 ev0  SPEED=12.5  STATE=1");
     }
 
@@ -1140,8 +1268,65 @@ a2l = "third.a2l"
         let mut values = HashMap::new();
         values.insert("A".to_string(), 2.0);
 
-        let line = format_line(None, "s ev1", &signals, &values);
+        let line = format_line(None, "s ev1", &signals, &values, 16);
         assert_eq!(line, "s ev1  A=2  B=-");
+    }
+
+    #[test]
+    fn test_group_signal_formats_groups_block_elements() {
+        let identical = CompuMethod::identical;
+        let fields = group_signal_formats(vec![
+            ("SPEED".to_string(), true, identical()),
+            ("MAP[0][0]".to_string(), false, identical()),
+            ("MAP[0][1]".to_string(), false, identical()),
+            ("MAP[1][0]".to_string(), false, identical()),
+            ("ARR[0]".to_string(), false, identical()),
+            ("ARR[1]".to_string(), false, identical()),
+            ("STATE".to_string(), false, identical()),
+            // duplicate keys are ignored
+            ("STATE".to_string(), false, identical()),
+        ]);
+
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["SPEED", "MAP", "ARR", "STATE"]);
+        assert!(!fields[0].is_block);
+        assert_eq!(fields[0].entries.len(), 1);
+        assert!(fields[1].is_block);
+        assert_eq!(fields[1].entries.len(), 3);
+        assert_eq!(fields[1].entries[2].key, "MAP[1][0]");
+        assert!(fields[2].is_block);
+        assert_eq!(fields[2].entries.len(), 2);
+        assert!(!fields[3].is_block);
+        assert_eq!(fields[3].entries.len(), 1);
+    }
+
+    #[test]
+    fn test_format_line_block_values() {
+        let identical = CompuMethod::identical;
+        let fields = group_signal_formats(vec![
+            ("MAP[0]".to_string(), false, identical()),
+            ("MAP[1]".to_string(), false, identical()),
+            ("MAP[2]".to_string(), false, identical()),
+            ("STATE".to_string(), false, identical()),
+        ]);
+        let mut values = HashMap::new();
+        values.insert("MAP[0]".to_string(), 1.0);
+        values.insert("MAP[1]".to_string(), 2.0);
+        values.insert("MAP[2]".to_string(), 3.0);
+        values.insert("STATE".to_string(), 7.0);
+
+        // Unlimited: all elements.
+        let line = format_line(None, "s ev0", &fields, &values, 0);
+        assert_eq!(line, "s ev0  MAP=[1, 2, 3]  STATE=7");
+
+        // Capped after 2 values.
+        let line = format_line(None, "s ev0", &fields, &values, 2);
+        assert_eq!(line, "s ev0  MAP=[1, 2, …]  STATE=7");
+
+        // Block values not received yet are skipped.
+        values.remove("MAP[1]");
+        let line = format_line(None, "s ev0", &fields, &values, 0);
+        assert_eq!(line, "s ev0  MAP=[1, 3]  STATE=7");
     }
 
     #[test]
@@ -1159,6 +1344,7 @@ a2l = "third.a2l"
         assert!(print.timestamp());
         assert!(print.header());
         assert_eq!(print.refresh(), Duration::from_millis(DEFAULT_REFRESH_MS));
+        assert_eq!(print.max_block_items(), DEFAULT_MAX_BLOCK_ITEMS);
     }
 
     /// Build a session with printers, bypassing the network setup.

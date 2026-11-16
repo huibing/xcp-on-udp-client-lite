@@ -404,7 +404,6 @@ async fn open_session(slave: ResolvedSlave) -> Result<RecordSession, String> {
     daq.deselect_all();
     match slave.events.as_ref() {
         Some(event_configs) if !event_configs.is_empty() => {
-            let all_measurements = daq.all_measurements().to_vec();
             for event in event_configs {
                 if !event_channels.is_empty() && !event_channels.contains(&event.channel) {
                     return Err(format!(
@@ -413,10 +412,8 @@ async fn open_session(slave: ResolvedSlave) -> Result<RecordSession, String> {
                     ));
                 }
                 for name in &event.measurements {
-                    if let Some(index) = all_measurements.iter().position(|m| &m.name == name) {
-                        daq.select_measurement(index);
-                        daq.set_measurement_event(index, event.channel);
-                    } else {
+                    // Exact name, or every element of an expanded array/matrix.
+                    if daq.select_by_name(name, event.channel) == 0 {
                         let message = format!("Measurement '{}' not found in A2L — skipped", name);
                         eprintln!("  [{}] ⚠ {}", label, message);
                         tracing::warn!("[{}] {}", label, message);

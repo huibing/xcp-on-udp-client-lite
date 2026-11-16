@@ -376,6 +376,20 @@ measurements = ["coolant_temp", "oil_temp"]
 - On CTRL+C: recording stops → DAQ stops → `FREE_DAQ` restores the slave → disconnect
   (extra CTRL+C presses during that shutdown are ignored, so the process still exits cleanly)
 
+#### Struct / enum / array measurements
+
+| A2L kind | Handling |
+|----------|----------|
+| scalar | one DAQ entry / one CSV or MF4 channel |
+| `COMPU_VTAB` enum | scalar value; MF4 gets a value-to-text block |
+| `INSTANCE` + `TYPEDEF_STRUCTURE` | flattened by the A2L reader into one measurement per member (`lookup.input`, `lookup.output_linear`) |
+| struct member with `MATRIX_DIM` (array/matrix) | expanded into one scalar entry per element: `DTC[0]`, `DTC[1]`, … / `MAP[r][c]` (row-major), so every element becomes its own DAQ entry, CSV column and MF4 channel |
+
+Because blocks are expanded, `measurements = ["DTC"]` in the config selects **all**
+`DTC[i]` elements — no need to list every index. Array-of-structs
+(`INSTANCE` with `MATRIX_DIM`) is not supported by the A2L reader and is skipped
+with a warning.
+
 #### Multiple slaves
 
 Replace the top-level `a2l`/`[connection]`/`[daq]`/`[[events]]` sections with
@@ -503,6 +517,9 @@ Example output:
 
 - Values are **physical values** (A2L `COMPU_METHOD` applied); enumerations
   (`COMPU_VTAB`) print as text
+- Struct measurements are flattened into `INSTANCE.MEMBER` by the A2L reader;
+  arrays/matrices are expanded per element but printed as one compact field
+  `NAME=[v0, v1, …]` (limited by `[print].max_block_items`, default 16, `0` = all)
 - Header lines start with `#` so data lines are easy to filter
 - Signals not yet received are printed as `NAME=-`
 - Runs until CTRL+C (or `q` + Enter when stdin is a terminal); extra CTRL+C
