@@ -283,9 +283,14 @@ pub async fn run_daq_record(config_path: &str) -> Result<(), Box<dyn std::error:
         }
     });
 
-    // Wait for either CTRL+C or "q" on stdin
+    // Wait for either CTRL+C or "q" on stdin.
+    //
+    // The CTRL+C listener stays armed for the whole run (including the graceful
+    // shutdown) so a second press cannot kill the process mid-shutdown on
+    // Windows — see `cli_signal` for details.
+    let mut ctrl_c_rx = crate::cli_signal::ctrl_c_channel();
     let quit_reason = tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
+        _ = ctrl_c_rx.changed() => {
             "CTRL+C"
         }
         _ = quit_rx => {

@@ -2,6 +2,7 @@
 
 mod calibrate;
 mod cli_connection;
+mod cli_signal;
 mod daq_print;
 mod daq_record;
 mod tui;

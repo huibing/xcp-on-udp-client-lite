@@ -554,9 +554,20 @@ pub async fn run_daq_print(config_path: &str) -> Result<(), Box<dyn std::error::
         });
     }
 
+    // Keeps a CTRL+C listener armed for the whole run (including the graceful
+    // shutdown) so a second press cannot kill the process mid-shutdown on
+    // Windows — see `cli_signal` for details.
+    let mut ctrl_c_rx = crate::cli_signal::ctrl_c_channel();
+
     let quit_reason = loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => break "CTRL+C",
+            changed = ctrl_c_rx.changed() => {
+                if changed.is_ok() {
+                    break "CTRL+C";
+                }
+                // The listener task ended; do not treat that as a key press.
+                continue;
+            }
             _ = quit_rx.recv() => break "q",
             _ = tokio::time::sleep(refresh) => {}
         }
@@ -627,7 +638,10 @@ pub async fn run_daq_print(config_path: &str) -> Result<(), Box<dyn std::error::
         }
     };
 
-    eprintln!("\n{} received. Shutting down...", quit_reason);
+    eprintln!(
+        "\n{} received. Shutting down (extra CTRL+C presses are ignored)...",
+        quit_reason
+    );
     shutdown(&mut sessions, quit_reason).await;
 
     let elapsed = started.elapsed().as_secs_f64();
@@ -895,14 +909,17 @@ async fn shutdown(sessions: &mut [SlaveSession], reason: &str) {
         if let Some(xcp_slave) = session.client.get_slave(session.slave_id) {
             let guard = xcp_slave.lock().await;
             if session.daq.is_running() {
+                eprintln!("  [{}] stopping DAQ...", session.label);
                 if let Err(e) = session.daq.stop(&guard).await {
                     eprintln!("  [{}] DAQ stop failed: {}", session.label, e);
                 }
             }
+            eprintln!("  [{}] freeing DAQ resources...", session.label);
             if let Err(e) = guard.free_daq().await {
                 eprintln!("  [{}] FREE_DAQ failed: {}", session.label, e);
             }
         }
+        eprintln!("  [{}] disconnecting...", session.label);
         if let Err(e) = session.client.disconnect_slave(session.slave_id).await {
             eprintln!("  [{}] disconnect failed: {}", session.label, e);
         }

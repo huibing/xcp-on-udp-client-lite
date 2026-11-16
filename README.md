@@ -369,6 +369,7 @@ measurements = ["coolant_temp", "oil_temp"]
 - Both MF4 and CSV can be recorded simultaneously; at least one `[output]` path is required
 - Invalid measurement names are warned and skipped (recording continues with valid ones)
 - On CTRL+C: recording stops → DAQ stops → `FREE_DAQ` restores the slave → disconnect
+  (extra CTRL+C presses during that shutdown are ignored, so the process still exits cleanly)
 
 ##### CAN Transport
 
@@ -446,7 +447,8 @@ Example output:
   (`COMPU_VTAB`) print as text
 - Header lines start with `#` so data lines are easy to filter
 - Signals not yet received are printed as `NAME=-`
-- Runs until CTRL+C (or `q` + Enter when stdin is a terminal)
+- Runs until CTRL+C (or `q` + Enter when stdin is a terminal); extra CTRL+C
+  presses during the graceful shutdown are ignored so the process exits cleanly
 
 #### Decimation (print rate)
 
