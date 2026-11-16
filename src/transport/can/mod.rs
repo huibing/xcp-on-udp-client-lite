@@ -11,7 +11,8 @@
 //! This module only implements the transport/protocol concerns (framing, ID
 //! filtering, `MAX_DLC_REQUIRED` padding, async queueing). The actual hardware
 //! is accessed through the [`CanDevice`] trait; see the [`device`] module for the
-//! abstraction and [`pcan`] for the PEAK-System PCAN-Basic driver.
+//! abstraction and [`pcan`] for the PEAK-System PCAN-Basic driver, [`es582`] for
+//! ETAS ES582 hardware through the BOA V2 / OCI runtime.
 //!
 //! Incoming frames are filtered by CAN ID **and** PID so that unrelated
 //! traffic on a shared bus cannot pollute the XCP stream:
@@ -26,6 +27,7 @@
 //!   accepted so DAQ data is never dropped.
 
 mod device;
+pub mod es582;
 mod pcan;
 
 use super::transport::{Transport, TransportError, TransportType};
@@ -174,12 +176,31 @@ impl CanTransport {
             TransportError::ConnectFailed(format!("CAN driver not found: {}", driver_name))
         })?;
 
+        let filter = FrameFilter::from_config(config);
+
+        // Only the slave's response ID and the DAQ DTO IDs carry XCP data in the
+        // slave→master direction. Passing them to the driver lets it program
+        // hardware acceptance filters, which matters for devices whose receive
+        // path is expensive per frame (e.g. one USB round trip per frame on an
+        // ES582): unfiltered periodic bus traffic would otherwise push the
+        // response out of the device queue.
+        let mut accept_ids: Vec<u32> = Vec::new();
+        if let Some(slave_id) = config.slave_id {
+            accept_ids.push(slave_id);
+        }
+        for id in &config.daq_ids {
+            if !accept_ids.contains(id) {
+                accept_ids.push(*id);
+            }
+        }
+
         let device_config = CanDeviceConfig {
             channel: config.channel.clone(),
             device_id: config.device_id.clone(),
             controller: config.controller,
             baudrate: config.baudrate,
             data_baudrate: config.data_baudrate,
+            accept_ids,
         };
         let device = driver.open(&device_config).map_err(map_device_error)?;
         let info = device.info();
@@ -195,7 +216,6 @@ impl CanTransport {
         let device = Arc::new(Mutex::new(device));
         let rx = Arc::new(Mutex::new(VecDeque::new()));
         let reader_stop = Arc::new(AtomicBool::new(false));
-        let filter = FrameFilter::from_config(config);
         tracing::info!(
             "CAN receive filter: master=0x{:X}, {}",
             config.can_id,

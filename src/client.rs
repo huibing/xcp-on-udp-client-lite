@@ -9,6 +9,7 @@ use crate::slave::{SlaveError, SlaveId, SlaveInfo, XcpSlave};
 use crate::transport::{TransportConfig, TransportError};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// XCP Client Error
@@ -87,6 +88,10 @@ pub struct XcpClient {
 
     /// Current active slave ID (for backward compatibility)
     current_slave_id: Option<SlaveId>,
+
+    /// CTO response timeout applied to slaves created by this client.
+    /// `None` keeps [`XcpSlave`]'s default.
+    command_timeout: Option<Duration>,
 }
 
 /// Slave accessor for iteration
@@ -111,7 +116,21 @@ impl XcpClient {
         Self {
             slaves: HashMap::new(),
             current_slave_id: None,
+            command_timeout: None,
         }
+    }
+
+    /// Set the CTO response timeout used for slaves created afterwards.
+    ///
+    /// Raise it for slow slaves (e.g. ECUs that service XCP from a slow polled
+    /// loop); it applies to `CONNECT` as well as every later command.
+    pub fn set_command_timeout(&mut self, timeout: Duration) {
+        self.command_timeout = Some(timeout);
+    }
+
+    /// CTO response timeout applied to newly created slaves, if configured.
+    pub fn command_timeout(&self) -> Option<Duration> {
+        self.command_timeout
     }
 
     // ==================== Multi-Slave API ====================
@@ -126,7 +145,13 @@ impl XcpClient {
         let name = name.into();
         let name_for_log = name.clone();
 
-        let (slave, id) = XcpSlave::connect(name, transport_config, packet_log).await?;
+        let (slave, id) = XcpSlave::connect_with_timeout(
+            name,
+            transport_config,
+            packet_log,
+            self.command_timeout,
+        )
+        .await?;
         let slave_arc = Arc::new(Mutex::new(slave));
 
         self.slaves.insert(id, slave_arc.clone());

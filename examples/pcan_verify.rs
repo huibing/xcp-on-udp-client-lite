@@ -127,6 +127,7 @@ fn main() {
         controller: None,
         baudrate: Some(bitrate),
         data_baudrate: None,
+        accept_ids: Vec::new(),
     };
 
     let mut device = match driver.open(&config) {

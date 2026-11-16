@@ -21,6 +21,9 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
+/// Default CTO response timeout (XCP T1 for the usual CAN/Ethernet slaves).
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Slave unique identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SlaveId(pub Uuid);
@@ -193,6 +196,14 @@ pub struct XcpSlave {
 
     /// Last outgoing CTO command code, used for correlating the next response label.
     pub last_cmd_code: std::sync::Mutex<Option<u8>>,
+
+    /// Maximum time to wait for a CTO response (T1 equivalent).
+    ///
+    /// The XCP specification allows a slave to answer within
+    /// `MAX_DLC_REQUIRED`-dependent limits; slow ECUs (polled XCP tasks on a
+    /// demo board, for instance) can exceed the 1 s default. Use
+    /// [`XcpSlave::set_command_timeout`] to raise it.
+    command_timeout: Duration,
 }
 
 impl XcpSlave {
@@ -201,6 +212,20 @@ impl XcpSlave {
         name: impl Into<String>,
         transport_config: TransportConfig,
         packet_log: Option<Arc<crate::xcp_packet_log::XcpPacketLog>>,
+    ) -> Result<(Self, SlaveId), SlaveError> {
+        Self::connect_with_timeout(name, transport_config, packet_log, None).await
+    }
+
+    /// Create a new slave connection with an explicit CTO response timeout.
+    ///
+    /// `command_timeout` also applies to the initial `CONNECT`, which is what
+    /// slow slaves need: they may take well over a second to answer the first
+    /// command after power-up.
+    pub async fn connect_with_timeout(
+        name: impl Into<String>,
+        transport_config: TransportConfig,
+        packet_log: Option<Arc<crate::xcp_packet_log::XcpPacketLog>>,
+        command_timeout: Option<Duration>,
     ) -> Result<(Self, SlaveId), SlaveError> {
         let id = SlaveId::new();
         let name = name.into();
@@ -250,6 +275,7 @@ impl XcpSlave {
             segment_pages: Vec::new(),
             packet_log,
             last_cmd_code: std::sync::Mutex::new(None),
+            command_timeout: command_timeout.unwrap_or(DEFAULT_COMMAND_TIMEOUT),
         };
 
         // Send CONNECT command
@@ -298,6 +324,19 @@ impl XcpSlave {
         Ok(connect_info)
     }
 
+    /// Set how long to wait for a CTO response before reporting a timeout.
+    ///
+    /// Raise this for slow ECUs; the value applies to every subsequent command
+    /// (including `CONNECT` and `DISCONNECT`).
+    pub fn set_command_timeout(&mut self, timeout: Duration) {
+        self.command_timeout = timeout;
+    }
+
+    /// Current CTO response timeout.
+    pub fn command_timeout(&self) -> Duration {
+        self.command_timeout
+    }
+
     /// Send command and wait for CTO response
     pub async fn send_command_and_wait(&self, command: &[u8]) -> Result<Vec<u8>, SlaveError> {
         // Send command
@@ -337,7 +376,7 @@ impl XcpSlave {
         // channel to be misattributed to the NEXT command. Skip them and
         // keep waiting for RES (0xFF) / ERR (0xFE) within the timeout.
         let mut rx = self.cto_rx.lock().await;
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let deadline = std::time::Instant::now() + self.command_timeout;
 
         let response = loop {
             let now = std::time::Instant::now();
@@ -514,6 +553,28 @@ impl XcpSlave {
         }
     }
 
+    /// Logical XCP segment numbers declared by the A2L `SEGMENT` blocks.
+    ///
+    /// Segment numbers need not be `0..N` (an A2L may declare several
+    /// `MEMORY_SEGMENT`s that share one logical segment, or start at 1), so
+    /// page handling always works from this list. Falls back to `0..count` when
+    /// the A2L carries no `SEGMENT` information.
+    fn declared_segment_numbers(&self) -> Vec<u8> {
+        let mut numbers: Vec<u8> = self
+            .cal_manager
+            .get_memory_segments()
+            .iter()
+            .filter_map(|segment| segment.xcp_info.as_ref().map(|info| info.segment_number))
+            .collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+        if numbers.is_empty() {
+            let count = self.cal_manager.get_memory_segment_count();
+            numbers = (0..count).map(|n| n as u8).collect();
+        }
+        numbers
+    }
+
     /// Query and update the current page state for all segments
     ///
     /// This method queries the XCP access page for each segment defined in the A2L file.
@@ -522,10 +583,9 @@ impl XcpSlave {
     /// # Returns
     /// A reference to the updated segment page state vector
     pub async fn update_segment_page_state(&mut self) -> Result<&[SegmentPageState], SlaveError> {
-        // Get the number of segments from A2L data
-        let num_segments = self.cal_manager.get_memory_segment_count();
+        let segments = self.declared_segment_numbers();
 
-        if num_segments == 0 {
+        if segments.is_empty() {
             tracing::trace!("No memory segments defined, skipping GET_CAL_PAGE");
             return Ok(&self.segment_pages);
         }
@@ -534,12 +594,12 @@ impl XcpSlave {
 
         // Query XCP access page for each segment
         // Mode 0x02 = XCP access
-        for segment in 0..num_segments {
-            match self.get_cal_page(segment as u8, 0x02).await {
+        for segment in segments {
+            match self.get_cal_page(segment, 0x02).await {
                 Ok(xcp_page) => {
                     tracing::trace!("Segment {} current XCP page: {}", segment, xcp_page);
                     self.segment_pages.push(SegmentPageState {
-                        segment: segment as u8,
+                        segment,
                         xcp_page,
                         ecu_page: None, // Don't query ECU page by default
                     });
@@ -548,7 +608,7 @@ impl XcpSlave {
                     tracing::warn!("Failed to get cal page for segment {}: {:?}", segment, e);
                     // Still add the segment with default page 0
                     self.segment_pages.push(SegmentPageState {
-                        segment: segment as u8,
+                        segment,
                         xcp_page: 0,
                         ecu_page: None,
                     });
@@ -705,22 +765,20 @@ impl XcpSlave {
     /// ```
     pub async fn switch_all_pages(&mut self, mode: PageMode) -> Result<Vec<(u8, u8)>, SlaveError> {
         let mut switched = Vec::new();
-        let num_segments = self.cal_manager.get_memory_segment_count();
+        let segments = self.declared_segment_numbers();
 
-        if num_segments == 0 {
+        if segments.is_empty() {
             tracing::trace!("No memory segments defined, nothing to switch");
             return Ok(switched);
         }
 
         tracing::info!(
             "Switching all {} segments to {} mode",
-            num_segments,
+            segments.len(),
             mode.description()
         );
 
-        for segment in 0..num_segments {
-            let segment = segment as u8;
-
+        for segment in segments {
             // Find the appropriate page for this mode
             let target_page = match self.find_page_for_mode(segment, mode) {
                 Some(page) => page,

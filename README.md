@@ -16,7 +16,7 @@ A Rust implementation of XCP (Universal Measurement and Calibration Protocol) Ma
 - **Web UI**: Browser-based interface with multi-slave management
 - **Desktop App (Tauri)**: Native cross-platform GUI with Experiment and Compare workflows
 - **TUI**: Interactive terminal UI for single-device debugging
-- **Transport Abstraction**: UDP, TCP and CAN (XCP-on-CAN over PEAK-System PCAN-Basic) with a pluggable CAN device-driver layer
+- **Transport Abstraction**: UDP, TCP and CAN (XCP-on-CAN over PEAK-System PCAN-Basic or ETAS ES582 via BOA/OCI) with a pluggable CAN device-driver layer
 - **CAN Device Discovery**: Enumerate CAN adapters/channels and pick one (by stable device id) from the desktop UI
 
 ## Supported Data Types
@@ -50,7 +50,8 @@ lib.rs → client.rs (XcpClient - Multi-Slave Manager)
     │       └── can/           # XCP-on-CAN transport + device drivers
     │           ├── mod.rs     #   CanTransport (framing, ID filtering, MAX_DLC)
     │           ├── device.rs  #   CanDevice/CanDriver traits + registry
-    │           └── pcan.rs    #   PEAK-System PCAN-Basic driver
+    │           ├── pcan.rs    #   PEAK-System PCAN-Basic driver
+    │           └── es582.rs   #   ETAS ES582 driver (BOA V2 / OCI)
     │
     ├── slave.rs           # XcpSlave - Individual slave context
     ├── calibration.rs     # Calibration parameter management
@@ -209,9 +210,70 @@ CAN environment variables:
 - `PCAN_BITRATE` — fallback bit rate used only when the config declares none
 - `PCAN_FD_CLOCK` — CAN-FD controller clock in Hz used to derive timing (default 80 MHz)
 
-See [`docs/PCAN_CAN_QA.md`](docs/PCAN_CAN_QA.md) for the CAN/PCAN design Q&A and
+See [`docs/PCAN_CAN_QA.md`](docs/PCAN_CAN_QA.md) for the CAN/PCAN design Q&A,
+[`docs/ES582_CAN.md`](docs/ES582_CAN.md) for the ETAS ES582 (BOA/OCI) driver and
 [`src/transport/can/device.rs`](src/transport/can/device.rs) for how to add a new
 CAN device driver.
+
+#### ETAS ES582 (`--can-driver es582`)
+
+The ES582 driver talks to ETAS hardware through the **BOA V2 / OCI** runtime that
+ships with EBI-IP/INCA (`dll-ocdProxy.dll`, `dll-csiBind.dll` and the
+`ES582_1_OCD_CAN.dll` Open Controller Driver). Nothing has to be compiled in —
+the DLLs are loaded at runtime, exactly like `PCANBasic.dll`.
+
+```bash
+# Enumerate ES582 channels (and everything else the drivers report)
+cargo run --example es582_verify
+
+# Use it from the CLI
+cargo run --release -- verify --a2l hello_xcp.a2l --transport can \
+  --can-driver es582 --can-channel auto --can-id 0x550 --slave-id 0x551 --baudrate 500000
+```
+
+Channel URIs are discovered by BOA's search-for-service layer, e.g.
+`ETAS://USB/ES582.1:114913/CAN:1`; they can be passed to `--can-channel`
+directly, or a channel can be pinned with `--can-device`/`--can-controller`.
+
+ES582 environment variables:
+
+- `BOA_DLL_DIR` — directory containing `dll-ocdProxy.dll`/`dll-csiBind.dll`
+  (default `%ProgramFiles%\ETAS\BOA_V2\Bin\x64\Dll\Framework`)
+- `BOA_OCD_DIR` — OCD plugin directory (default
+  `%ProgramFiles%\ETAS\ED-EBI_V2\Bin\x64\Dll\OCDs`)
+- `ES582_URI` — channel URI used when the config does not pin one
+- `ES582_SELF_RECEPTION=1` — also receive self-transmitted frames (bring-up tests)
+- `ES582_BTL_CYCLES`, `ES582_SAMPLE_POINT`, `ES582_SJW` — nominal bit timing
+  overrides (the driver otherwise probes a list of prescaler-friendly candidates)
+- `ES582_FD_BTL_CYCLES`, `ES582_FD_SAMPLE_POINT`, `ES582_FD_SJW` — CAN-FD data
+  phase timing overrides
+
+The driver programs hardware acceptance filters from
+`CanDeviceConfig::accept_ids` (the CAN transport fills it with `CAN_ID_SLAVE`
+plus the DAQ DTO IDs). That matters on an ES582: one OCI read call returns a
+single frame and costs a USB round trip, so unfiltered periodic bus traffic
+would push command responses out of the device queue.
+
+#### XCP smoke test (connect, pages, upload)
+
+`examples/es582_xcp_test.rs` runs a minimal XCP session against a real ECU
+(default A2L: `pms-a.a2l`): `CONNECT`, `GET_ID`, `GET_CAL_PAGE`,
+`SET_CAL_PAGE` (switch to the working page and back), `SET_MTA` + `UPLOAD` of the
+calibration segment, `DISCONNECT`.
+
+```bash
+cargo run --example es582_xcp_test -- pms-a.a2l
+
+# slow slaves (this demo ECU answers in 0.3-1.5 s, above the 1 s default)
+XCP_TEST_TIMEOUT_MS=5000 cargo run --example es582_xcp_test
+
+# talk to a PCAN channel instead
+XCP_TEST_DRIVER=pcan XCP_TEST_CHANNEL=PCAN_USBBUS1 cargo run --example es582_xcp_test
+```
+
+The CTO response timeout is also available programmatically:
+`XcpClient::set_command_timeout(Duration)` (applies to newly created slaves,
+including their `CONNECT`) and `XcpSlave::set_command_timeout(Duration)`.
 
 ### Run Web UI
 
@@ -1094,7 +1156,7 @@ Each slave maintains independent:
 | toml | 0.8 | TOML config file parsing |
 | uuid | 1.6 | Slave ID generation |
 | async-trait | 0.1 | Transport abstraction |
-| libloading | 0.8 | Dynamic `PCANBasic.dll` loading for the PCAN CAN driver |
+| libloading | 0.8 | Dynamic `PCANBasic.dll` / BOA (`dll-ocdProxy.dll`, `dll-csiBind.dll`) loading for the CAN drivers |
 
 ### Tauri Desktop App (`src-tauri`)
 
@@ -1125,7 +1187,7 @@ cargo test test_name -- --nocapture
 ### Test Coverage
 
 - **Transport Layer**: UDP transport, TCP transport, CAN transport (framing, ID filtering, DLC conversion), message routing
-- **CAN Drivers**: PCAN channel/handle parsing, bit-rate/timing conversion, device enumeration, driver registry
+- **CAN Drivers**: PCAN channel/handle parsing, bit-rate/timing conversion, device enumeration, driver registry; ES582 URI parsing, BOA version negotiation, timing-candidate probing
 - **Protocol Layer**: Command builders, response parsers
 - **Slave Management**: Multi-slave connection, state management
 - **Calibration**: Parameter read/write, A2L parsing
@@ -1192,6 +1254,24 @@ This project is provided as-is for educational and development purposes.
 Contributions are welcome! Please feel free to submit pull requests.
 
 ## Recent Changes
+
+### v0.6.1 - XCP-on-CAN bring-up fixes
+
+- ✅ **Hardware acceptance filters**: `CanDeviceConfig::accept_ids` lets the CAN transport hand `CAN_ID_SLAVE` + DAQ DTO IDs to the driver; the ES582 driver programs `OCI_AddCANFrameFilter` from it. Without it, an ES582 (one frame per OCI read, one USB round trip per read) fell behind the bus and command responses were delayed by seconds or lost
+- ✅ **Configurable CTO timeout**: `XcpClient::set_command_timeout` / `XcpSlave::set_command_timeout` (default stays 1 s) — slow ECUs that service XCP from a polled loop need more
+- ✅ **Segment numbers from the A2L**: `update_segment_page_state` / `switch_all_pages` use the declared `SEGMENT` numbers instead of `0..N` (A2Ls where several `MEMORY_SEGMENT`s share one logical segment, or numbers don't start at 0, no longer query non-existent segments)
+- ✅ **ES582 transmit no longer blocks**: `OCI_WriteCANData*` is called with a zero timeout, so a bus that stops acknowledging frames returns an error instead of hanging the caller
+- ✅ `cargo run --example es582_xcp_test` — CONNECT / GET_ID / GET_CAL_PAGE / SET_CAL_PAGE / SET_MTA+UPLOAD / DISCONNECT against a real ECU
+
+### v0.6.0 - ETAS ES582 (BOA/OCI) CAN Driver
+
+- ✅ **ES582 Driver**: `src/transport/can/es582.rs` drives ETAS ES582 CAN/CAN-FD interfaces through the BOA V2 Open Controller Interface
+  - Dynamic loading of `dll-ocdProxy.dll` (OCI) and `dll-csiBind.dll` (CSI) via `libloading`; no ETAS SDK needed at build time
+  - Channel enumeration through the CSI search-for-service tree (`CSI_CreateProtocolTree` + `CSI_GetUriForUuid`, `UUID_OCICAN`)
+  - OCI_CAN API version negotiation (1.6 → 1.0), `OCI_OpenCANController` with bit-rate/timing candidates, Tx/Rx queues with an accept-all frame filter
+  - Classic CAN and CAN-FD frames, hardware timestamps converted from controller ticks to microseconds
+  - `cargo run --example es582_verify` smoke test (device/channel info, frame receive, optional transmit)
+- 📄 Driver notes in [`docs/ES582_CAN.md`](docs/ES582_CAN.md)
 
 ### v0.5.0 - CAN / PCAN Transport
 

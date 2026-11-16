@@ -8,6 +8,7 @@ mod transport;
 mod udp;
 
 pub use can::CanTransport;
+pub use can::es582;
 pub use can::{
     driver_names, drivers, find_driver, list_can_devices, CanDevice, CanDeviceConfig,
     CanDeviceError, CanDeviceInfo, CanDriver, CanFrame,

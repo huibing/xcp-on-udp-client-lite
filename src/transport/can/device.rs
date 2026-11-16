@@ -7,8 +7,9 @@
 //! per frame, PID-based receive, `MAX_DLC_REQUIRED` padding, async queueing).
 //!
 //! New hardware support is added by implementing [`CanDriver`] + [`CanDevice`]
-//! (see [`super::pcan`] for the PEAK-System PCAN-Basic implementation) and
-//! registering the driver in [`drivers`].
+//! (see [`super::pcan`] for the PEAK-System PCAN-Basic implementation and
+//! [`super::es582`] for the ETAS ES582 / BOA-OCI implementation) and registering
+//! the driver in [`drivers`].
 
 use std::time::Duration;
 
@@ -95,6 +96,12 @@ pub struct CanDeviceConfig {
     pub baudrate: Option<u32>,
     /// CAN-FD data-phase bit rate in bit/s; `Some` selects CAN-FD mode.
     pub data_baudrate: Option<u32>,
+    /// CAN identifiers the caller is interested in.
+    ///
+    /// Drivers that support hardware acceptance filters program them from this
+    /// list so unrelated bus traffic never reaches the host. Empty means
+    /// "accept everything" (the transport still filters in software).
+    pub accept_ids: Vec<u32>,
 }
 
 /// Errors returned by CAN device drivers.
@@ -173,7 +180,10 @@ pub trait CanDriver: Send + Sync {
 
 /// All compiled-in CAN drivers, in priority order.
 pub fn drivers() -> Vec<Box<dyn CanDriver>> {
-    vec![Box::new(super::pcan::PcanDriver::new())]
+    vec![
+        Box::new(super::pcan::PcanDriver::new()),
+        Box::new(super::es582::Es582Driver::new()),
+    ]
 }
 
 /// Names of all compiled-in CAN drivers.
