@@ -18,7 +18,7 @@
 #   "single-line" keep one line per event and redraw that block in place, so the
 #                 terminal never scrolls. Only the latest values stay visible.
 #                 Requires a terminal; falls back to "line" when redirected.
-mode = "line"
+mode = "single-line"
 
 # Default decimation for events that don't declare their own.
 # 1 = print every sample.
