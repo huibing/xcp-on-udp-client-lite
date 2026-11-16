@@ -37,7 +37,6 @@ use std::time::{Duration, Instant};
 
 use chrono::Local;
 use serde::Deserialize;
-use tokio::io::AsyncBufReadExt;
 use xcp_client::a2l::{A2lReader, CompuMethod};
 use xcp_client::transport::transport_display;
 use xcp_client::{DaqManager, Measurement, SlaveId, XcpClient};
@@ -535,23 +534,32 @@ pub async fn run_daq_print(config_path: &str) -> Result<(), Box<dyn std::error::
     let (quit_tx, mut quit_rx) = tokio::sync::mpsc::channel::<()>(1);
     let _quit_keepalive = quit_tx.clone();
     if std::io::stdin().is_terminal() {
-        tokio::spawn(async move {
-            let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if line.trim() == "q" {
-                            let _ = quit_tx.send(()).await;
-                            break;
+        // A plain OS thread, deliberately *not* `tokio::io::stdin()`: a pending
+        // tokio stdin read lives in the blocking pool, and `Runtime::drop`
+        // waits for blocking tasks indefinitely — the process would hang after
+        // shutdown until another CTRL+C killed it. A std thread blocked on
+        // stdin is simply terminated when the process exits.
+        let quit_tx = quit_tx.clone();
+        std::thread::Builder::new()
+            .name("daq-print-stdin".to_string())
+            .spawn(move || {
+                let stdin = std::io::stdin();
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match stdin.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            if line.trim() == "q" {
+                                let _ = quit_tx.blocking_send(());
+                                break;
+                            }
                         }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
-            }
-        });
+            })
+            .ok();
     }
 
     // Keeps a CTRL+C listener armed for the whole run (including the graceful

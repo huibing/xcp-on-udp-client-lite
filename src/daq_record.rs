@@ -7,7 +7,6 @@
 //! Usage: `cargo run -- daq-record --config daq_record.config.toml`
 
 use serde::Deserialize;
-use tokio::io::AsyncBufReadExt;
 use xcp_client::a2l::A2lTransportConfig;
 use xcp_client::transport::{transport_display, TransportConfig};
 use xcp_client::{A2lReader, DaqManager, XcpClient};
@@ -261,27 +260,41 @@ pub async fn run_daq_record(config_path: &str) -> Result<(), Box<dyn std::error:
     }
     println!("  Recording... Press CTRL+C to stop.\n");
 
-    // Create channel for stdin quit signal
-    let (quit_tx, quit_rx) = tokio::sync::oneshot::channel::<()>();
+    // Quit channel for the "q" + Enter shortcut.
+    //
+    // The extra sender clone keeps the channel open when the stdin thread ends
+    // (e.g. piped stdin at EOF), so EOF is not mistaken for a quit request.
+    let (quit_tx, mut quit_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let _quit_keepalive = quit_tx.clone();
 
-    // Spawn a background task to monitor stdin for "q"
-    tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    if line.trim() == "q" {
-                        let _ = quit_tx.send(());
-                        break;
+    // A plain OS thread, deliberately *not* `tokio::io::stdin()`: a pending
+    // tokio stdin read lives in the blocking pool, and `Runtime::drop` waits
+    // for blocking tasks indefinitely — the process would hang after shutdown
+    // until another CTRL+C killed it. A std thread blocked on stdin is simply
+    // terminated when the process exits.
+    {
+        let quit_tx = quit_tx.clone();
+        std::thread::Builder::new()
+            .name("daq-record-stdin".to_string())
+            .spawn(move || {
+                let stdin = std::io::stdin();
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match stdin.read_line(&mut line) {
+                        Ok(0) => break, // EOF
+                        Ok(_) => {
+                            if line.trim() == "q" {
+                                let _ = quit_tx.blocking_send(());
+                                break;
+                            }
+                        }
+                        Err(_) => break,
                     }
                 }
-                Err(_) => break,
-            }
-        }
-    });
+            })
+            .ok();
+    }
 
     // Wait for either CTRL+C or "q" on stdin.
     //
@@ -293,7 +306,7 @@ pub async fn run_daq_record(config_path: &str) -> Result<(), Box<dyn std::error:
         _ = ctrl_c_rx.changed() => {
             "CTRL+C"
         }
-        _ = quit_rx => {
+        _ = quit_rx.recv() => {
             "q"
         }
     };
