@@ -3,6 +3,7 @@
 mod calibrate;
 mod cli_connection;
 mod cli_signal;
+mod cli_slave;
 mod daq_print;
 mod daq_record;
 mod tui;
@@ -81,12 +82,12 @@ enum Mode {
         #[command(flatten)]
         connection: ConnectionArgs,
     },
-    /// Record DAQ measurements to MF4 and/or CSV files.
+    /// Record DAQ measurements to MF4 and/or CSV files for one or more slaves.
     ///
-    /// Runs until CTRL+C, then gracefully stops DAQ and saves output files.
-    /// All settings (A2L path, output files, measurements) are in the config.
+    /// Runs until CTRL+C (or "q" + Enter on stdin), then gracefully stops DAQ
+    /// and saves the output files.
     ///
-    /// Config file format (TOML):
+    /// Single-slave config (TOML):
     ///
     ///   a2l = "path/to/description.a2l"
     ///
@@ -118,6 +119,48 @@ enum Mode {
     ///   [[events]]
     ///   channel = 1
     ///   measurements = ["coolant_temp", "oil_temp"]
+    ///
+    /// Multi-slave config: replace the top-level `a2l`/`[connection]`/`[daq]`/
+    /// `[[events]]` sections with one `[[slaves]]` table per slave. A top-level
+    /// `[output]` may stay and acts as the shared default for slaves without
+    /// their own `[slaves.output]`; `{name}` and `{index}` expand to the slave
+    /// label and its 0-based index:
+    ///
+    ///   [output]
+    ///   csv = "recording_{name}.csv"
+    ///   mf4 = "recording_{name}.mf4"
+    ///
+    ///   [[slaves]]
+    ///   name = "inverter"             # optional (default: A2L file stem)
+    ///   a2l = "pms-a.a2l"
+    ///
+    ///   [slaves.connection]
+    ///   type = "can"
+    ///   can_id = 0x7fb
+    ///   slave_id = 0x7fc
+    ///   daq_ids = [0x7fd]
+    ///
+    ///   [slaves.output]               # optional, replaces the shared [output]
+    ///   csv = "inverter.csv"
+    ///
+    ///   [[slaves.events]]
+    ///   channel = 0
+    ///   measurements = ["speed", "rpm"]
+    ///
+    ///   [[slaves]]                    # second slave
+    ///   name = "charger"
+    ///   a2l = "charger.a2l"
+    ///
+    ///   [slaves.connection]
+    ///   addr = "192.168.1.20:5555"
+    ///
+    ///   [[slaves.events]]
+    ///   channel = 0
+    ///   measurements = ["voltage", "current"]
+    ///
+    /// Output paths must be unique across slaves and must not exist yet.
+    /// For CAN, every slave opens its own device/channel, so multiple CAN
+    /// slaves need distinct `channel` (or `device_id`/`controller`) settings.
     #[command(verbatim_doc_comment)]
     DaqRecord {
         /// Path to TOML config file

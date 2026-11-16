@@ -194,7 +194,7 @@ fn resolve_slaves(config: DaqPrintConfig) -> Result<(PrintConfig, Vec<ResolvedSl
             "No slave configured: add `a2l = \"description.a2l\"` or one or more \
              [[slaves]] sections to the config file",
         )?;
-        let name = default_slave_name(&a2l, 0);
+        let name = crate::cli_slave::default_slave_name(&a2l, 0);
         return Ok((
             print,
             vec![ResolvedSlave {
@@ -216,19 +216,9 @@ fn resolve_slaves(config: DaqPrintConfig) -> Result<(PrintConfig, Vec<ResolvedSl
     }
 
     let mut resolved = Vec::with_capacity(slaves.len());
-    let mut used: HashMap<String, usize> = HashMap::new();
+    let mut namer = crate::cli_slave::SlaveNamer::new();
     for (idx, slave) in slaves.into_iter().enumerate() {
-        let base = slave
-            .name
-            .filter(|n| !n.trim().is_empty())
-            .unwrap_or_else(|| default_slave_name(&slave.a2l, idx));
-        let count = used.entry(base.clone()).or_insert(0);
-        *count += 1;
-        let name = if *count == 1 {
-            base
-        } else {
-            format!("{}#{}", base, count)
-        };
+        let name = namer.label(slave.name.as_deref(), &slave.a2l, idx);
         resolved.push(ResolvedSlave {
             name,
             a2l: slave.a2l,
@@ -239,16 +229,6 @@ fn resolve_slaves(config: DaqPrintConfig) -> Result<(PrintConfig, Vec<ResolvedSl
     }
 
     Ok((print, resolved))
-}
-
-/// Label for a slave without an explicit name: the A2L file stem.
-fn default_slave_name(a2l: &str, idx: usize) -> String {
-    std::path::Path::new(a2l)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("slave{}", idx + 1))
 }
 
 // ============================ Printing ============================
@@ -938,6 +918,7 @@ async fn shutdown(sessions: &mut [SlaveSession], reason: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_slave::default_slave_name;
 
     fn signal(name: &str, is_float: bool) -> SignalFormat {
         SignalFormat {

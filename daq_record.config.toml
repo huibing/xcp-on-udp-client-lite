@@ -4,8 +4,14 @@
 #
 # Both MF4 and CSV output can be enabled simultaneously.
 # At least one output format must be specified.
+#
+# Two forms are supported:
+#   1. single slave — top-level `a2l`, `[connection]`, `[output]`, `[daq]`,
+#      `[[events]]` (used below by default)
+#   2. multiple slaves — one `[[slaves]]` table per slave (see the commented
+#      block at the bottom); the two forms are mutually exclusive
 
-# Path to A2L description file (required)
+# Path to A2L description file (required in the single-slave form)
 a2l = "pms-a.a2l"
 
 [connection]
@@ -54,3 +60,65 @@ measurements = ["CAN1_TX_PMS03_PMS_BATTMODEREQ", "CAN1_TX_PMS02_PMS_MAXTEMP", "C
 [[events]]
 channel = 1
 measurements = ["AIN_v_Voltage", "DIN_b_SwSts"]
+
+# ===========================================================================
+# Multi-slave recording (alternative to the single-slave form above)
+#
+# To record several slaves, comment out the top-level `a2l`, `[connection]`,
+# `[output]`, `[daq]` and `[[events]]` sections and uncomment this block.
+#
+# - every [[slaves]] entry has its own A2L, transport, output files, DAQ
+#   defaults and event groups
+# - a top-level [output] is allowed here and is shared by all slaves that do
+#   not declare their own [slaves.output]
+# - `{name}` / `{index}` in an output path expand to the slave label and its
+#   0-based index, which keeps file names apart
+# - NOTE for CAN: every slave opens its own CAN device/channel, so multiple CAN
+#   slaves need distinct `channel` (or `device_id`/`controller`) settings;
+#   UDP/TCP slaves are independent and can be combined freely
+# ===========================================================================
+#
+#[output]                          # shared default for all slaves
+#csv = "recording_{name}.csv"
+#mf4 = "recording_{name}.mf4"
+#
+#[[slaves]]
+#name = "inverter"                 # optional label (default: A2L file stem)
+#a2l = "pms-a.a2l"
+#
+#[slaves.connection]
+#type = "can"
+#channel = "auto"
+#can_id = 0x7fb
+#slave_id = 0x7fc
+#daq_ids = [0x7fd]
+#
+## Optional: override the shared [output] for this slave
+#[slaves.output]
+#csv = "inverter.csv"
+#
+#[slaves.daq]
+#event_channel = 0
+#
+#[[slaves.events]]
+#channel = 0
+#measurements = ["CAN1_TX_PMS03_PMS_BATTMODEREQ", "CAN1_TX_PMS02_PMS_MAXTEMP"]
+#
+#[[slaves.events]]
+#channel = 1
+#measurements = ["AIN_v_Voltage"]
+#
+## --- dummy second slave (disabled by default) -----------------------------
+#[[slaves]]
+#name = "dummy"
+#a2l = "pms-a.a2l"                 # replace with the second ECU's A2L file
+#
+#[slaves.connection]
+#addr = "192.168.1.20:5555"        # or CAN settings (distinct channel/device)
+#
+#[slaves.daq]
+#event_channel = 0
+#
+#[[slaves.events]]
+#channel = 0
+#measurements = ["CAN1_TX_PMS02_PMS_MAXTEMP"]

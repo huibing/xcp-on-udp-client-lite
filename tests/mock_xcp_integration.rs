@@ -480,3 +480,158 @@ measurements = ["counter"]
     let _ = std::fs::remove_dir_all(&dir);
     server.stop().await.expect("stop mock server");
 }
+
+/// `daq-record` end-to-end: records to CSV, quits on "q" + Enter, exits cleanly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daq_record_cli_writes_csv_and_exits_on_q() {
+    let _guard = PORT_LOCK.lock().await;
+    let server = MockXcpSlaveServer::start()
+        .await
+        .expect("start mock server");
+
+    let dir = std::env::temp_dir().join(format!("xcp-daq-record-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let config_path = dir.join("daq_record.toml");
+    let csv_path = dir.join("recording.csv");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+a2l = "hello_xcp.a2l"
+
+[connection]
+addr = "{MOCK_SLAVE_ADDR}"
+
+[output]
+csv = '{}'
+
+[[events]]
+channel = 0
+measurements = ["counter"]
+"#,
+            csv_path.display()
+        ),
+    )
+    .expect("write config");
+
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xcp_client"))
+        .arg("daq-record")
+        .arg("--config")
+        .arg(&config_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn daq-record");
+
+    // Let it record for a moment, then quit via the stdin shortcut.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(b"q\n").await.expect("write q");
+        // The child may already be exiting, so a failed flush is fine.
+        let _ = stdin.flush().await;
+        // Keep the pipe open while waiting so the child never sees stdin EOF.
+        let _keep = stdin;
+        let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+            .await
+            .expect("daq-record did not exit after q")
+            .expect("wait");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(0), "stdout: {}", stdout);
+        assert!(
+            stdout.contains("q received. Shutting down"),
+            "stdout: {}",
+            stdout
+        );
+        assert!(stdout.contains("Recording Summary"), "stdout: {}", stdout);
+    }
+
+    let csv = std::fs::read_to_string(&csv_path).expect("csv exists");
+    let lines: Vec<&str> = csv.lines().collect();
+    assert!(lines.len() >= 3, "expected header + rows, got: {:?}", lines);
+    assert!(lines[0].starts_with("time_s"), "header: {}", lines[0]);
+    assert!(lines[0].contains("counter"), "header: {}", lines[0]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+    server.stop().await.expect("stop mock server");
+}
+
+/// `daq-record` multi-slave: when one slave fails to start, the slaves that are
+/// already recording are shut down cleanly and the process reports the error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daq_record_cli_rolls_back_started_slaves_on_error() {
+    let _guard = PORT_LOCK.lock().await;
+    let server = MockXcpSlaveServer::start()
+        .await
+        .expect("start mock server");
+
+    let dir = std::env::temp_dir().join(format!("xcp-daq-record-multi-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let config_path = dir.join("daq_record_multi.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[output]
+csv = '{}'
+
+[[slaves]]
+name = "ok"
+a2l = "hello_xcp.a2l"
+
+[slaves.connection]
+addr = "{MOCK_SLAVE_ADDR}"
+
+[[slaves.events]]
+channel = 0
+measurements = ["counter"]
+
+[[slaves]]
+name = "broken"
+a2l = "this_a2l_does_not_exist.a2l"
+
+[slaves.connection]
+addr = "{MOCK_SLAVE_ADDR}"
+"#,
+            dir.join("{name}.csv").display()
+        ),
+    )
+    .expect("write config");
+
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xcp_client"))
+        .arg("daq-record")
+        .arg("--config")
+        .arg(&config_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("run daq-record");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_ne!(output.status.code(), Some(0), "stdout: {}", stdout);
+    assert!(
+        stderr.contains("this_a2l_does_not_exist.a2l"),
+        "stderr: {}",
+        stderr
+    );
+    // The first slave was recording and must have been rolled back.
+    assert!(stdout.contains("[ok] recording"), "stdout: {}", stdout);
+    assert!(
+        stdout.contains("[ok] stopping recording"),
+        "stdout: {}",
+        stdout
+    );
+    assert!(stdout.contains("[ok] disconnecting"), "stdout: {}", stdout);
+
+    let _ = std::fs::remove_dir_all(&dir);
+    server.stop().await.expect("stop mock server");
+}

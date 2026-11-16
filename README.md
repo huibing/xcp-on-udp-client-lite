@@ -63,6 +63,8 @@ lib.rs → client.rs (XcpClient - Multi-Slave Manager)
     ├── daq_record.rs      # CLI daq-record subcommand
     ├── daq_print.rs       # CLI daq-print subcommand (live stdout)
     ├── cli_connection.rs  # Shared CLI/TOML connection settings
+    ├── cli_slave.rs       # Shared slave labelling for config files
+    ├── cli_signal.rs      # Shared CTRL+C handling for CLI subcommands
     │
     ├── a2l.rs             # A2L description file support entrypoint
     │   └── a2l/
@@ -328,7 +330,9 @@ Supported DCM parameter types: FESTWERT (scalar), FESTWERTEBLOCK (array), KENNLI
 
 ### Record DAQ Measurements (CLI)
 
-Record XCP DAQ measurements to MF4 and/or CSV files non-interactively. Runs until CTRL+C, then gracefully stops DAQ and saves the output files.
+Record XCP DAQ measurements to MF4 and/or CSV files non-interactively, from one
+or several slaves. Runs until CTRL+C (or `q` + Enter on stdin), then gracefully
+stops DAQ and saves the output files.
 
 ```bash
 cargo run --release -- daq-record --config daq_record.config.toml
@@ -336,7 +340,8 @@ cargo run --release -- daq-record --config daq_record.config.toml
 
 #### Config File Format (TOML)
 
-Create a config file specifying the A2L, output files, connection, and measurements:
+Single slave — top-level `a2l`, `[connection]`, `[output]`, `[daq]` and
+`[[events]]`:
 
 ```toml
 a2l = "ecu.a2l"                    # Path to A2L description file (required)
@@ -370,6 +375,59 @@ measurements = ["coolant_temp", "oil_temp"]
 - Invalid measurement names are warned and skipped (recording continues with valid ones)
 - On CTRL+C: recording stops → DAQ stops → `FREE_DAQ` restores the slave → disconnect
   (extra CTRL+C presses during that shutdown are ignored, so the process still exits cleanly)
+
+#### Multiple slaves
+
+Replace the top-level `a2l`/`[connection]`/`[daq]`/`[[events]]` sections with
+one `[[slaves]]` table per slave (the two forms are mutually exclusive). A
+top-level `[output]` may stay and is shared by every slave that does not declare
+its own `[slaves.output]`; `{name}` / `{index}` placeholders expand to the slave
+label and its 0-based index:
+
+```toml
+[output]                          # shared default for all slaves
+csv = "recording_{name}.csv"
+mf4 = "recording_{name}.mf4"
+
+[[slaves]]
+name = "inverter"                 # optional label (default: A2L file stem)
+a2l = "pms-a.a2l"
+
+[slaves.connection]
+type = "can"
+can_id = 0x7fb
+slave_id = 0x7fc
+daq_ids = [0x7fd]
+
+[slaves.output]                   # optional: replaces the shared [output]
+csv = "inverter.csv"
+
+[[slaves.events]]
+channel = 0
+measurements = ["speed", "rpm"]
+
+[[slaves]]                        # second slave, independent config
+name = "charger"
+a2l = "charger.a2l"
+
+[slaves.connection]
+addr = "192.168.1.20:5555"
+
+[[slaves.events]]
+channel = 0
+measurements = ["voltage", "current"]
+```
+
+- Output paths are expanded, checked for duplicates (case-insensitively) and
+  refused if the file already exists — before any slave is connected
+- If one slave fails to start, already started slaves are shut down cleanly
+- The recording summary lists duration and file sizes per slave
+- `daq_record.config.toml` contains a fully commented multi-slave block with a
+  dummy second slave
+
+> **CAN note:** every slave opens its own CAN device/channel, so multiple CAN
+> slaves need distinct `channel` (or `device_id`/`controller`) settings.
+> UDP/TCP slaves are independent and can be combined freely.
 
 ##### CAN Transport
 
@@ -1084,6 +1142,8 @@ cargo test test_name -- --nocapture
 │   ├── daq_record.rs    # CLI daq-record subcommand
 │   ├── daq_print.rs     # CLI daq-print subcommand (live stdout)
 │   ├── cli_connection.rs # Shared CLI/TOML connection settings
+│   ├── cli_slave.rs     # Shared slave labelling for config files
+│   ├── cli_signal.rs    # Shared CTRL+C handling for CLI subcommands
 │   ├── a2l/             # A2L file support
 │   ├── protocol/        # XCP protocol implementation
 │   ├── transport/       # Transport abstraction (UDP/TCP/CAN + CAN device drivers)
