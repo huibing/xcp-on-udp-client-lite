@@ -35,6 +35,14 @@ pub use device::{
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+/// Drop any cached CAN hardware enumeration (currently the ES582 URI list).
+///
+/// Call this before an explicit hardware scan so the result reflects the
+/// devices attached right now.
+pub fn invalidate_hardware_cache() {
+    es582::invalidate_uri_cache();
+}
+
 /// Driver used when the config does not specify one.
 pub const DEFAULT_CAN_DRIVER: &str = "pcan";
 

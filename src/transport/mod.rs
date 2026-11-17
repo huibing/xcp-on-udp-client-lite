@@ -24,6 +24,7 @@ mod resolve;
 mod router;
 
 pub use can::es582;
+pub use can::invalidate_hardware_cache;
 pub use can::{
     driver_names, drivers, find_driver, list_can_devices, CanConfig, CanDevice, CanDeviceConfig,
     CanDeviceError, CanDeviceInfo, CanDriver, CanFrame,

@@ -59,6 +59,15 @@ ihex = "=3.0.0"
 # DCM file parsing
 dcm_utils = { git = "https://github.com/huibing/dcm_utils.git" }
 
+# Host hardware discovery (network adapters) on Windows
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -963,6 +963,10 @@ impl CanDriver for PcanDriver {
         "PEAK-System PCAN-Basic"
     }
 
+    fn runtime_status(&self) -> Result<(), String> {
+        PcanApi::load().map(|_| ()).map_err(|e| e.to_string())
+    }
+
     fn list_channels(&self) -> Vec<CanDeviceInfo> {
         let api = match PcanApi::load() {
             Ok(api) => api,

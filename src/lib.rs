@@ -6,6 +6,7 @@ pub mod a2l;
 pub mod calibration;
 pub mod client;
 pub mod daq;
+pub mod hardware;
 pub mod protocol;
 pub mod transport; // A2L module with COMPU_METHOD support
                    // pub mod a2l_reader;  // DEPRECATED: Will be removed, use `a2l` module instead

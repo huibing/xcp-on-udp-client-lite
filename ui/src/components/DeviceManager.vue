@@ -9,6 +9,15 @@
       <button type="button" class="secondary" @click="refresh" :disabled="loadingPage">
         ↻ Refresh
       </button>
+      <button
+        type="button"
+        class="secondary"
+        @click="scanHardware"
+        :disabled="hardwareScan.busy"
+        title="Scan this PC for network adapters and CAN hardware"
+      >
+        {{ hardwareScan.busy ? 'Scanning...' : '⌕ Scan Hardware' }}
+      </button>
     </div>
 
     <div v-if="toast.message" class="toast" :class="toast.kind">{{ toast.message }}</div>
@@ -293,6 +302,115 @@
         </div>
       </div>
     </div>
+
+    <!-- Hardware Scan Modal -->
+    <div v-if="hardwareScan.open" class="modal-overlay" @click.self="closeHardwareScan">
+      <div class="modal scan-modal">
+        <div class="scan-header">
+          <h2>Hardware Scan</h2>
+          <span v-if="hardwareScan.report" class="scan-meta">
+            {{ hardwareScan.report.scanned_at }} · {{ hardwareScan.report.duration_ms }} ms
+          </span>
+        </div>
+
+        <div v-if="hardwareScan.busy" class="scan-loading">
+          Scanning network adapters and CAN interfaces (PCAN, ES582)...
+        </div>
+
+        <div v-else-if="hardwareScan.error" class="modal-result err">
+          {{ hardwareScan.error }}
+        </div>
+
+        <template v-else-if="hardwareScan.report">
+          <ul v-if="hardwareScan.report.warnings?.length" class="warnings-list">
+            <li v-for="warning in hardwareScan.report.warnings" :key="warning">⚠ {{ warning }}</li>
+          </ul>
+
+          <div class="scan-section">
+            <div class="scan-section-title">
+              Network Interfaces
+              <span class="scan-count">{{ hardwareScan.report.network?.length ?? 0 }}</span>
+            </div>
+            <div v-if="!hardwareScan.report.network?.length" class="scan-empty">
+              No network adapters detected.
+            </div>
+            <div v-else class="scan-list">
+              <div
+                v-for="iface in hardwareScan.report.network"
+                :key="iface.id || iface.name"
+                class="scan-row"
+              >
+                <div class="scan-row-main">
+                  <span class="scan-name">{{ iface.name }}</span>
+                  <span class="scan-tag">{{ interfaceKindLabel(iface.kind) }}</span>
+                  <span class="tag" :class="iface.up ? 'connected' : 'disconnected'">
+                    {{ iface.status }}
+                  </span>
+                  <span class="scan-mac">{{ iface.mac || 'no MAC' }}</span>
+                </div>
+                <div class="scan-row-sub">
+                  <span v-if="iface.description" class="scan-desc">{{ iface.description }}</span>
+                  <span class="scan-addr">IPv4: {{ iface.ipv4?.join(', ') || '—' }}</span>
+                  <span class="scan-addr">IPv6: {{ iface.ipv6?.join(', ') || '—' }}</span>
+                  <span v-if="iface.speed_mbps">{{ iface.speed_mbps }} Mbit/s</span>
+                  <span v-if="iface.mtu">MTU {{ iface.mtu }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="scan-section">
+            <div class="scan-section-title">
+              CAN Interfaces
+              <span class="scan-count">{{ hardwareScan.report.can_devices?.length ?? 0 }}</span>
+            </div>
+            <div class="scan-drivers">
+              <span
+                v-for="driver in hardwareScan.report.can_drivers"
+                :key="driver.name"
+                class="scan-tag"
+                :class="driver.available ? 'ok' : 'bad'"
+                :title="driver.error || driver.description"
+              >
+                {{ driver.name }}: {{ driver.available ? 'runtime ready' : 'runtime unavailable' }}
+              </span>
+            </div>
+            <div v-if="!hardwareScan.report.can_devices?.length" class="scan-empty">
+              No PCAN or ES582 hardware detected.
+            </div>
+            <div v-else class="scan-list">
+              <div
+                v-for="canDevice in hardwareScan.report.can_devices"
+                :key="canDevice.value"
+                class="scan-row"
+              >
+                <div class="scan-row-main">
+                  <span class="scan-name">{{ canDevice.name }}</span>
+                  <span class="scan-tag">{{ canDevice.driver }}</span>
+                  <span class="tag" :class="canDevice.available ? 'connected' : 'stopped'">
+                    {{ canDevice.available ? 'available' : 'in use' }}
+                  </span>
+                  <span v-if="canDevice.fd_capable" class="scan-tag">CAN-FD</span>
+                </div>
+                <div class="scan-row-sub">
+                  <span class="scan-addr">{{ canDevice.label }}</span>
+                  <span>device {{ canDevice.device_id }} · controller {{ canDevice.controller }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <div class="modal-actions">
+          <button type="button" :disabled="hardwareScan.busy" @click="scanHardware">
+            {{ hardwareScan.busy ? 'Scanning...' : '↻ Rescan' }}
+          </button>
+          <button type="button" class="secondary" :disabled="hardwareScan.busy" @click="closeHardwareScan">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -313,6 +431,14 @@ const canDevices = ref([])
 const renameDrafts = reactive({})
 const toast = reactive({ message: '', kind: 'info' })
 let toastTimer = null
+
+// ── Hardware scan state ───────────────────────────────────────────────────────
+const hardwareScan = reactive({
+  open: false,
+  busy: false,
+  error: '',
+  report: null,   // HardwareScanReport from the `scan_hardware` command
+})
 
 // ── Upload modal state ────────────────────────────────────────────────────────
 const uploadModal = reactive({
@@ -413,6 +539,49 @@ function canOptionLabel(canDevice) {
   const state = canDevice.available ? '' : ' (in use)'
   const base = canDevice.label || `${canDevice.name} \u00b7 ${canDevice.channel}`
   return `${base}${fd}${state}`
+}
+
+// ── Hardware scan ─────────────────────────────────────────────────────────────
+
+async function scanHardware() {
+  hardwareScan.open = true
+  hardwareScan.busy = true
+  hardwareScan.error = ''
+  try {
+    const result = await invoke('scan_hardware')
+    if (!result?.success) {
+      hardwareScan.report = null
+      hardwareScan.error = result?.error || 'Hardware scan failed'
+      return
+    }
+    hardwareScan.report = result
+    // Keep the per-slave CAN selector in sync with what the scan found.
+    if (Array.isArray(result.can_devices)) {
+      canDevices.value = result.can_devices
+    }
+  } catch (error) {
+    hardwareScan.report = null
+    hardwareScan.error = String(error)
+  } finally {
+    hardwareScan.busy = false
+  }
+}
+
+function closeHardwareScan() {
+  if (hardwareScan.busy) return
+  hardwareScan.open = false
+}
+
+function interfaceKindLabel(kind) {
+  switch (kind) {
+    case 'ethernet': return 'Ethernet'
+    case 'wifi': return 'Wi-Fi'
+    case 'loopback': return 'Loopback'
+    case 'tunnel': return 'Tunnel'
+    case 'ppp': return 'PPP'
+    case 'wwan': return 'Mobile'
+    default: return 'Other'
+  }
 }
 
 async function refresh() {
@@ -1232,5 +1401,143 @@ button.small {
 .progress-detail {
   color: var(--exp-fg-dim, #888);
   font-size: 0.78rem;
+}
+
+/* ── Hardware scan modal ───────────────────────────────────────────────────── */
+
+.scan-modal {
+  min-width: 560px;
+  max-width: 860px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.scan-header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.9rem;
+}
+
+.scan-header h2 {
+  margin: 0;
+}
+
+.scan-meta {
+  margin-left: auto;
+  color: var(--exp-fg-dim, #888);
+  font-size: 0.78rem;
+  font-family: Consolas, monospace;
+}
+
+.scan-loading {
+  color: var(--exp-fg-dim, #888);
+  padding: 1.2rem 0;
+  font-size: 0.9rem;
+}
+
+.scan-section {
+  margin-bottom: 1.1rem;
+}
+
+.scan-section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--exp-fg-dim, #888);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.45rem;
+}
+
+.scan-count {
+  border: 1px solid #333;
+  border-radius: 999px;
+  padding: 0 0.45rem;
+  font-size: 0.72rem;
+  color: var(--exp-fg, #00cc44);
+}
+
+.scan-drivers {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.45rem;
+}
+
+.scan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.scan-row {
+  background: var(--exp-bg4, #0a0a0a);
+  border: 1px solid var(--exp-border, #003311);
+  border-radius: 6px;
+  padding: 0.55rem 0.7rem;
+}
+
+.scan-row-main {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.scan-name {
+  color: var(--exp-fg-bright, #00ff66);
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.scan-tag {
+  border: 1px solid #2a3a55;
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.72rem;
+  color: #9cc8ff;
+}
+
+.scan-tag.ok {
+  color: var(--exp-fg-bright, #00ff66);
+  border-color: var(--exp-fg-dim3, #006622);
+}
+
+.scan-tag.bad {
+  color: #ff6666;
+  border-color: #5c1f1f;
+}
+
+.scan-mac {
+  margin-left: auto;
+  color: var(--exp-fg-dim, #888);
+  font-family: Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.scan-row-sub {
+  display: flex;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+  margin-top: 0.35rem;
+  color: var(--exp-fg-dim, #888);
+  font-size: 0.78rem;
+}
+
+.scan-desc {
+  color: #b9c7d6;
+}
+
+.scan-addr {
+  font-family: Consolas, monospace;
+}
+
+.scan-empty {
+  color: var(--exp-fg-dim, #888);
+  font-size: 0.85rem;
+  padding: 0.3rem 0;
 }
 </style>

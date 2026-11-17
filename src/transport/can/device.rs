@@ -176,6 +176,14 @@ pub trait CanDriver: Send + Sync {
     fn default_channel(&self) -> Option<CanDeviceInfo> {
         self.list_channels().into_iter().find(|c| c.available)
     }
+
+    /// Check that the driver's runtime (vendor DLL / framework) is loadable.
+    ///
+    /// Used by the hardware scan to distinguish "driver not installed" from
+    /// "driver installed but no device attached". Defaults to available.
+    fn runtime_status(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// All compiled-in CAN drivers, in priority order.

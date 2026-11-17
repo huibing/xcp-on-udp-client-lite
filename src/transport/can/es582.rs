@@ -1418,6 +1418,10 @@ impl CanDriver for Es582Driver {
         "ETAS ES582 via BOA V2 (OCI)"
     }
 
+    fn runtime_status(&self) -> Result<(), String> {
+        BoaApi::load().map(|_| ()).map_err(|e| e.to_string())
+    }
+
     fn list_channels(&self) -> Vec<CanDeviceInfo> {
         self.probe_channels().into_iter().map(|c| c.info).collect()
     }
@@ -1461,6 +1465,14 @@ fn invalidate_uris() {
     if let Ok(mut guard) = URI_CACHE.lock() {
         *guard = None;
     }
+}
+
+/// Drop the cached URI list so the next enumeration rescans the hardware.
+///
+/// Used by the explicit hardware scan, which must reflect what is attached
+/// right now rather than the last few seconds of cached state.
+pub fn invalidate_uri_cache() {
+    invalidate_uris();
 }
 
 /// Does `uri` satisfy the caller's selection (`device_id`/`controller`)?
