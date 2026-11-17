@@ -34,6 +34,7 @@ pub mod es582;
 mod pcan;
 
 use super::transport::{Transport, TransportError, TransportType};
+use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
 pub use device::{
     driver_names, drivers, find_driver, list_can_devices, CanDevice, CanDeviceConfig,
@@ -44,7 +45,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 /// Driver used when the config does not specify one.
 pub const DEFAULT_CAN_DRIVER: &str = "pcan";
@@ -153,7 +153,7 @@ pub struct CanTransport {
     /// The transport is a plain FIFO pipe: it does not classify frames by PID,
     /// that is the message router's job (see
     /// [`crate::transport::message_router`]).
-    rx: Arc<RxQueue>,
+    rx: RxQueue,
     /// Signal to stop the reader thread.
     reader_stop: Arc<AtomicBool>,
     /// Background reader thread handle.
@@ -216,8 +216,8 @@ impl CanTransport {
         );
 
         let device = Arc::new(Mutex::new(device));
-        let (frame_tx, frame_rx) = mpsc::unbounded_channel();
-        let rx = Arc::new(RxQueue::new(frame_rx));
+        let (frame_tx, frame_rx) = async_channel::unbounded();
+        let rx = RxQueue::new(frame_rx);
         let reader_stop = Arc::new(AtomicBool::new(false));
         tracing::info!(
             "CAN receive filter: master=0x{:X}, {}",
@@ -336,11 +336,15 @@ impl CanTransport {
 /// "next frame, in arrival order" without leaking channel plumbing. The
 /// channel closes when the reader thread exits, which is how consumers observe
 /// a dropped connection.
-struct RxQueue(AsyncMutex<mpsc::UnboundedReceiver<CanFrame>>);
+///
+/// No lock is needed: [`async_channel::Receiver::recv`] takes `&self`, so the
+/// `&self` transport methods can wait on it directly (the message router is the
+/// only consumer, so concurrent receives are not a concern).
+struct RxQueue(Receiver<CanFrame>);
 
 impl RxQueue {
-    fn new(rx: mpsc::UnboundedReceiver<CanFrame>) -> Self {
-        Self(AsyncMutex::new(rx))
+    fn new(rx: Receiver<CanFrame>) -> Self {
+        Self(rx)
     }
 
     /// Pop the next frame, waiting at most `timeout_ms` (`None` waits forever).
@@ -348,17 +352,16 @@ impl RxQueue {
     /// Returns `Ok(None)` on timeout and
     /// [`TransportError::ConnectionClosed`] once the sender is gone.
     async fn recv(&self, timeout_ms: Option<u64>) -> Result<Option<CanFrame>, TransportError> {
-        let mut rx = self.0.lock().await;
         let received = match timeout_ms {
             Some(timeout_ms) => {
-                match tokio::time::timeout(Duration::from_millis(timeout_ms), rx.recv()).await {
+                match tokio::time::timeout(Duration::from_millis(timeout_ms), self.0.recv()).await {
                     Ok(received) => received,
                     Err(_) => return Ok(None),
                 }
             }
-            None => rx.recv().await,
+            None => self.0.recv().await,
         };
-        received.map(Some).ok_or(TransportError::ConnectionClosed)
+        received.map(Some).map_err(|_| TransportError::ConnectionClosed)
     }
 }
 
@@ -559,7 +562,7 @@ impl FrameFilter {
 fn spawn_reader(
     device: Arc<Mutex<Box<dyn CanDevice>>>,
     filter: FrameFilter,
-    tx: mpsc::UnboundedSender<CanFrame>,
+    tx: Sender<CanFrame>,
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
@@ -589,9 +592,10 @@ fn spawn_reader(
                                 );
                                 continue;
                             }
-                            // Unbounded send never blocks; an error means the
-                            // transport was dropped, so stop reading.
-                            if tx.send(frame).is_err() {
+                            // The channel is unbounded, so `try_send` only
+                            // fails when the receiver is gone, i.e. the
+                            // transport was dropped: stop reading.
+                            if tx.try_send(frame).is_err() {
                                 tracing::debug!("CAN receive channel closed");
                                 break 'reader;
                             }
@@ -669,7 +673,7 @@ mod tests {
 
     #[test]
     fn test_rx_queue_preserves_arrival_order() {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = async_channel::unbounded();
         let queue = RxQueue::new(rx);
         let frame = |pid: u8, ts: u64| CanFrame {
             id: 0x551,
@@ -677,8 +681,8 @@ mod tests {
             data: vec![pid, 0x11],
             timestamp_us: Some(ts),
         };
-        tx.send(frame(0x00, 1)).unwrap();
-        tx.send(frame(0xFF, 2)).unwrap();
+        tx.try_send(frame(0x00, 1)).unwrap();
+        tx.try_send(frame(0xFF, 2)).unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -693,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_rx_queue_timeout_and_close() {
-        let (tx, rx) = mpsc::unbounded_channel::<CanFrame>();
+        let (tx, rx) = async_channel::unbounded::<CanFrame>();
         let queue = RxQueue::new(rx);
 
         let rt = tokio::runtime::Runtime::new().unwrap();

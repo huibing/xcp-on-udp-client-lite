@@ -117,6 +117,16 @@ pub enum TransportError {
 }
 
 /// Transport trait - abstraction for different transport protocols
+///
+/// Send and receive share one `&self` object because the message router awaits
+/// receives on a background task while commands are sent from elsewhere, so the
+/// receive half cannot take `&mut self`. That forces transports to hide their
+/// receiver behind interior mutability (`async_channel::Receiver` in
+/// `CanTransport`, sockets plus pending buffers in the UDP/TCP transports).
+///
+/// Follow-up refactor: move the receive half out of this trait into an owned
+/// `PacketReceiver` (`recv(&mut self)`, taken once via `take_receiver()`), so the
+/// single-consumer invariant is enforced by ownership instead of by a lock.
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Send a command packet (without waiting for response)
