@@ -15,7 +15,7 @@
 //! - With no overrides at all, the transport is auto-selected from the A2L file
 //!   with UDP > CAN > TCP priority.
 
-use super::transport::{TransportConfig, TransportType};
+use super::config::{TransportConfig, TransportType};
 use crate::a2l::A2lTransportConfig;
 
 /// Transport settings supplied by the caller (CLI flags or a config file).

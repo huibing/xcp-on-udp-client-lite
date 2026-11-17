@@ -1,60 +1,48 @@
 //! XCP-on-CAN transport.
 //!
-//! XCP on CAN maps a single XCP packet into one CAN frame. Unlike XCP on
-//! Ethernet (which prefixes each packet with a 4-byte LEN/COUNTER header), CAN
-//! carries no transport header: the CAN DLC is the packet length and the XCP
-//! packet starts at data byte 0. The CAN identifier selects the object:
+//! XCP on CAN maps a single XCP packet into one CAN frame. Unlike XCP on Ethernet (which prefixes
+//! each packet with a 4-byte LEN/COUNTER header), CAN carries no transport header: the CAN DLC is
+//! the packet length and the XCP packet starts at data byte 0. The CAN identifier selects the
+//! object:
 //! - Master → Slave commands use `can_id` (`CAN_ID_MASTER`).
-//! - Slave → Master responses/DAQ data arrive on other identifiers and are
-//!   forwarded to the XCP layer, which classifies packets by PID.
+//! - Slave → Master responses/DAQ data arrive on other identifiers and are forwarded to the XCP
+//!   layer, which classifies packets by PID.
 //!
-//! This module only implements the transport/protocol concerns (framing, ID
-//! filtering, `MAX_DLC_REQUIRED` padding, async queueing). Received frames are
-//! handed to the consumer in arrival order over a plain FIFO; PID-based
-//! classification (CTO vs DTO) is the message router's job, not the
-//! transport's. The actual hardware
-//! is accessed through the [`CanDevice`] trait; see the [`device`] module for the
-//! abstraction and [`pcan`] for the PEAK-System PCAN-Basic driver, [`es582`] for
-//! ETAS ES582 hardware through the BOA V2 / OCI runtime.
+//! This module only implements the transport/protocol concerns (framing, ID filtering,
+//! `MAX_DLC_REQUIRED` padding, async queueing). Received frames are handed to the consumer in
+//! arrival order over a plain FIFO; PID-based classification (CTO vs DTO) is the router's job, not
+//! the transport's. The actual hardware is accessed through the [`CanDevice`] trait; see the
+//! [`device`] module for the abstraction and [`pcan`] for the PEAK-System PCAN-Basic driver,
+//! [`es582`] for ETAS ES582 hardware through the BOA V2 / OCI runtime.
 //!
-//! Incoming frames are filtered by CAN ID **and** PID so that unrelated
-//! traffic on a shared bus cannot pollute the XCP stream:
-//! - The master's own transmit ID is always rejected (echo suppression).
-//! - CTO-class frames (PID >= 0xFC: RES/ERR/EV/SERV) are accepted only from
-//!   `CAN_ID_SLAVE` when it is declared. This prevents random bus frames
-//!   whose first byte happens to be >= 0xFC from being mistaken for a command
-//!   response (the GET_DAQ_PROCESSOR_INFO `0xFC` parse failure).
-//! - DAQ-class frames (PID < 0xFC) are accepted from `CAN_ID_SLAVE` and the
-//!   fixed DAQ DTO IDs (`DAQ_LIST_CAN_ID` / `EVENT_CAN_ID_LIST`). When no fixed
-//!   DAQ IDs are declared (VARIABLE/INCREMENTAL), all non-master IDs are
-//!   accepted so DAQ data is never dropped.
+//! Incoming frames are filtered by CAN ID **and** PID so that unrelated traffic on a shared bus
+//! cannot pollute the XCP stream (see [`shared::FrameFilter`]).
 
 mod device;
 pub mod es582;
 mod pcan;
+mod receiver;
+mod sender;
+mod shared;
 
-use super::transport::{Transport, TransportError, TransportType};
-use async_channel::{Receiver, Sender};
-use async_trait::async_trait;
+use super::error::TransportError;
+use super::link::TransportLink;
+use shared::{spawn_reader, CanShared, FrameFilter};
 pub use device::{
     driver_names, drivers, find_driver, list_can_devices, CanDevice, CanDeviceConfig,
     CanDeviceError, CanDeviceInfo, CanDriver, CanFrame,
 };
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 /// Driver used when the config does not specify one.
 pub const DEFAULT_CAN_DRIVER: &str = "pcan";
 
-/// Configuration for establishing a CAN transport.
+/// Configuration for establishing a CAN link.
 ///
-/// Normally built from the A2L `XCP_ON_CAN` block plus an optional user-selected
-/// driver/channel.
+/// Normally built from the A2L `XCP_ON_CAN` block plus an optional user-selected driver/channel.
 #[derive(Debug, Clone, Default)]
-pub struct CanTransportConfig {
+pub struct CanConfig {
     /// CAN driver id (e.g. `"pcan"`). `None` uses the default driver.
     pub driver: Option<String>,
     /// Driver channel id/name, or `auto`/empty to let the driver choose.
@@ -73,12 +61,12 @@ pub struct CanTransportConfig {
     pub slave_id: Option<u32>,
     /// CAN IDs used for DAQ DTO frames (`DAQ_LIST_CAN_ID`, fixed mapping).
     pub daq_ids: Vec<u32>,
-    /// When true, master command frames are padded to the maximum DLC
-    /// (8 for classic CAN, 64 for CAN-FD) as required by `MAX_DLC_REQUIRED`.
+    /// When true, master command frames are padded to the maximum DLC (8 for classic CAN, 64 for
+    /// CAN-FD) as required by `MAX_DLC_REQUIRED`.
     pub max_dlc_required: bool,
 }
 
-impl CanTransportConfig {
+impl CanConfig {
     /// Create a config with a channel and command CAN ID but no bit rate.
     pub fn new(channel: impl Into<String>, can_id: u32) -> Self {
         Self {
@@ -88,534 +76,121 @@ impl CanTransportConfig {
         }
     }
 
-    /// Set the CAN driver id.
     pub fn with_driver(mut self, driver: impl Into<String>) -> Self {
         self.driver = Some(driver.into());
         self
     }
 
-    /// Set the stable device id (and optional controller index).
     pub fn with_device_id(mut self, device_id: impl Into<String>, controller: Option<u8>) -> Self {
         self.device_id = Some(device_id.into());
         self.controller = controller;
         self
     }
 
-    /// Set the nominal (arbitration-phase) bit rate in bit/s.
     pub fn with_baudrate(mut self, bps: u32) -> Self {
         self.baudrate = Some(bps);
         self
     }
 
-    /// Set the CAN-FD data-phase bit rate in bit/s (selects CAN-FD mode).
     pub fn with_data_baudrate(mut self, bps: u32) -> Self {
         self.data_baudrate = Some(bps);
         self
     }
 
-    /// Set the slave response CAN ID (`CAN_ID_SLAVE`).
     pub fn with_slave_id(mut self, id: u32) -> Self {
         self.slave_id = Some(id);
         self
     }
 
-    /// Set the DAQ DTO CAN IDs.
     pub fn with_daq_ids(mut self, ids: Vec<u32>) -> Self {
         self.daq_ids = ids;
         self
     }
 
-    /// Require command frames to be padded to the maximum DLC.
     pub fn with_max_dlc_required(mut self, required: bool) -> Self {
         self.max_dlc_required = required;
         self
     }
 }
 
-/// CAN transport for XCP on CAN, layered on top of a [`CanDevice`].
-pub struct CanTransport {
-    /// Resolved driver id.
-    driver: String,
-    /// Resolved channel name.
-    channel: String,
-    /// CAN ID used for master → slave commands.
-    can_id: u32,
-    /// True when `can_id` uses a 29-bit identifier.
-    extended: bool,
-    /// True when CAN-FD framing is used.
-    fd: bool,
-    /// Pad command frames to the maximum DLC (`MAX_DLC_REQUIRED`).
-    max_dlc_required: bool,
-    /// Underlying low-level CAN device.
-    device: Arc<Mutex<Box<dyn CanDevice>>>,
-    /// Frames accepted by the background reader thread, in arrival order.
-    ///
-    /// The transport is a plain FIFO pipe: it does not classify frames by PID,
-    /// that is the message router's job (see
-    /// [`crate::transport::message_router`]).
-    rx: RxQueue,
-    /// Signal to stop the reader thread.
-    reader_stop: Arc<AtomicBool>,
-    /// Background reader thread handle.
-    reader: Mutex<Option<JoinHandle<()>>>,
-    /// Connection state.
-    connected: AtomicBool,
-}
+/// Open a CAN channel and return the two halves of the link.
+pub async fn open(config: &CanConfig) -> Result<TransportLink, TransportError> {
+    let driver_name = config
+        .driver
+        .clone()
+        .unwrap_or_else(|| DEFAULT_CAN_DRIVER.to_string());
+    let addr = format!("{}:{}:0x{:03X}", driver_name, config.channel, config.can_id);
 
-impl CanTransport {
-    /// Create a new CAN transport from configuration.
-    ///
-    /// The driver is chosen from `config.driver` (defaulting to
-    /// [`DEFAULT_CAN_DRIVER`]); the channel/bit rate come from the config
-    /// (typically derived from the A2L `XCP_ON_CAN` block and/or a user
-    /// selection).
-    pub async fn connect(config: &CanTransportConfig) -> Result<Self, TransportError> {
-        let driver_name = config
-            .driver
-            .clone()
-            .unwrap_or_else(|| DEFAULT_CAN_DRIVER.to_string());
-        let driver = find_driver(&driver_name).ok_or_else(|| {
-            TransportError::ConnectFailed(format!("CAN driver not found: {}", driver_name))
-        })?;
+    let driver = find_driver(&driver_name).ok_or_else(|| {
+        TransportError::InvalidAddress(format!("CAN driver not found: {driver_name}"))
+    })?;
 
-        let filter = FrameFilter::from_config(config);
+    let filter = FrameFilter::from_config(config);
 
-        // Only the slave's response ID and the DAQ DTO IDs carry XCP data in the
-        // slave→master direction. Passing them to the driver lets it program
-        // hardware acceptance filters, which matters for devices whose receive
-        // path is expensive per frame (e.g. one USB round trip per frame on an
-        // ES582): unfiltered periodic bus traffic would otherwise push the
-        // response out of the device queue.
-        let mut accept_ids: Vec<u32> = Vec::new();
-        if let Some(slave_id) = config.slave_id {
-            accept_ids.push(slave_id);
+    // Only the slave's response ID and the DAQ DTO IDs carry XCP data in the slave→master
+    // direction. Passing them to the driver lets it program hardware acceptance filters, which
+    // matters for devices whose receive path is expensive per frame (e.g. one USB round trip per
+    // frame on an ES582): unfiltered periodic bus traffic would otherwise push the response out of
+    // the device queue.
+    let mut accept_ids: Vec<u32> = Vec::new();
+    if let Some(slave_id) = config.slave_id {
+        accept_ids.push(slave_id);
+    }
+    for id in &config.daq_ids {
+        if !accept_ids.contains(id) {
+            accept_ids.push(*id);
         }
-        for id in &config.daq_ids {
-            if !accept_ids.contains(id) {
-                accept_ids.push(*id);
-            }
-        }
+    }
 
-        let device_config = CanDeviceConfig {
-            channel: config.channel.clone(),
-            device_id: config.device_id.clone(),
-            controller: config.controller,
-            baudrate: config.baudrate,
-            data_baudrate: config.data_baudrate,
-            accept_ids,
-        };
-        let device = driver.open(&device_config).map_err(map_device_error)?;
-        let info = device.info();
-        let fd = device.is_fd();
-        tracing::info!(
-            "CAN transport: driver={}, channel={}, bitrate={}, fd={}",
-            driver_name,
-            info.channel,
-            device.bitrate_description(),
-            fd
+    let device_config = CanDeviceConfig {
+        channel: config.channel.clone(),
+        device_id: config.device_id.clone(),
+        controller: config.controller,
+        baudrate: config.baudrate,
+        data_baudrate: config.data_baudrate,
+        accept_ids,
+    };
+    let device = driver
+        .open(&device_config)
+        .map_err(|e| shared::map_open_error(&addr, e))?;
+    let info = device.info();
+    let fd = device.is_fd();
+
+    tracing::info!(
+        "CAN transport: driver={}, channel={}, bitrate={}, fd={}",
+        driver_name,
+        info.channel,
+        device.bitrate_description(),
+        fd
+    );
+    tracing::info!(
+        "CAN receive filter: master=0x{:X}, {}",
+        config.can_id,
+        filter.describe()
+    );
+    if config.slave_id.is_none() {
+        tracing::warn!(
+            "CAN_ID_SLAVE is not declared; CTO responses cannot be filtered \
+             by CAN ID and may be polluted by unrelated bus traffic"
         );
+    }
 
-        let device = Arc::new(Mutex::new(device));
-        let (frame_tx, frame_rx) = async_channel::unbounded();
-        let rx = RxQueue::new(frame_rx);
-        let reader_stop = Arc::new(AtomicBool::new(false));
-        tracing::info!(
-            "CAN receive filter: master=0x{:X}, {}",
+    let device: Arc<Mutex<Box<dyn CanDevice>>> = Arc::new(Mutex::new(device));
+    let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop = CancellationToken::new();
+    let reader = spawn_reader(device.clone(), filter, frame_tx, stop.clone());
+    let shared = CanShared::new(device, stop, reader);
+
+    Ok(TransportLink {
+        sender: Box::new(sender::CanSender::new(
+            shared.clone(),
             config.can_id,
-            filter.describe()
-        );
-        if config.slave_id.is_none() {
-            tracing::warn!(
-                "CAN_ID_SLAVE is not declared; CTO responses cannot be filtered \
-                 by CAN ID and may be polluted by unrelated bus traffic"
-            );
-        }
-        let reader = spawn_reader(device.clone(), filter, frame_tx, reader_stop.clone());
-
-        let can_id = config.can_id;
-        Ok(Self {
-            driver: driver_name,
-            channel: info.channel,
-            can_id,
-            extended: can_id > 0x7FF,
             fd,
-            max_dlc_required: config.max_dlc_required,
-            device,
-            rx,
-            reader_stop,
-            reader: Mutex::new(Some(reader)),
-            connected: AtomicBool::new(true),
-        })
-    }
-
-    /// Get the resolved driver id.
-    pub fn driver(&self) -> &str {
-        &self.driver
-    }
-
-    /// Get the resolved channel name.
-    pub fn channel(&self) -> &str {
-        &self.channel
-    }
-
-    /// Get the command CAN ID.
-    pub fn can_id(&self) -> u32 {
-        self.can_id
-    }
-
-    /// Whether CAN-FD framing is active.
-    pub fn is_fd(&self) -> bool {
-        self.fd
-    }
-
-    /// Transmit a normalized XCP payload as a single CAN frame.
-    ///
-    /// Unlike XCP-on-Ethernet there is no length/counter header: the CAN DLC
-    /// carries the length and the XCP packet starts at data byte 0. When
-    /// `MAX_DLC_REQUIRED` is set the frame is padded to the maximum DLC.
-    fn send_frame(&self, payload: &[u8]) -> Result<(), TransportError> {
-        if payload.is_empty() {
-            return Err(TransportError::SendFailed(
-                "refusing to send empty XCP payload".to_string(),
-            ));
-        }
-        if !self.fd && payload.len() > 8 {
-            return Err(TransportError::SendFailed(format!(
-                "XCP payload of {} bytes does not fit in a classic CAN frame",
-                payload.len()
-            )));
-        }
-
-        // `MAX_DLC_REQUIRED` requires fixed-size command frames; unused bytes
-        // are filled with 0x00 (max DLC is 8 for classic CAN, 64 for CAN-FD).
-        let padded = if self.max_dlc_required {
-            let target = if self.fd { 64 } else { 8 };
-            if payload.len() < target {
-                let mut buf = payload.to_vec();
-                buf.resize(target, 0x00);
-                Some(buf)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let payload = padded.as_deref().unwrap_or(payload);
-
-        tracing::trace!(
-            "Sending XCP-on-CAN frame: id=0x{:X}, fd={}, len={}, data=[{:02X?}]",
-            self.can_id,
-            self.fd,
-            payload.len(),
-            payload
-        );
-
-        let frame = CanFrame {
-            id: self.can_id,
-            extended: self.extended,
-            data: payload.to_vec(),
-            timestamp_us: None,
-        };
-        self.device
-            .lock()
-            .expect("CAN device mutex poisoned")
-            .send_frame(&frame)
-            .map_err(|e| TransportError::SendFailed(e.to_string()))
-    }
-
-    /// Receive the next frame in arrival order, waiting at most `timeout_ms`
-    /// (`None` waits until a frame arrives or the connection closes).
-    async fn recv_frame(&self, timeout_ms: Option<u64>) -> Result<Option<CanFrame>, TransportError> {
-        self.rx.recv(timeout_ms).await
-    }
-}
-
-/// FIFO of frames accepted by the background reader thread.
-///
-/// Wraps the receive half of the reader channel so the transport can express
-/// "next frame, in arrival order" without leaking channel plumbing. The
-/// channel closes when the reader thread exits, which is how consumers observe
-/// a dropped connection.
-///
-/// No lock is needed: [`async_channel::Receiver::recv`] takes `&self`, so the
-/// `&self` transport methods can wait on it directly (the message router is the
-/// only consumer, so concurrent receives are not a concern).
-struct RxQueue(Receiver<CanFrame>);
-
-impl RxQueue {
-    fn new(rx: Receiver<CanFrame>) -> Self {
-        Self(rx)
-    }
-
-    /// Pop the next frame, waiting at most `timeout_ms` (`None` waits forever).
-    ///
-    /// Returns `Ok(None)` on timeout and
-    /// [`TransportError::ConnectionClosed`] once the sender is gone.
-    async fn recv(&self, timeout_ms: Option<u64>) -> Result<Option<CanFrame>, TransportError> {
-        let received = match timeout_ms {
-            Some(timeout_ms) => {
-                match tokio::time::timeout(Duration::from_millis(timeout_ms), self.0.recv()).await {
-                    Ok(received) => received,
-                    Err(_) => return Ok(None),
-                }
-            }
-            None => self.0.recv().await,
-        };
-        received.map(Some).map_err(|_| TransportError::ConnectionClosed)
-    }
-}
-
-#[async_trait]
-impl Transport for CanTransport {
-    async fn send_command_only(&self, command: &[u8]) -> Result<(), TransportError> {
-        self.send_frame(command)
-    }
-
-    async fn recv_packet(&self) -> Result<Vec<u8>, TransportError> {
-        match self.recv_frame(None).await? {
-            Some(frame) => Ok(frame.data),
-            None => Err(TransportError::ConnectionClosed),
-        }
-    }
-
-    async fn try_recv_packet(&self, timeout_ms: u64) -> Result<Option<Vec<u8>>, TransportError> {
-        Ok(self.recv_frame(Some(timeout_ms)).await?.map(|f| f.data))
-    }
-
-    async fn recv_packet_ts(&self) -> Result<(Vec<u8>, Option<u64>), TransportError> {
-        match self.recv_frame(None).await? {
-            Some(frame) => Ok((frame.data, frame.timestamp_us)),
-            None => Err(TransportError::ConnectionClosed),
-        }   
-    }
-
-    async fn try_recv_packet_ts(
-        &self,
-        timeout_ms: u64,
-    ) -> Result<Option<(Vec<u8>, Option<u64>)>, TransportError> {
-        Ok(self
-            .recv_frame(Some(timeout_ms))
-            .await?
-            .map(|f| (f.data, f.timestamp_us)))
-    }
-
-    async fn close(&self) -> Result<(), TransportError> {
-        tracing::trace!(
-            "Closing CAN transport on {}:{} (id 0x{:X})",
-            self.driver,
-            self.channel,
-            self.can_id
-        );
-
-        self.connected.store(false, Ordering::SeqCst);
-        self.reader_stop.store(true, Ordering::SeqCst);
-
-        if let Some(handle) = self.reader.lock().unwrap().take() {
-            let _ = handle.join();
-        }
-
-        if let Ok(mut device) = self.device.lock() {
-            let _ = device.close();
-        }
-
-        Ok(())
-    }
-
-    fn transport_type(&self) -> TransportType {
-        TransportType::Can
-    }
-
-    fn target_addr(&self) -> String {
-        format!("{}:{}:0x{:03X}", self.driver, self.channel, self.can_id)
-    }
-}
-
-impl Drop for CanTransport {
-    fn drop(&mut self) {
-        self.reader_stop.store(true, Ordering::SeqCst);
-        if let Ok(mut guard) = self.reader.lock() {
-            if let Some(handle) = guard.take() {
-                let _ = handle.join();
-            }
-        }
-        // Only close the device if close() has not already done it.
-        if self.connected.swap(false, Ordering::SeqCst) {
-            if let Ok(mut device) = self.device.lock() {
-                let _ = device.close();
-            }
-        }
-    }
-}
-
-/// Map a driver error into a transport error.
-fn map_device_error(error: CanDeviceError) -> TransportError {
-    match error {
-        CanDeviceError::DriverNotFound(_) | CanDeviceError::UnknownChannel(_) => {
-            TransportError::InvalidAddress(error.to_string())
-        }
-        CanDeviceError::NoChannel(_) | CanDeviceError::Unsupported(_) => {
-            TransportError::InvalidAddress(error.to_string())
-        }
-        CanDeviceError::OpenFailed(_)
-        | CanDeviceError::SendFailed(_)
-        | CanDeviceError::RecvFailed(_)
-        | CanDeviceError::Driver(_) => TransportError::ConnectFailed(error.to_string()),
-    }
-}
-
-/// Frame acceptance rule for the reader thread.
-///
-/// Filtering is joint on CAN ID **and** PID so that command responses (CTO)
-/// are never polluted by unrelated bus traffic, while DAQ (DTO) stays
-/// lenient enough to support VARIABLE/INCREMENTAL DAQ IDs:
-/// - The master's own transmit ID is always rejected (echo suppression).
-/// - CTO-class frames (PID >= 0xFC: RES/ERR/EV/SERV) are accepted only from
-///   `slave_id` when it is known. A random frame whose first byte happens to
-///   be >= 0xFC on any other ID is dropped instead of being mistaken for a
-///   command response.
-/// - DAQ-class frames (PID < 0xFC) are accepted from the fixed DAQ DTO IDs
-///   plus `slave_id`. Per the XCP-on-CAN transport layer specification
-///   (§1.1 Addressing), DAQ packets share the slave→master identifier
-///   (CAN_ID_SLAVE) unless `DAQ_LIST_CAN_ID` declares separate IDs — so when
-///   no fixed DAQ IDs are declared, the allow-list defaults to `slave_id`
-///   instead of accepting everything. Accepting all non-master IDs would let
-///   unrelated periodic bus traffic (whose first data byte happens to be a
-///   valid PID) corrupt DAQ recordings with garbage/zero samples. Only when
-///   the slave ID is unknown as well does the DAQ path stay lenient.
-struct FrameFilter {
-    master_id: u32,
-    slave_id: Option<u32>,
-    /// DAQ DTO allow-list: `slave_id` ∪ fixed DAQ IDs; `None` only when both
-    /// are unknown (accept all non-master IDs).
-    daq_allowed: Option<HashSet<u32>>,
-}
-
-impl FrameFilter {
-    fn from_config(config: &CanTransportConfig) -> Self {
-        // DAQ DTO frames come from the fixed DAQ IDs and/or the slave response
-        // ID. Per the XCP-on-CAN spec, DAQ shares CAN_ID_SLAVE when
-        // DAQ_LIST_CAN_ID is not declared, so an empty `daq_ids` defaults the
-        // allow-list to the slave response ID — never to accept-all, which
-        // would let unrelated bus traffic be mistaken for DAQ data.
-        let daq_allowed = if config.daq_ids.is_empty() {
-            config.slave_id.map(|slave_id| HashSet::from([slave_id]))
-        } else {
-            let mut set: HashSet<u32> = config.daq_ids.iter().copied().collect();
-            if let Some(slave_id) = config.slave_id {
-                set.insert(slave_id);
-            }
-            Some(set)
-        };
-
-        Self {
-            master_id: config.can_id,
-            slave_id: config.slave_id,
-            daq_allowed,
-        }
-    }
-
-    /// Decide whether a received frame should enter the XCP stream.
-    ///
-    /// `pid` is the first data byte (XCP packet ID). CTO-class frames
-    /// (PID >= 0xFC) are only accepted from the declared slave response ID, so
-    /// unrelated bus traffic can never be mistaken for a command response.
-    /// DAQ-class frames (PID < 0xFC) follow the DAQ allow-list (lenient when
-    /// DAQ IDs are unknown).
-    fn accepts(&self, can_id: u32, pid: u8) -> bool {
-        if can_id == self.master_id {
-            return false; // echo suppression
-        }
-        if pid >= 0xFC {
-            // CTO (RES/ERR/EV/SERV): only from the slave response ID.
-            match self.slave_id {
-                Some(slave_id) => can_id == slave_id,
-                None => true, // slave ID unknown -> cannot filter (lenient)
-            }
-        } else {
-            // DAQ DTO.
-            match &self.daq_allowed {
-                Some(set) => set.contains(&can_id),
-                None => true, // DAQ IDs unknown -> accept (VARIABLE DAQ)
-            }
-        }
-    }
-
-    fn describe(&self) -> String {
-        let cto = match self.slave_id {
-            Some(id) => format!("CTO only from 0x{:X}", id),
-            None => "CTO accept-all (CAN_ID_SLAVE unknown)".to_string(),
-        };
-        let dto = match &self.daq_allowed {
-            Some(set) => {
-                let mut ids: Vec<String> = set.iter().map(|id| format!("0x{:X}", id)).collect();
-                ids.sort();
-                format!("DAQ strict [{}]", ids.join(", "))
-            }
-            None => "DAQ accept-all (CAN_ID_SLAVE unknown)".to_string(),
-        };
-        format!("{}; {}", cto, dto)
-    }
-}
-
-/// Start the background thread that drains the CAN device receive queue and
-/// forwards accepted frames to `tx` in arrival order.
-fn spawn_reader(
-    device: Arc<Mutex<Box<dyn CanDevice>>>,
-    filter: FrameFilter,
-    tx: Sender<CanFrame>,
-    stop: Arc<AtomicBool>,
-) -> JoinHandle<()> {
-    std::thread::Builder::new()
-        .name("can-reader".to_string())
-        .spawn(move || {
-            tracing::debug!("CAN reader thread started");
-            'reader: while !stop.load(Ordering::SeqCst) {
-                let mut received_any = false;
-                loop {
-                    let result = {
-                        let device = device.lock().expect("CAN device mutex poisoned");
-                        device.recv_frame(None)
-                    };
-
-                    match result {
-                        Ok(Some(frame)) => {
-                            received_any = true;
-                            if frame.data.is_empty() {
-                                // Error/status frame: ignore.
-                                continue;
-                            }
-                            let pid = frame.data[0];
-                            if !filter.accepts(frame.id, pid) {
-                                tracing::trace!(
-                                    "Ignoring CAN frame id=0x{:X} pid=0x{:02X} (filtered out)",
-                                    frame.id, pid
-                                );
-                                continue;
-                            }
-                            // The channel is unbounded, so `try_send` only
-                            // fails when the receiver is gone, i.e. the
-                            // transport was dropped: stop reading.
-                            if tx.try_send(frame).is_err() {
-                                tracing::debug!("CAN receive channel closed");
-                                break 'reader;
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(error) => {
-                            tracing::warn!("CAN receive error: {}", error);
-                            break;
-                        }
-                    }
-                }
-
-                // Poll fast when idle; yield briefly when frames are streaming.
-                if !received_any {
-                    std::thread::sleep(Duration::from_micros(200));
-                }
-            }
-            tracing::debug!("CAN reader thread stopped");
-        })
-        .expect("failed to spawn CAN reader thread")
+            config.max_dlc_required,
+            addr.clone(),
+        )),
+        receiver: Box::new(receiver::CanReceiver::new(shared, frame_rx, addr)),
+    })
 }
 
 #[cfg(test)]
@@ -623,8 +198,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_can_transport_config_builders() {
-        let cfg = CanTransportConfig::new("auto", 0x123)
+    fn test_can_config_builders() {
+        let cfg = CanConfig::new("auto", 0x123)
             .with_driver("pcan")
             .with_baudrate(500_000)
             .with_data_baudrate(2_000_000)
@@ -647,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_frame_filter_strict_when_ids_known() {
-        let cfg = CanTransportConfig {
+        let cfg = CanConfig {
             channel: "auto".to_string(),
             can_id: 0x123,
             slave_id: Some(0x456),
@@ -672,56 +247,12 @@ mod tests {
     }
 
     #[test]
-    fn test_rx_queue_preserves_arrival_order() {
-        let (tx, rx) = async_channel::unbounded();
-        let queue = RxQueue::new(rx);
-        let frame = |pid: u8, ts: u64| CanFrame {
-            id: 0x551,
-            extended: false,
-            data: vec![pid, 0x11],
-            timestamp_us: Some(ts),
-        };
-        tx.try_send(frame(0x00, 1)).unwrap();
-        tx.try_send(frame(0xFF, 2)).unwrap();
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let first = queue.recv(Some(100)).await.unwrap().unwrap();
-            assert_eq!(first.data, vec![0x00, 0x11]);
-            assert_eq!(first.timestamp_us, Some(1));
-            // FIFO: the CTO frame is not promoted, it simply comes next.
-            let second = queue.recv(Some(100)).await.unwrap().unwrap();
-            assert_eq!(second.data, vec![0xFF, 0x11]);
-        });
-    }
-
-    #[test]
-    fn test_rx_queue_timeout_and_close() {
-        let (tx, rx) = async_channel::unbounded::<CanFrame>();
-        let queue = RxQueue::new(rx);
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            // Empty queue: a bounded wait reports a timeout.
-            assert!(queue.recv(Some(10)).await.unwrap().is_none());
-            // Dropping the sender (reader thread exit) reports the closed
-            // connection instead of blocking or spinning.
-            drop(tx);
-            assert!(matches!(
-                queue.recv(None).await,
-                Err(TransportError::ConnectionClosed)
-            ));
-        });
-    }
-
-    #[test]
     fn test_frame_filter_daq_defaults_to_slave_id_without_daq_ids() {
-        // No DAQ_LIST_CAN_ID declared: per the XCP-on-CAN spec, DAQ packets
-        // share CAN_ID_SLAVE. Unrelated bus traffic must NOT be accepted as
-        // DAQ data — otherwise periodic CAN messages whose first data byte
-        // happens to be a valid PID (e.g. 0x00) corrupt DAQ recordings with
-        // garbage/zero samples.
-        let cfg = CanTransportConfig {
+        // No DAQ_LIST_CAN_ID declared: per the XCP-on-CAN spec, DAQ packets share CAN_ID_SLAVE.
+        // Unrelated bus traffic must NOT be accepted as DAQ data — otherwise periodic CAN
+        // messages whose first data byte happens to be a valid PID (e.g. 0x00) corrupt DAQ
+        // recordings with garbage/zero samples.
+        let cfg = CanConfig {
             channel: "auto".to_string(),
             can_id: 0x550,
             slave_id: Some(0x551),
@@ -730,50 +261,21 @@ mod tests {
         };
         let filter = FrameFilter::from_config(&cfg);
 
-        // DAQ only from the slave response ID.
         assert!(filter.accepts(0x551, 0x00)); // real DAQ DTO on CAN_ID_SLAVE
         assert!(filter.accepts(0x551, 0x60));
         assert!(!filter.accepts(0x310, 0x00)); // ECU application CAN message
         assert!(!filter.accepts(0x999, 0x10)); // unrelated bus traffic
         assert!(!filter.accepts(0x123, 0x10)); // master echo
 
-        // CTO still strictly from slave_id.
         assert!(filter.accepts(0x551, 0xFF));
         assert!(!filter.accepts(0x999, 0xFC));
     }
 
     #[test]
-    fn test_frame_filter_lenient_without_daq_ids() {
-        // Regression guard: the old behavior accepted ALL non-master IDs as
-        // DAQ when no fixed DAQ IDs were declared, letting unrelated bus
-        // traffic pollute DAQ recordings. DAQ now defaults to slave_id.
-        let cfg = CanTransportConfig {
-            channel: "auto".to_string(),
-            can_id: 0x123,
-            slave_id: Some(0x456),
-            daq_ids: Vec::new(),
-            ..Default::default()
-        };
-        let filter = FrameFilter::from_config(&cfg);
-
-        // CTO still strictly from slave_id even when DAQ IDs are unknown:
-        // this is the core fix for command-response pollution.
-        assert!(filter.accepts(0x456, 0xFF));
-        assert!(!filter.accepts(0x999, 0xFC)); // unrelated CTO traffic rejected
-        assert!(!filter.accepts(0x123, 0xFF)); // master echo
-
-        // DAQ defaults to the slave response ID (spec: DAQ shares
-        // CAN_ID_SLAVE when DAQ_LIST_CAN_ID is not declared).
-        assert!(filter.accepts(0x456, 0x00));
-        assert!(!filter.accepts(0x999, 0x10)); // unrelated DAQ traffic rejected
-        assert!(!filter.accepts(0x123, 0x10)); // master echo
-    }
-
-    #[test]
     fn test_frame_filter_slave_id_unknown() {
-        // Without CAN_ID_SLAVE we cannot filter CTO by ID (lenient, warned at
-        // connect time). DAQ is also lenient. Master echo is still rejected.
-        let cfg = CanTransportConfig {
+        // Without CAN_ID_SLAVE we cannot filter CTO by ID (lenient, warned at connect time).
+        // DAQ is also lenient. Master echo is still rejected.
+        let cfg = CanConfig {
             channel: "auto".to_string(),
             can_id: 0x123,
             slave_id: None,
@@ -789,23 +291,19 @@ mod tests {
 
     #[test]
     fn test_frame_filter_rejects_unrelated_cto_traffic_regression() {
-        // Reproduces the GET_DAQ_PROCESSOR_INFO failure: a periodic frame on an
-        // unrelated CAN ID whose first byte is 0xFC (SERV) was consumed as the
-        // command response. With slave_id declared, such frames must be dropped
-        // regardless of the DAQ ID configuration.
-        let cfg = CanTransportConfig {
+        // Reproduces the GET_DAQ_PROCESSOR_INFO failure: a periodic frame on an unrelated CAN ID
+        // whose first byte is 0xFC (SERV) was consumed as the command response.
+        let cfg = CanConfig {
             channel: "auto".to_string(),
-            can_id: 0x7FF, // master
-            slave_id: Some(0x800), // slave response ID
-            daq_ids: Vec::new(), // no fixed DAQ IDs
+            can_id: 0x7FF,
+            slave_id: Some(0x800),
+            daq_ids: Vec::new(),
             ..Default::default()
         };
         let filter = FrameFilter::from_config(&cfg);
-        // Random 0x123 traffic with a high first byte must NOT enter the stream.
         assert!(!filter.accepts(0x123, 0xFC));
         assert!(!filter.accepts(0x123, 0xFF));
         assert!(!filter.accepts(0x123, 0xFE));
-        // The real slave response on slave_id is accepted.
         assert!(filter.accepts(0x800, 0xFF));
         assert!(filter.accepts(0x800, 0xFE));
     }

@@ -2,7 +2,7 @@
 //!
 //! A [`CanDevice`] is a low-level, driver-specific CAN controller handle. It
 //! knows how to open a channel, transmit/receive raw CAN frames and close the
-//! channel — nothing about XCP. The XCP-on-CAN transport ([`super::CanTransport`])
+//! channel — nothing about XCP. The XCP-on-CAN link ([`super::open`])
 //! is built on top of it and owns the protocol-level concerns (one XCP packet
 //! per frame, PID-based receive, `MAX_DLC_REQUIRED` padding, async queueing).
 //!

@@ -12,17 +12,24 @@ use crate::protocol::{
     parse_get_id_response, parse_response, ConnectInfo, ErrorCode, Mta, Response,
 };
 use crate::transport::{
-    MessageRouter, Transport, TransportConfig, TransportError, TransportFactory, XcpMessage,
+    spawn_router, ChannelError, CtoChannel, DtoChannel, RouterHandle, TransportConfig, TransportError,
+    TransportFactory, TransportLink, TransportSender,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::{timeout, Duration};
+use tokio::sync::Mutex;
+use tokio::time::Duration;
 use uuid::Uuid;
 
 /// Default CTO response timeout (XCP T1 for the usual CAN/Ethernet slaves).
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Capacity of the CTO channel: responses are rare and must never be dropped.
+const CTO_CHANNEL_CAPACITY: usize = 64;
+
+/// Capacity of the DTO channel: DAQ is a burst stream, so allow more room before dropping.
+const DTO_CHANNEL_CAPACITY: usize = 1024;
 
 /// Slave unique identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -107,6 +114,17 @@ pub enum SlaveError {
     CalibrationWrite(#[from] CalibrationWriteError),
 }
 
+impl From<ChannelError> for SlaveError {
+    fn from(error: ChannelError) -> Self {
+        match error {
+            ChannelError::Timeout(_) => SlaveError::ResponseTimeout,
+            ChannelError::Closed { addr } => {
+                SlaveError::Transport(TransportError::ConnectionClosed { addr })
+            }
+        }
+    }
+}
+
 /// Calibration write error types
 /// These errors indicate why a calibration write operation failed
 #[derive(Debug, thiserror::Error)]
@@ -170,14 +188,17 @@ pub struct XcpSlave {
     /// Slave information
     pub info: SlaveInfo,
 
-    /// Transport layer (dynamic dispatch)
-    transport: Arc<dyn Transport>,
+    /// Send half of the link (send only).
+    sender: Box<dyn TransportSender>,
 
-    /// Message router
-    router: Arc<MessageRouter>,
+    /// CTO response channel; this slave is its only consumer.
+    cto: CtoChannel,
 
-    /// CTO response receiver
-    cto_rx: Arc<Mutex<mpsc::Receiver<XcpMessage>>>,
+    /// Router task. Stopping it drops the receive half and closes both channels.
+    router: RouterHandle,
+
+    /// DAQ data channel, handed to `DaqManager` once via [`XcpSlave::take_dto`].
+    dto: std::sync::Mutex<Option<DtoChannel>>,
 
     /// Calibration manager (with A2L data)
     pub cal_manager: CalibrationManager,
@@ -236,26 +257,16 @@ impl XcpSlave {
             transport_config.addr_string()
         );
 
-        // Create transport
-        let transport = TransportFactory::create(&transport_config)
-            .await
-            .map_err(SlaveError::Transport)?;
+        // Open the link: the send and receive halves are independent objects from here on.
+        let TransportLink { sender, receiver } = TransportFactory::open(&transport_config).await?;
 
-        // Create message router
-        let router = Arc::new(MessageRouter::new(100));
-
-        let cto_rx = router.get_cto_receiver();
-        let _dto_rx = router.get_dto_receiver();
-
-        // Start router task
-        let router_clone = router.clone();
-        let transport_for_router = transport.clone();
-        tokio::spawn(async move {
-            router_clone.start(transport_for_router).await;
-        });
-
-        // Give router time to start
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // The receive half is owned by the router task from now on.
+        let (cto, dto, router) = spawn_router(
+            receiver,
+            transport_config.addr_string(),
+            CTO_CHANNEL_CAPACITY,
+            DTO_CHANNEL_CAPACITY,
+        );
 
         let mut slave = Self {
             info: SlaveInfo {
@@ -266,9 +277,10 @@ impl XcpSlave {
                 connected: false,
                 connect_info: None,
             },
-            transport,
+            sender,
+            cto,
             router,
-            cto_rx,
+            dto: std::sync::Mutex::new(Some(dto)),
             cal_manager: CalibrationManager::new(),
             daq_manager: Arc::new(Mutex::new(DaqManager::new())),
             a2l_path: None,
@@ -340,10 +352,7 @@ impl XcpSlave {
     /// Send command and wait for CTO response
     pub async fn send_command_and_wait(&self, command: &[u8]) -> Result<Vec<u8>, SlaveError> {
         // Send command
-        self.transport
-            .send_command_only(command)
-            .await
-            .map_err(SlaveError::Transport)?;
+        self.sender.send(command).await?;
 
         // Capture outgoing CTO (cheap when disabled)
         let cmd_code = command.first().copied();
@@ -368,40 +377,9 @@ impl XcpSlave {
             }
         }
 
-        // Wait for response.
-        //
-        // The CTO channel also carries asynchronous EV (0xFD) / SERV (0xFC)
-        // packets from the slave. Those are NOT responses to this command —
-        // consuming one as the response would leave the real RES in the
-        // channel to be misattributed to the NEXT command. Skip them and
-        // keep waiting for RES (0xFF) / ERR (0xFE) within the timeout.
-        let mut rx = self.cto_rx.lock().await;
-        let deadline = std::time::Instant::now() + self.command_timeout;
-
-        let response = loop {
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                break Err(SlaveError::ResponseTimeout);
-            }
-            match timeout(deadline - now, rx.recv()).await {
-                Ok(Some(msg)) => {
-                    let pid = msg.payload.first().copied().unwrap_or(0);
-                    if pid == 0xFF || pid == 0xFE {
-                        break Ok(msg);
-                    }
-                    tracing::warn!(
-                        "Skipping non-response CTO packet (pid=0x{:02X}) from {} while \
-                         waiting for response to cmd 0x{:02X}",
-                        pid,
-                        self.info.name,
-                        command.first().copied().unwrap_or(0xFF)
-                    );
-                    // keep waiting
-                }
-                Ok(None) => break Err(SlaveError::NotConnected),
-                Err(_) => break Err(SlaveError::ResponseTimeout),
-            }
-        };
+        // Wait for response. The CTO channel also carries asynchronous EV (0xFD) / SERV (0xFC)
+        // packets; `wait_response` skips them and returns the first RES (0xFF) / ERR (0xFE).
+        let response = self.cto.wait_response(self.command_timeout).await;
 
         match response {
             Ok(msg) => {
@@ -438,7 +416,7 @@ impl XcpSlave {
                 }
                 Ok(msg.payload)
             }
-            Err(e) => Err(e),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1811,9 +1789,15 @@ impl XcpSlave {
         }
     }
 
-    /// Get DTO receiver for DAQ
-    pub fn get_dto_receiver(&self) -> Arc<Mutex<mpsc::Receiver<XcpMessage>>> {
-        self.router.get_dto_receiver()
+    /// Take the DAQ data channel. Returns `None` if it was already taken.
+    ///
+    /// `DaqManager` is the channel's only consumer: it moves it into its background task and takes
+    /// it back when the task ends.
+    pub fn take_dto(&self) -> Option<DtoChannel> {
+        self.dto
+            .lock()
+            .expect("dto slot mutex poisoned")
+            .take()
     }
 
     /// Disconnect from slave
@@ -1823,14 +1807,11 @@ impl XcpSlave {
         // Send DISCONNECT command
         let _ = self.send_command_and_wait(&commands::disconnect()).await;
 
-        // Stop router
-        self.router.stop().await;
+        // Stop the router first: its receive half is dropped, which closes the read side.
+        self.router.shutdown().await;
 
-        // Close transport
-        self.transport
-            .close()
-            .await
-            .map_err(SlaveError::Transport)?;
+        // Then release the device / write side.
+        self.sender.close().await?;
 
         self.info.connected = false;
 
@@ -1846,7 +1827,7 @@ impl XcpSlave {
 
     /// Get transport type
     pub fn transport_type(&self) -> crate::transport::TransportType {
-        self.transport.transport_type()
+        self.sender.transport_type()
     }
 
     // ==================== DAQ Methods ====================
@@ -2287,7 +2268,7 @@ mod tests {
     #[test]
     fn test_slave_error_conversions() {
         // Test that SlaveError can be created from TransportError
-        let transport_err = TransportError::Timeout;
+        let transport_err = TransportError::InvalidAddress("test".to_string());
         let slave_err: SlaveError = transport_err.into();
         match slave_err {
             SlaveError::Transport(_) => (), // Expected

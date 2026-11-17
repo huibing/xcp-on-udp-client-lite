@@ -17,6 +17,7 @@ use crate::a2l::{A2lDataType, A2lMeasurement, A2lReader, CompuMethod};
 use crate::client::DAQResolutionInfo;
 use crate::protocol::Mta;
 use crate::slave::XcpSlave;
+use crate::transport::{ChannelError, DtoChannel};
 // Note: chrono not used - timestamps are raw slave clock values, not UTC time
 #[cfg(feature = "mf4-rs-backend")]
 use mdf4_rs::{DataType as MdfDataType, DecodedValue, FlushPolicy, MdfWriter};
@@ -559,8 +560,10 @@ pub struct DaqManager {
     selected_indices: Vec<usize>,
     /// DAQ running flag
     running: Arc<AtomicBool>,
-    /// Background task handle
-    task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// Background task handle; the task returns the DTO channel when it ends.
+    task_handle: Arc<RwLock<Option<JoinHandle<DtoChannel>>>>,
+    /// DAQ data channel. Ownership alternates between this manager and the running task.
+    dto: Arc<RwLock<Option<DtoChannel>>>,
     /// CSV output path
     csv_path: PathBuf,
     /// MDF4 output path (derived from csv_path)
@@ -648,6 +651,7 @@ impl DaqManager {
             selected_indices,
             running: Arc::new(AtomicBool::new(false)),
             task_handle: Arc::new(RwLock::new(None)),
+            dto: Arc::new(RwLock::new(None)),
             csv_path: PathBuf::from("daq_data.csv"),
             mdf4_path: PathBuf::from("daq_data.mf4"),
             csv_enabled: true,
@@ -708,6 +712,7 @@ impl DaqManager {
             selected_indices,
             running: Arc::new(AtomicBool::new(false)),
             task_handle: Arc::new(RwLock::new(None)),
+            dto: Arc::new(RwLock::new(None)),
             csv_path: PathBuf::from("daq_data.csv"),
             mdf4_path: PathBuf::from("daq_data.mf4"),
             csv_enabled: true,
@@ -1592,9 +1597,6 @@ impl DaqManager {
         // Reset live snapshots so a DAQ restart begins from a clean state
         self.clear_live_snapshots().await;
 
-        // Get DTO receiver for DAQ reception (must be done before starting DAQ)
-        let dto_rx = slave.get_dto_receiver();
-
         // Select all configured DAQ lists (one per event group).
         // Capture firstPID from each START_STOP_DAQ_LIST response — PIDs are
         // not necessarily contiguous across DAQ lists (e.g. list 0 → 0..2,
@@ -1687,8 +1689,21 @@ impl DaqManager {
         // Build TimestampTracker for live display using local clock
         let display_start = std::time::Instant::now();
 
+        // Take ownership of the DTO channel. It lives in the background task while DAQ runs and
+        // is handed back when the task ends. Taking it here (after every fallible step) means a
+        // failed start cannot lose the channel; DTOs that arrive in the meantime stay buffered in
+        // the router's channel.
+        self.reclaim_dto().await;
+        let dto = match self.dto.write().await.take() {
+            Some(dto) => dto,
+            None => slave
+                .take_dto()
+                .ok_or("DAQ data channel already taken by another consumer")?,
+        };
+
         // Spawn DTO reception task
         let handle = tokio::spawn(async move {
+            let mut dto = dto;
             tracing::info!("DAQ started, waiting for DTO packets...");
 
             // Per-DAQ-list accumulated signal values.
@@ -1707,14 +1722,11 @@ impl DaqManager {
                     break;
                 }
 
-                // Receive DTO packet from channel
-                let msg = {
-                    let mut rx = dto_rx.lock().await;
-                    tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
-                };
+                // Receive DTO packet from channel. The task owns the channel, so no lock.
+                let msg = dto.recv(std::time::Duration::from_millis(100)).await;
 
                 match msg {
-                    Ok(Some(msg)) => {
+                    Ok(msg) => {
                         // Parse single DTO packet (PID + raw data, no timestamp parsed yet)
                         if let Some(mut data) = parse_dto_packet(&msg.payload, &iden_field_type) {
                             // Get configuration for this DAQ list and ODT
@@ -2043,11 +2055,11 @@ impl DaqManager {
                             }
                         }
                     }
-                    Ok(None) => {
-                        tracing::warn!("DTO channel closed");
+                    Err(ChannelError::Closed { addr }) => {
+                        tracing::warn!("DTO channel closed (link {} is gone)", addr);
                         break;
                     }
-                    Err(_) => {
+                    Err(ChannelError::Timeout(_)) => {
                         // Timeout, continue to check running flag
                         continue;
                     }
@@ -2095,6 +2107,9 @@ impl DaqManager {
             }
 
             tracing::info!("DAQ reception stopped");
+
+            // Hand the channel back so the next start() can reuse it.
+            dto
         });
 
         // Store task handle
@@ -2499,16 +2514,28 @@ impl DaqManager {
         // Signal reception task to stop
         self.running.store(false, Ordering::SeqCst);
 
-        // Wait for task to finish
-        {
-            let mut handle_guard = self.task_handle.write().await;
-            if let Some(handle) = handle_guard.take() {
-                handle.await.ok();
-            }
-        }
+        // Wait for the task to finish and take the DTO channel back
+        self.reclaim_dto().await;
 
         tracing::info!("DAQ acquisition stopped");
         Ok(())
+    }
+
+    /// Wait for the background DAQ task to end and take the DTO channel back.
+    ///
+    /// The task returns the channel when it exits, so this must be called before taking the
+    /// channel for a new run. If the task panicked the channel is gone and the next `start()`
+    /// reports a hard error instead of silently receiving nothing.
+    async fn reclaim_dto(&self) {
+        let handle = self.task_handle.write().await.take();
+        let Some(handle) = handle else {
+            return;
+        };
+
+        match handle.await {
+            Ok(dto) => *self.dto.write().await = Some(dto),
+            Err(e) => tracing::error!("DAQ task ended abnormally, DTO channel lost: {}", e),
+        }
     }
 
     /// Initialize MDF4 file structure with time channel and measurement channels (mdf4-rs backend).

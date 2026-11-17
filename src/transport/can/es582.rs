@@ -19,7 +19,7 @@
 //!    returns an [`Es582Device`] implementing [`CanDevice`].
 //!
 //! The XCP framing itself (one XCP packet per CAN frame, PID filtering,
-//! `MAX_DLC_REQUIRED` padding) lives in [`super::CanTransport`]; this module is
+//! `MAX_DLC_REQUIRED` padding) lives in the CAN link module ([`super::open`]); this module is
 //! pure hardware access.
 //!
 //! Notes on the FFI: the OCI structures are versioned and grow over time, so
