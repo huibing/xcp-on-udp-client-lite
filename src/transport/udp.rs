@@ -292,28 +292,6 @@ impl UdpTransport {
         self.receive_payload_from_socket(timeout_ms).await
     }
 
-    /// Send a command and receive the response payload.
-    ///
-    /// This method adds the XCP on Ethernet transport layer header:
-    /// [LEN_L, LEN_H, COUNTER_L, COUNTER_H, command...]
-    pub async fn send_command(&self, command: &[u8]) -> Result<Vec<u8>, TransportError> {
-        let counter = self.counter.fetch_add(1, Ordering::SeqCst);
-        let packet = build_xcp_frame(command, counter);
-
-        self.socket
-            .send(&packet)
-            .await
-            .map_err(|e: std::io::Error| TransportError::SendFailed(e.to_string()))?;
-
-        match self
-            .receive_payload_from_socket(Some(self.timeout_ms))
-            .await?
-        {
-            Some(payload) => Ok(payload),
-            None => Err(TransportError::Timeout),
-        }
-    }
-
     /// Get the remote address
     pub fn remote_addr(&self) -> SocketAddr {
         self.remote_addr
@@ -336,10 +314,6 @@ impl UdpTransport {
 impl Transport for UdpTransport {
     async fn send_command_only(&self, command: &[u8]) -> Result<(), TransportError> {
         self.send_command_only(command).await
-    }
-
-    async fn send_command(&self, command: &[u8]) -> Result<Vec<u8>, TransportError> {
-        self.send_command(command).await
     }
 
     async fn recv_packet(&self) -> Result<Vec<u8>, TransportError> {

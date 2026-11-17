@@ -166,8 +166,8 @@ This is a Rust implementation of XCP (Universal Measurement and Calibration Prot
 #### Transport Abstraction (`src/transport/transport.rs`)
 - **Purpose**: Unified interface for different transport protocols
 - **Trait**: `Transport` - Defines common interface
-  - `send_command()` - Send command and wait for response
-  - `recv_packet()` - Receive normalized XCP packet
+  - `send_command_only()` - Send command without waiting for the response
+  - `recv_packet()` / `recv_packet_ts()` - Receive normalized XCP packet
   - `close()` - Close connection
 - **Factory**: `TransportFactory` - Creates transport instances
 

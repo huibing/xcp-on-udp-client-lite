@@ -266,25 +266,12 @@ impl TcpTransport {
             .map_err(|e: std::io::Error| TransportError::SendFailed(e.to_string()))?;
         Ok(())
     }
-
-    /// Send a command and wait for one normalized XCP response payload.
-    pub async fn send_command(&self, command: &[u8]) -> Result<Vec<u8>, TransportError> {
-        self.send_command_only(command).await?;
-        match self.recv_payload_packet(Some(self.timeout_ms)).await? {
-            Some(payload) => Ok(payload),
-            None => Err(TransportError::Timeout),
-        }
-    }
 }
 
 #[async_trait]
 impl Transport for TcpTransport {
     async fn send_command_only(&self, command: &[u8]) -> Result<(), TransportError> {
         self.send_command_only(command).await
-    }
-
-    async fn send_command(&self, command: &[u8]) -> Result<Vec<u8>, TransportError> {
-        self.send_command(command).await
     }
 
     async fn recv_packet(&self) -> Result<Vec<u8>, TransportError> {
@@ -363,30 +350,6 @@ mod tests {
             .unwrap();
         server.await.unwrap();
         assert_eq!(transport.current_counter(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_send_command_returns_payload_response() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-
-            let mut request = [0u8; 5];
-            socket.read_exact(&mut request).await.unwrap();
-            assert_eq!(request.to_vec(), vec![0x01, 0x00, 0x00, 0x00, 0xF5]);
-
-            let response = build_xcp_frame(&[0xFF, 0xAA], 7);
-            socket.write_all(&response[..3]).await.unwrap();
-            socket.write_all(&response[3..]).await.unwrap();
-        });
-
-        let transport = TcpTransport::connect(&addr.to_string()).await.unwrap();
-        let payload = transport.send_command(&[0xF5]).await.unwrap();
-        assert_eq!(payload, vec![0xFF, 0xAA]);
-        assert_eq!(transport.current_counter(), 1);
-        server.await.unwrap();
     }
 
     #[tokio::test]

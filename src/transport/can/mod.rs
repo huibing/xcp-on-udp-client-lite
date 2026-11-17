@@ -9,7 +9,10 @@
 //!   forwarded to the XCP layer, which classifies packets by PID.
 //!
 //! This module only implements the transport/protocol concerns (framing, ID
-//! filtering, `MAX_DLC_REQUIRED` padding, async queueing). The actual hardware
+//! filtering, `MAX_DLC_REQUIRED` padding, async queueing). Received frames are
+//! handed to the consumer in arrival order over a plain FIFO; PID-based
+//! classification (CTO vs DTO) is the message router's job, not the
+//! transport's. The actual hardware
 //! is accessed through the [`CanDevice`] trait; see the [`device`] module for the
 //! abstraction and [`pcan`] for the PEAK-System PCAN-Basic driver, [`es582`] for
 //! ETAS ES582 hardware through the BOA V2 / OCI runtime.
@@ -36,17 +39,15 @@ pub use device::{
     driver_names, drivers, find_driver, list_can_devices, CanDevice, CanDeviceConfig,
     CanDeviceError, CanDeviceInfo, CanDriver, CanFrame,
 };
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 /// Driver used when the config does not specify one.
 pub const DEFAULT_CAN_DRIVER: &str = "pcan";
-
-/// Default timeout for XCP commands (T1 = 1000ms).
-const DEFAULT_TIMEOUT_MS: u64 = 1000;
 
 /// Configuration for establishing a CAN transport.
 ///
@@ -147,11 +148,12 @@ pub struct CanTransport {
     max_dlc_required: bool,
     /// Underlying low-level CAN device.
     device: Arc<Mutex<Box<dyn CanDevice>>>,
-    /// Command/response timeout.
-    timeout_ms: u64,
-    /// Frames received by the background reader thread, paired with the
-    /// optional hardware reception timestamp (microseconds) from the device.
-    rx: Arc<Mutex<VecDeque<(Vec<u8>, Option<u64>)>>>,
+    /// Frames accepted by the background reader thread, in arrival order.
+    ///
+    /// The transport is a plain FIFO pipe: it does not classify frames by PID,
+    /// that is the message router's job (see
+    /// [`crate::transport::message_router`]).
+    rx: Arc<RxQueue>,
     /// Signal to stop the reader thread.
     reader_stop: Arc<AtomicBool>,
     /// Background reader thread handle.
@@ -214,7 +216,8 @@ impl CanTransport {
         );
 
         let device = Arc::new(Mutex::new(device));
-        let rx = Arc::new(Mutex::new(VecDeque::new()));
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel();
+        let rx = Arc::new(RxQueue::new(frame_rx));
         let reader_stop = Arc::new(AtomicBool::new(false));
         tracing::info!(
             "CAN receive filter: master=0x{:X}, {}",
@@ -227,7 +230,7 @@ impl CanTransport {
                  by CAN ID and may be polluted by unrelated bus traffic"
             );
         }
-        let reader = spawn_reader(device.clone(), filter, rx.clone(), reader_stop.clone());
+        let reader = spawn_reader(device.clone(), filter, frame_tx, reader_stop.clone());
 
         let can_id = config.can_id;
         Ok(Self {
@@ -238,7 +241,6 @@ impl CanTransport {
             fd,
             max_dlc_required: config.max_dlc_required,
             device,
-            timeout_ms: DEFAULT_TIMEOUT_MS,
             rx,
             reader_stop,
             reader: Mutex::new(Some(reader)),
@@ -264,11 +266,6 @@ impl CanTransport {
     /// Whether CAN-FD framing is active.
     pub fn is_fd(&self) -> bool {
         self.fd
-    }
-
-    /// Set the command/response timeout.
-    pub fn set_timeout(&mut self, timeout_ms: u64) {
-        self.timeout_ms = timeout_ms;
     }
 
     /// Transmit a normalized XCP payload as a single CAN frame.
@@ -326,88 +323,42 @@ impl CanTransport {
             .map_err(|e| TransportError::SendFailed(e.to_string()))
     }
 
-    /// Pop the first CTO-class item (PID >= 0xFC) from `queue`, leaving all
-    /// preceding DAQ-class items at the front in their original order so the
-    /// message router still receives them.
-    ///
-    /// Pure helper (unit-testable without CAN hardware).
-    fn pop_first_cto(
-        queue: &mut VecDeque<(Vec<u8>, Option<u64>)>,
-    ) -> Option<(Vec<u8>, Option<u64>)> {
-        let mut stashed: Vec<(Vec<u8>, Option<u64>)> = Vec::new();
-        let mut found = None;
-        while let Some(item) = queue.pop_front() {
-            let is_cto = item.0.first().is_some_and(|pid| *pid >= 0xFC);
-            if is_cto {
-                found = Some(item);
-                break;
-            }
-            stashed.push(item);
-        }
-        // Requeue the leading DAQ frames in their original order.
-        for item in stashed.into_iter().rev() {
-            queue.push_front(item);
-        }
-        found
+    /// Receive the next frame in arrival order, waiting at most `timeout_ms`
+    /// (`None` waits until a frame arrives or the connection closes).
+    async fn recv_frame(&self, timeout_ms: Option<u64>) -> Result<Option<CanFrame>, TransportError> {
+        self.rx.recv(timeout_ms).await
+    }
+}
+
+/// FIFO of frames accepted by the background reader thread.
+///
+/// Wraps the receive half of the reader channel so the transport can express
+/// "next frame, in arrival order" without leaking channel plumbing. The
+/// channel closes when the reader thread exits, which is how consumers observe
+/// a dropped connection.
+struct RxQueue(AsyncMutex<mpsc::UnboundedReceiver<CanFrame>>);
+
+impl RxQueue {
+    fn new(rx: mpsc::UnboundedReceiver<CanFrame>) -> Self {
+        Self(AsyncMutex::new(rx))
     }
 
-    /// Pop the next CTO-class frame (PID >= 0xFC) from the receive queue,
-    /// requeueing any leading DAQ-class frames so the message router still
-    /// receives them.
+    /// Pop the next frame, waiting at most `timeout_ms` (`None` waits forever).
     ///
-    /// The scan and requeue happen under a single queue lock so the router
-    /// cannot observe a reordered queue. Note that the router itself may
-    /// still consume the response frame first — with the router running
-    /// (normal operation), prefer `send_command_only` + the router's CTO
-    /// channel (see `XcpSlave::send_command_and_wait`).
-    async fn recv_cto_payload(
-        &self,
-        timeout_ms: u64,
-    ) -> Result<Option<(Vec<u8>, Option<u64>)>, TransportError> {
-        let start = Instant::now();
-        loop {
-            {
-                let mut queue = self.rx.lock().unwrap();
-                if let Some(item) = Self::pop_first_cto(&mut queue) {
-                    return Ok(Some(item));
+    /// Returns `Ok(None)` on timeout and
+    /// [`TransportError::ConnectionClosed`] once the sender is gone.
+    async fn recv(&self, timeout_ms: Option<u64>) -> Result<Option<CanFrame>, TransportError> {
+        let mut rx = self.0.lock().await;
+        let received = match timeout_ms {
+            Some(timeout_ms) => {
+                match tokio::time::timeout(Duration::from_millis(timeout_ms), rx.recv()).await {
+                    Ok(received) => received,
+                    Err(_) => return Ok(None),
                 }
             }
-
-            if !self.connected.load(Ordering::SeqCst) {
-                return Err(TransportError::ConnectionClosed);
-            }
-            if start.elapsed() >= Duration::from_millis(timeout_ms) {
-                return Ok(None);
-            }
-            tokio::time::sleep(Duration::from_micros(500)).await;
-        }
-    }
-
-    async fn recv_payload(
-        &self,
-        timeout_ms: Option<u64>,
-    ) -> Result<Option<(Vec<u8>, Option<u64>)>, TransportError> {
-        let start = Instant::now();
-        loop {
-            {
-                let mut queue = self.rx.lock().unwrap();
-                if let Some(item) = queue.pop_front() {
-                    return Ok(Some(item));
-                }
-            }
-
-            if !self.connected.load(Ordering::SeqCst) {
-                return Err(TransportError::ConnectionClosed);
-            }
-
-            if let Some(timeout) = timeout_ms {
-                if start.elapsed() >= Duration::from_millis(timeout) {
-                    return Ok(None);
-                }
-            }
-
-            tokio::time::sleep(Duration::from_micros(500)).await;
-        }
+            None => rx.recv().await,
+        };
+        received.map(Some).ok_or(TransportError::ConnectionClosed)
     }
 }
 
@@ -417,40 +368,32 @@ impl Transport for CanTransport {
         self.send_frame(command)
     }
 
-    async fn send_command(&self, command: &[u8]) -> Result<Vec<u8>, TransportError> {
-        self.send_frame(command)?;
-        // PID-aware receive: skip DAQ-class frames (requeued for the router)
-        // and return the first CTO-class frame, so a DTO in flight while the
-        // command was sent can no longer be mistaken for the response.
-        match self.recv_cto_payload(self.timeout_ms).await? {
-            Some((payload, _)) => Ok(payload),
-            None => Err(TransportError::Timeout),
-        }
-    }
-
     async fn recv_packet(&self) -> Result<Vec<u8>, TransportError> {
-        match self.recv_payload(None).await? {
-            Some((payload, _)) => Ok(payload),
+        match self.recv_frame(None).await? {
+            Some(frame) => Ok(frame.data),
             None => Err(TransportError::ConnectionClosed),
         }
     }
 
     async fn try_recv_packet(&self, timeout_ms: u64) -> Result<Option<Vec<u8>>, TransportError> {
-        Ok(self.recv_payload(Some(timeout_ms)).await?.map(|(p, _)| p))
+        Ok(self.recv_frame(Some(timeout_ms)).await?.map(|f| f.data))
     }
 
     async fn recv_packet_ts(&self) -> Result<(Vec<u8>, Option<u64>), TransportError> {
-        match self.recv_payload(None).await? {
-            Some(item) => Ok(item),
+        match self.recv_frame(None).await? {
+            Some(frame) => Ok((frame.data, frame.timestamp_us)),
             None => Err(TransportError::ConnectionClosed),
-        }
+        }   
     }
 
     async fn try_recv_packet_ts(
         &self,
         timeout_ms: u64,
     ) -> Result<Option<(Vec<u8>, Option<u64>)>, TransportError> {
-        self.recv_payload(Some(timeout_ms)).await
+        Ok(self
+            .recv_frame(Some(timeout_ms))
+            .await?
+            .map(|f| (f.data, f.timestamp_us)))
     }
 
     async fn close(&self) -> Result<(), TransportError> {
@@ -611,18 +554,19 @@ impl FrameFilter {
     }
 }
 
-/// Start the background thread that drains the CAN device receive queue.
+/// Start the background thread that drains the CAN device receive queue and
+/// forwards accepted frames to `tx` in arrival order.
 fn spawn_reader(
     device: Arc<Mutex<Box<dyn CanDevice>>>,
     filter: FrameFilter,
-    rx: Arc<Mutex<VecDeque<(Vec<u8>, Option<u64>)>>>,
+    tx: mpsc::UnboundedSender<CanFrame>,
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("can-reader".to_string())
         .spawn(move || {
             tracing::debug!("CAN reader thread started");
-            while !stop.load(Ordering::SeqCst) {
+            'reader: while !stop.load(Ordering::SeqCst) {
                 let mut received_any = false;
                 loop {
                     let result = {
@@ -645,7 +589,12 @@ fn spawn_reader(
                                 );
                                 continue;
                             }
-                            rx.lock().unwrap().push_back((frame.data, frame.timestamp_us));
+                            // Unbounded send never blocks; an error means the
+                            // transport was dropped, so stop reading.
+                            if tx.send(frame).is_err() {
+                                tracing::debug!("CAN receive channel closed");
+                                break 'reader;
+                            }
                         }
                         Ok(None) => break,
                         Err(error) => {
@@ -719,49 +668,46 @@ mod tests {
     }
 
     #[test]
-    fn test_pop_first_cto_skips_and_requeues_dto_frames() {
-        // Queue: [DTO, DTO, RES, DTO] -> returns the RES, DTOs stay in order.
-        let dto = |pid: u8| (vec![pid, 0x11, 0x22], Some(1u64));
-        let res = (vec![0xFF, 0x00], Some(2u64));
-        let mut queue: VecDeque<(Vec<u8>, Option<u64>)> =
-            VecDeque::from(vec![dto(0x00), dto(0x60), res.clone(), dto(0x01)]);
+    fn test_rx_queue_preserves_arrival_order() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let queue = RxQueue::new(rx);
+        let frame = |pid: u8, ts: u64| CanFrame {
+            id: 0x551,
+            extended: false,
+            data: vec![pid, 0x11],
+            timestamp_us: Some(ts),
+        };
+        tx.send(frame(0x00, 1)).unwrap();
+        tx.send(frame(0xFF, 2)).unwrap();
 
-        let found = CanTransport::pop_first_cto(&mut queue).unwrap();
-        assert_eq!(found.0, vec![0xFF, 0x00]);
-        assert_eq!(found.1, Some(2));
-        // Leading DTOs requeued at the front, trailing DTO untouched.
-        let remaining: Vec<u8> = queue.iter().flat_map(|(d, _)| d.clone()).collect();
-        assert_eq!(
-            remaining,
-            vec![0x00, 0x11, 0x22, 0x60, 0x11, 0x22, 0x01, 0x11, 0x22]
-        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let first = queue.recv(Some(100)).await.unwrap().unwrap();
+            assert_eq!(first.data, vec![0x00, 0x11]);
+            assert_eq!(first.timestamp_us, Some(1));
+            // FIFO: the CTO frame is not promoted, it simply comes next.
+            let second = queue.recv(Some(100)).await.unwrap().unwrap();
+            assert_eq!(second.data, vec![0xFF, 0x11]);
+        });
     }
 
     #[test]
-    fn test_pop_first_cto_err_packet() {
-        // ERR (0xFE) is also a valid CTO response.
-        let mut queue: VecDeque<(Vec<u8>, Option<u64>)> =
-            VecDeque::from(vec![(vec![0x00, 0x01], None), (vec![0xFE, 0x22], None)]);
-        let found = CanTransport::pop_first_cto(&mut queue).unwrap();
-        assert_eq!(found.0, vec![0xFE, 0x22]);
-        assert_eq!(queue.len(), 1); // the DTO was requeued
-    }
+    fn test_rx_queue_timeout_and_close() {
+        let (tx, rx) = mpsc::unbounded_channel::<CanFrame>();
+        let queue = RxQueue::new(rx);
 
-    #[test]
-    fn test_pop_first_cto_only_dtos_returns_none_and_keeps_order() {
-        let mut queue: VecDeque<(Vec<u8>, Option<u64>)> =
-            VecDeque::from(vec![(vec![0x00, 0x01], None), (vec![0x60, 0x02], None)]);
-        assert!(CanTransport::pop_first_cto(&mut queue).is_none());
-        // Queue unchanged (order and content preserved for the router).
-        assert_eq!(queue.pop_front().unwrap().0, vec![0x00, 0x01]);
-        assert_eq!(queue.pop_front().unwrap().0, vec![0x60, 0x02]);
-        assert!(queue.is_empty());
-    }
-
-    #[test]
-    fn test_pop_first_cto_empty_queue() {
-        let mut queue: VecDeque<(Vec<u8>, Option<u64>)> = VecDeque::new();
-        assert!(CanTransport::pop_first_cto(&mut queue).is_none());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // Empty queue: a bounded wait reports a timeout.
+            assert!(queue.recv(Some(10)).await.unwrap().is_none());
+            // Dropping the sender (reader thread exit) reports the closed
+            // connection instead of blocking or spinning.
+            drop(tx);
+            assert!(matches!(
+                queue.recv(None).await,
+                Err(TransportError::ConnectionClosed)
+            ));
+        });
     }
 
     #[test]
