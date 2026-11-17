@@ -1262,6 +1262,19 @@ Contributions are welcome! Please feel free to submit pull requests.
 
 ## Recent Changes
 
+### v0.6.3 - ES582 connect latency
+
+- ✅ **Connect no longer scans the CSI tree.** `CSI_CreateProtocolTree` probes
+  every attached ETAS interface (~2 s) and the driver ran it on every connect,
+  so picking a device in the desktop app took 2-6 s. The channel URI is now
+  rebuilt from `device_id` + `controller` (the device id *is* the sanitized URI
+  path) and a full URI in `channel` is used verbatim — measured connect:
+  **2.3 s → 0.07 s**.
+- ✅ The scan is rooted at `ETAS://USB` first (1.6 s instead of 2.2 s) and its
+  result is cached for a few seconds, so "list devices, then connect" scans
+  once (`list_can_devices` warm: 0.13 s). A failed open forces one rescan and
+  retries only channels that still match the requested selection.
+
 ### v0.6.2 - ES582 callback receive path
 
 - ✅ **ES582 receives through the OCI `onFrame` callback** instead of

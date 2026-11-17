@@ -85,6 +85,11 @@ const UUID_OCICAN: [u8; 16] = [
 const CSI_NODE_MIN: u32 = 0;
 const CSI_NODE_MAX: u32 = 0x7FFF;
 
+/// Root URI for a USB-only scan: ETAS CAN interfaces (ES582, ES581.4, …) hang
+/// off it, and skipping the Ethernet/vNet discovery plugins makes the scan
+/// much faster.
+const CSI_USB_ROOT: &str = "ETAS://USB";
+
 /// `OCI_CAN_MSG_FLAG_*`
 const CAN_MSG_FLAG_EXTENDED: u16 = 1;
 const CAN_MSG_FLAG_FD_DATA_BIT_RATE: u16 = 8;
@@ -548,18 +553,61 @@ impl BoaApi {
     }
 
     /// Collect the OCI CAN channel URIs reported by the CSI search.
+    ///
+    /// The result is cached for [`URI_CACHE_TTL`] because a scan takes ~2 s
+    /// (every attached ETAS interface is probed).
     fn channel_uris(&self) -> Result<Vec<String>, CanDeviceError> {
+        if let Some(cached) = cached_uris() {
+            tracing::debug!("ES582: using {} cached channel URI(s)", cached.len());
+            return Ok(cached);
+        }
+        let uris = self.scan_uris()?;
+        store_uris(&uris);
+        Ok(uris)
+    }
+
+    /// Run a CSI scan and return every OCI CAN URI found.
+    ///
+    /// A USB-scoped tree is tried first: it skips the Ethernet/vNet discovery
+    /// plugins, which dominate the scan time. If it finds nothing (a device on
+    /// another medium, or an older OCD layout) the whole tree is scanned.
+    fn scan_uris(&self) -> Result<Vec<String>, CanDeviceError> {
+        let mut last_error: Option<CanDeviceError> = None;
+        for root in [CSI_USB_ROOT, ""] {
+            match self.scan_uris_at(root) {
+                Ok(uris) if !uris.is_empty() => return Ok(uris),
+                Ok(_) if root.is_empty() => return Ok(Vec::new()),
+                Ok(_) => {
+                    tracing::debug!("ES582: no channel under '{}', scanning everything", root);
+                }
+                Err(error) => {
+                    tracing::debug!("ES582: scan of '{}' failed: {}", root, error);
+                    last_error = Some(error);
+                }
+            }
+        }
+        match last_error {
+            Some(error) => Err(error),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Run a CSI scan rooted at `root` (`""` = whole tree).
+    fn scan_uris_at(&self, root: &str) -> Result<Vec<String>, CanDeviceError> {
         let mut tree: *mut c_void = std::ptr::null_mut();
         let range = CsiNodeRange {
             min: CSI_NODE_MIN,
             max: CSI_NODE_MAX,
         };
-        let empty = CString::new("").expect("empty CString");
-        let status = unsafe { (self.csi_create_protocol_tree)(empty.as_ptr(), range, &mut tree) };
+        let c_root = CString::new(root).expect("CSI root CString");
+        let started = Instant::now();
+        let status = unsafe { (self.csi_create_protocol_tree)(c_root.as_ptr(), range, &mut tree) };
         tracing::debug!(
-            "CSI_CreateProtocolTree -> 0x{:08X} (tree={:?})",
+            "CSI_CreateProtocolTree('{}') -> 0x{:08X} (tree={:?}, {:.0} ms)",
+            root,
             status,
-            tree
+            tree,
+            started.elapsed().as_secs_f64() * 1000.0
         );
         if status & BOA_RESULT_FLAG_ERROR != 0 {
             return Err(CanDeviceError::Driver(format!(
@@ -1151,10 +1199,60 @@ impl Es582Driver {
 
     /// Open a channel and return the concrete device type (instead of
     /// `Box<dyn CanDevice>`) so callers can query hardware details.
+    ///
+    /// The candidate URIs are tried in order (cheapest first). A reconstructed
+    /// URI that fails to bind invalidates the scan cache and falls back to a
+    /// fresh enumeration, so a re-plugged device is still found.
     pub fn open_device(&self, config: &CanDeviceConfig) -> Result<Es582Device, CanDeviceError> {
         let api = Arc::new(BoaApi::load()?);
-        let uri = resolve_uri(&api, config)?;
+        let mut candidates = resolve_uri_candidates(&api, config)?;
+        let mut last_error: Option<CanDeviceError> = None;
+        let mut refreshed = false;
 
+        while let Some(uri) = candidates.first().cloned() {
+            candidates.remove(0);
+            match self.open_at(api.clone(), uri.clone(), config) {
+                Ok(device) => return Ok(device),
+                Err(error) => {
+                    tracing::debug!("ES582: opening {} failed: {}", uri, error);
+                    last_error = Some(error);
+                    // The enumeration may be stale (re-plug, different USB
+                    // port). Rescan once, but only keep channels that still
+                    // match what the caller asked for — silently opening a
+                    // different device/channel would be worse than an error.
+                    if candidates.is_empty() && !refreshed {
+                        refreshed = true;
+                        invalidate_uris();
+                        let fresh = api.scan_uris().unwrap_or_default();
+                        store_uris(&fresh);
+                        let known = fresh.clone();
+                        candidates = fresh
+                            .into_iter()
+                            .filter(|candidate| candidate != &uri)
+                            .filter(|candidate| selection_matches(candidate, config))
+                            .collect();
+                        if candidates.is_empty() && !known.is_empty() {
+                            last_error = Some(CanDeviceError::UnknownChannel(format!(
+                                "ES582 selection not found (known: {})",
+                                known.join(", ")
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(last_error
+            .unwrap_or_else(|| CanDeviceError::NoChannel("no ES582 CAN channel found".to_string())))
+    }
+
+    /// Bind a controller to `uri` and configure queues/filters.
+    fn open_at(
+        &self,
+        api: Arc<BoaApi>,
+        uri: String,
+        config: &CanDeviceConfig,
+    ) -> Result<Es582Device, CanDeviceError> {
         let (handle, version) = api.create_controller(&uri)?;
         let mut device = Es582Device {
             api: api.clone(),
@@ -1329,16 +1427,50 @@ impl CanDriver for Es582Driver {
     }
 }
 
-/// Resolve which OCI URI to open from a device config.
-fn resolve_uri(api: &BoaApi, config: &CanDeviceConfig) -> Result<String, CanDeviceError> {
+/// How long the enumerated URI list is reused.
+///
+/// The desktop UI enumerates for the device list and again when connecting, so
+/// without a cache the second call pays for another full CSI scan (~2 s). The
+/// TTL stays short so a manual "refresh devices" a few seconds later re-scans;
+/// an open that fails on a cached URI also forces a rescan.
+const URI_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// Process-wide cache of the enumerated OCI CAN URIs (`Instant`, list).
+static URI_CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+
+/// Return the cached URI list when it is still fresh.
+fn cached_uris() -> Option<Vec<String>> {
+    let guard = URI_CACHE.lock().ok()?;
+    let (stamp, uris) = guard.as_ref()?;
+    if stamp.elapsed() <= URI_CACHE_TTL {
+        Some(uris.clone())
+    } else {
+        None
+    }
+}
+
+/// Store a fresh URI list.
+fn store_uris(uris: &[String]) {
+    if let Ok(mut guard) = URI_CACHE.lock() {
+        *guard = Some((Instant::now(), uris.to_vec()));
+    }
+}
+
+/// Drop the cache (hardware may have changed, or a cached URI failed to open).
+fn invalidate_uris() {
+    if let Ok(mut guard) = URI_CACHE.lock() {
+        *guard = None;
+    }
+}
+
+/// Does `uri` satisfy the caller's selection (`device_id`/`controller`)?
+///
+/// Used after a rescan so a failed open never falls back to an unrelated
+/// channel.
+fn selection_matches(uri: &str, config: &CanDeviceConfig) -> bool {
+    let (_, id, controller) = parse_uri(uri);
     let channel = config.channel.trim();
 
-    // 1. An explicit URI ("ETAS:/...") wins.
-    if !channel.is_empty() && !channel.eq_ignore_ascii_case("auto") && channel.contains('/') {
-        return Ok(channel.to_string());
-    }
-
-    // 2. A stable device id selects the matching channel.
     if let Some(device_id) = config
         .device_id
         .as_deref()
@@ -1347,24 +1479,86 @@ fn resolve_uri(api: &BoaApi, config: &CanDeviceConfig) -> Result<String, CanDevi
     {
         let wanted = unsanitize_id(device_id);
         let wanted = wanted.trim_start_matches("ETAS:/").trim_start_matches('/');
-        let controller = config.controller;
-        let uris = api.channel_uris()?;
-        let matched = uris.iter().find(|uri| {
-            let (_, id, ctrl) = parse_uri(uri);
+        let id = unsanitize_id(&id);
+        let id = id.trim_start_matches("ETAS:/").trim_start_matches('/');
+        return id.eq_ignore_ascii_case(wanted)
+            && config.controller.map(|c| c == controller).unwrap_or(true);
+    }
+
+    if !channel.is_empty() && !channel.eq_ignore_ascii_case("auto") && !channel.contains('/') {
+        if let Ok(index) = channel
+            .trim_start_matches("CAN:")
+            .trim_start_matches("can:")
+            .parse::<u8>()
+        {
+            return index == controller;
+        }
+    }
+
+    true
+}
+
+/// Resolve the URIs to try, cheapest first.
+///
+/// The ES582 URIs are fully described by `device_id` + `controller`
+/// (`ETAS://USB/ES582.1:114913/CAN:1`), so the common case — a device picked in
+/// the UI — needs no enumeration at all. Enumerating costs ~2 s because
+/// `CSI_CreateProtocolTree` probes every attached ETAS interface.
+fn resolve_uri_candidates(
+    api: &BoaApi,
+    config: &CanDeviceConfig,
+) -> Result<Vec<String>, CanDeviceError> {
+    let channel = config.channel.trim();
+    let mut candidates: Vec<String> = Vec::new();
+
+    // 1. An explicit URI ("ETAS://...") wins.
+    if !channel.is_empty() && !channel.eq_ignore_ascii_case("auto") && channel.contains('/') {
+        candidates.push(channel.to_string());
+        return Ok(candidates);
+    }
+
+    // 2. A stable device id selects the matching channel. The id is the
+    //    sanitized URI path, so the URI can be rebuilt without a scan.
+    let device_id = config
+        .device_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(device_id) = device_id {
+        let wanted = unsanitize_id(device_id);
+        let wanted = wanted.trim_start_matches("ETAS:/").trim_start_matches('/');
+        if let Some(controller) = config.controller {
+            candidates.push(format!(
+                "ETAS://{}/CAN:{}",
+                wanted.trim_start_matches("ETAS://"),
+                controller
+            ));
+        }
+
+        // Fallback: enumerate and match (handles a device id that does not
+        // encode a port, or a controller index that no longer exists).
+        for uri in api.channel_uris()? {
+            let (_, id, ctrl) = parse_uri(&uri);
             let id = unsanitize_id(&id);
             let id = id.trim_start_matches("ETAS:/").trim_start_matches('/');
-            id.eq_ignore_ascii_case(wanted) && controller.map(|c| c == ctrl).unwrap_or(true)
-        });
-        return matched.cloned().ok_or_else(|| {
-            CanDeviceError::UnknownChannel(format!(
+            let matches = id.eq_ignore_ascii_case(wanted)
+                && config.controller.map(|c| c == ctrl).unwrap_or(true);
+            if matches && !candidates.contains(&uri) {
+                candidates.push(uri);
+            }
+        }
+
+        if candidates.is_empty() {
+            return Err(CanDeviceError::UnknownChannel(format!(
                 "ES582 device '{}'{} not found",
                 device_id,
                 config
                     .controller
                     .map(|c| format!(" controller {}", c))
                     .unwrap_or_default()
-            ))
-        });
+            )));
+        }
+        return Ok(candidates);
     }
 
     // 3. A channel name that is not a URI (e.g. "CAN:1" or "1") selects by
@@ -1378,7 +1572,7 @@ fn resolve_uri(api: &BoaApi, config: &CanDeviceConfig) -> Result<String, CanDevi
             .parse::<u8>()
         {
             if let Some(uri) = uris.iter().find(|uri| parse_uri(uri).2 == index) {
-                return Ok(uri.clone());
+                return Ok(vec![uri.clone()]);
             }
         }
         return Err(CanDeviceError::UnknownChannel(format!(
@@ -1392,13 +1586,16 @@ fn resolve_uri(api: &BoaApi, config: &CanDeviceConfig) -> Result<String, CanDevi
     if let Ok(uri) = std::env::var(ES582_URI_ENV) {
         let uri = uri.trim();
         if !uri.is_empty() {
-            return Ok(uri.to_string());
+            return Ok(vec![uri.to_string()]);
         }
     }
 
-    uris.into_iter()
-        .next()
-        .ok_or_else(|| CanDeviceError::NoChannel("no ES582 CAN channel found".to_string()))
+    if uris.is_empty() {
+        return Err(CanDeviceError::NoChannel(
+            "no ES582 CAN channel found".to_string(),
+        ));
+    }
+    Ok(uris)
 }
 
 // ---------------------------------------------------------------------------
@@ -2362,6 +2559,92 @@ mod tests {
             build: 0
         }
         .at_least(1, 0));
+    }
+
+    #[test]
+    fn test_uri_reconstruction_matches_parse_uri() {
+        // The device id + controller must rebuild the same channel the scan
+        // reports, otherwise the fast connect path would bind the wrong port.
+        // BOA always emits `ETAS://...`, which is also the canonical form we
+        // rebuild; a hand-written `ETAS:/...` channel is used verbatim instead
+        // (see `resolve_uri_candidates`), so only the parsed identity has to
+        // match here.
+        for uri in [
+            "ETAS://USB/ES582.1:114913/CAN:1",
+            "ETAS://USB/ES582.1:114913/CAN:2",
+            "ETAS:/ES582/CAN:1",
+        ] {
+            let (_, device_id, controller) = parse_uri(uri);
+            let wanted = unsanitize_id(&device_id);
+            let rebuilt = format!(
+                "ETAS://{}/CAN:{}",
+                wanted
+                    .trim_start_matches("ETAS://")
+                    .trim_start_matches("ETAS:/"),
+                controller
+            );
+
+            let (_, rebuilt_id, rebuilt_controller) = parse_uri(&rebuilt);
+            assert_eq!(rebuilt_controller, controller, "controller for {}", uri);
+            assert_eq!(
+                unsanitize_id(&rebuilt_id),
+                wanted,
+                "device path for {}",
+                uri
+            );
+            if uri.starts_with("ETAS://") {
+                assert_eq!(rebuilt, uri, "canonical URI must round-trip exactly");
+            }
+        }
+    }
+
+    #[test]
+    fn test_selection_matches() {
+        let uri = "ETAS://USB/ES582.1:114913/CAN:1";
+
+        // Structured selection: device id + controller.
+        let config = CanDeviceConfig {
+            channel: "auto".into(),
+            device_id: Some("USB/ES582.1;114913".into()),
+            controller: Some(1),
+            ..Default::default()
+        };
+        assert!(selection_matches(uri, &config));
+
+        // Wrong controller.
+        let wrong = CanDeviceConfig {
+            controller: Some(2),
+            ..config.clone()
+        };
+        assert!(!selection_matches(uri, &wrong));
+
+        // Wrong device id.
+        let wrong = CanDeviceConfig {
+            device_id: Some("USB/ES582.1;999999".into()),
+            ..config.clone()
+        };
+        assert!(!selection_matches(uri, &wrong));
+
+        // Channel given as a controller index.
+        let by_index = CanDeviceConfig {
+            channel: "CAN:1".into(),
+            ..Default::default()
+        };
+        assert!(selection_matches(uri, &by_index));
+        let by_index = CanDeviceConfig {
+            channel: "2".into(),
+            ..Default::default()
+        };
+        assert!(!selection_matches(uri, &by_index));
+
+        // Auto accepts anything.
+        assert!(selection_matches(
+            uri,
+            &CanDeviceConfig {
+                channel: "auto".into(),
+                ..Default::default()
+            }
+        ));
     }
 
     #[test]

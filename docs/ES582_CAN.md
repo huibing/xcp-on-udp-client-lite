@@ -22,10 +22,24 @@ runtime from the BOA V2 installation:
    bus events, FD rx/tx modes) and `OCI_TimerCapabilities` (timestamp tick
    frequency); the controller is destroyed again. A channel that is already
    open elsewhere reports `available = false`.
+   The scan itself is expensive (`CSI_CreateProtocolTree` probes every attached
+   ETAS interface: ~1.6 s for a USB-scoped tree, ~2.2 s for the full tree), so:
+   - the scan is rooted at `ETAS://USB` first and only falls back to the whole
+     tree when that finds nothing;
+   - the resulting URI list is cached process-wide for a few seconds, so the
+     "list devices, then connect" sequence scans once;
+   - opening a channel does **not** scan at all when the selection already
+     identifies it (see below).
 2. **Open** – `OCI_CreateCANControllerVersion` is called with the newest
    supported API version (1.6 → 1.0), then `OCI_OpenCANController` with the bit
    rate and timing, an Rx queue carrying the `onFrame` callback, the hardware
    frame filters and a Tx queue.
+   The URI is resolved without a scan whenever possible: a full URI in
+   `channel` is used verbatim, and a `device_id` + `controller` pair is
+   rebuilt into `ETAS://<device_id>/CAN:<controller>` (the device id *is* the
+   sanitized URI path). Only `channel = "auto"` needs the (cached) scan. A
+   failed open triggers one rescan, and the retry only accepts channels that
+   still match the requested selection.
 3. **Receive** – the OCI `onFrame` callback (`OCI_CANRxCallbackFunctionSingleMsgEx`)
    is registered on the Rx queue, so BOA pushes every frame that passes the
    hardware filters from its own receive thread. The callback copies the frame
@@ -113,6 +127,23 @@ Two traps worth remembering:
   `canFdTxConfig` at 0 makes `OCI_OpenCANController` fail with
   `BOA_ERR_INVALID_PARAMETER` as soon as CAN-FD is enabled.
 
+## Connect latency
+
+`CSI_CreateProtocolTree` probes every attached ETAS interface and dominates the
+first ES582 operation. Measured on this machine (ES582.1 + PCAN-USB Pro FD):
+
+| Operation | Before | After |
+|-----------|--------|-------|
+| `list_can_devices()` (cold) | 2.4 s | 1.8 s (USB-scoped scan) |
+| `list_can_devices()` (again) | 2.4 s | 0.13 s (cached) |
+| Connect, device picked in the UI (`device_id` + `controller`) | 2.3 s | **0.07 s** |
+| Connect, `channel = "auto"` (needs a scan) | 2.3 s | 0.06 s (cached) / 1.9 s (cold) |
+
+The desktop app passes the structured selection
+(`driver:device_id:controller`) on connect, so the URI is rebuilt locally and no
+scan happens at all — the remaining cost is `OCI_CreateCANControllerVersion` +
+`OCI_OpenCANController` + queue setup.
+
 ## Bit timing
 
 `OCI_CANConfiguration` takes `BTL_Cycles` (time quanta per bit), `samplePoint`
@@ -186,6 +217,7 @@ baudrate = 500000
 | `CSI_CreateProtocolTree returned no tree` | ESS providers not found — check that `BOA_V2\Bin\x64\Dll\vNetOCDs` exists, run with `RUST_LOG=debug` |
 | No channel listed | ES582 not plugged in, or its OCD (`ES582_1_OCD_CAN.dll`) missing from the OCD folder; check the ETAS log directory |
 | `available = false` | the channel is already open in another process (e.g. INCA) |
+| Connect takes seconds | the CSI scan ran because the selection did not identify the channel: pass a full URI in `channel`, or `device_id` + `controller` (the desktop app does the latter). `RUST_LOG=debug` logs `CSI_CreateProtocolTree('…') -> … ms` |
 | `OCI_OpenCANController … invalid parameter` for every candidate | bit rate/timing not representable; pin `ES582_BTL_CYCLES`/`ES582_SAMPLE_POINT` |
 | Frames received but state goes `error-passive`/`bus-off` after transmit | no other node acknowledges — wrong bus or wrong bit rate |
 | No frames at all | bus is idle or the bit rate differs; verify with `ES582_SELF_RECEPTION=1` plus a self-transmitted frame |
