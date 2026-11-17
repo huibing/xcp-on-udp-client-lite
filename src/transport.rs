@@ -1,5 +1,7 @@
 //! XCP Transport Layer
 
+pub mod error;
+
 mod can;
 mod message_router;
 mod resolve;
