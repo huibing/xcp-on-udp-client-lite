@@ -1,6 +1,7 @@
 //! XCP Transport Layer
 
 pub mod error;
+pub mod ethernet;
 
 mod can;
 mod message_router;
