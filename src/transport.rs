@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod ethernet;
+pub mod link;
 
 mod can;
 mod message_router;
