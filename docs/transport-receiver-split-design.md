@@ -1,6 +1,6 @@
 # Transport 接收半边拆分设计（PacketReceiver）
 
-> 状态：设计稿，未实施
+> 状态：已被 `docs/transport-tx-rx-split-design.md`（v2：创建即分离）取代，保留作为问题诊断与论证记录
 > 前置提交：`fd1ddec`（删除 `Transport::send_command`、CAN 接收队列改为 FIFO channel）、`7458571`（去掉 CAN 接收队列上的锁）
 
 ## 1. 问题

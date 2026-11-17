@@ -39,8 +39,8 @@ This is a Rust implementation of XCP (Universal Measurement and Calibration Prot
 │  │  │                      XcpSlave (Per-Slave Context)            │  │  │
 │  │  │  ┌────────────────────────────────────────────────────────┐  │  │  │
 │  │  │  │  - SlaveId (UUID)                                     │  │  │  │
-│  │  │  │  - Transport (UDP/TCP/CAN)                            │  │  │  │
-│  │  │  │  - MessageRouter (request/response handling)           │  │  │  │
+│  │  │  │  - TransportSender (send half)                        │  │  │  │
+│  │  │  │  - CtoChannel + RouterHandle (receive side)          │  │  │  │
 │  │  │  │  - CalibrationManager (A2L + calibration params)        │  │  │  │
 │  │  │  │  - DaqManager (DAQ lists, ODTs, measurements)          │  │  │  │
 │  │  │  │  - HexImage (Intel HEX reference for checksum)         │  │  │  │
@@ -62,11 +62,11 @@ This is a Rust implementation of XCP (Universal Measurement and Calibration Prot
 │  │                              ▼                                         │  │
 │  │  ┌──────────────────────────────────────────────────────────────┐  │  │
 │  │                   Transport Abstraction Layer                     │  │  │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐        │  │  │
-│  │  │   udp.rs     │  │   tcp.rs     │  │   can.rs     │        │  │  │
-│  │  │  XCP-on-UDP  │  │  XCP-on-TCP  │  │  (reserved)  │        │  │  │
-│  │  │  Datagram     │  │  Stream      │  │              │        │  │  │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘        │  │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │  Box<dyn TransportSender>  (udp / tcp / can)  │  │  │
+│  │  │  Box<dyn TransportReceiver>  (recv only)     │  │  │
+│  │  │  ──> router task: PID >= 0xFC -> CTO, else DTO        │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
 │  │  └──────────────────────────────────────────────────────────────┘  │  │
 │  │                              │                                         │  │
 │  │                              ▼                                         │  │
@@ -121,13 +121,15 @@ This is a Rust implementation of XCP (Universal Measurement and Calibration Prot
 - **File**: `src/slave.rs`
 - **Responsibilities**:
   - Individual slave connection state
-  - Transport layer management
-  - Message routing (request/response correlation)
+  - Transport link management (send half and receive half are independent objects)
+  - Packet routing by PID (CTO vs DTO)
   - Calibration and DAQ management
 - **Components**:
   - `SlaveId` - UUID-based unique identifier
-  - `Transport` - UDP/TCP/CAN transport instance
-  - `MessageRouter` - Correlates requests with responses
+  - `Box<dyn TransportSender>` - send half of the link (UDP/TCP/CAN)
+  - `CtoChannel` - command responses (its only consumer)
+  - `RouterHandle` - owns the router task and the receive half
+  - `DtoChannel` - DAQ data, taken once by `DaqManager`
   - `CalibrationManager` - Manages calibration parameters
   - `DaqManager` - Manages DAQ lists and measurements
   - `HexImage` - Intel HEX reference for checksum verification
@@ -163,32 +165,33 @@ This is a Rust implementation of XCP (Universal Measurement and Calibration Prot
 
 ### 4. Transport Layer
 
-#### Transport Abstraction (`src/transport/transport.rs`)
-- **Purpose**: Unified interface for different transport protocols
-- **Trait**: `Transport` - Defines common interface
-  - `send_command_only()` - Send command without waiting for the response
-  - `recv_packet()` / `recv_packet_ts()` - Receive normalized XCP packet
-  - `close()` - Close connection
-- **Factory**: `TransportFactory` - Creates transport instances
+A link is created as **two independent objects** (`TransportLink`):
+- `TransportSender` — shared (`&self`, `Sync`), send + close only
+- `TransportReceiver` — owned by exactly one consumer (`&mut self`, no `Sync`), `recv` only
 
-#### UDP Transport (`src/transport/udp.rs`)
-- **Protocol**: XCP-on-UDP/IP
-- **Characteristics**: Datagram-based, connectionless
-- **Header**: 16-bit LEN + 16-bit packet counter + XCP payload
+Nothing is shared between the halves, so the receive path needs no lock: the single-consumer
+invariant is enforced by ownership.
 
-#### TCP Transport (`src/transport/tcp.rs`)
-- **Protocol**: XCP-on-TCP/IP
-- **Characteristics**: Stream-based, connection-oriented
-- **Header**: Same as UDP (16-bit LEN + 16-bit packet counter + XCP payload)
+#### Link traits (`src/transport/link.rs`)
+- `TransportSender::send()` / `close()` / `transport_type()` / `target_addr()`
+- `TransportReceiver::recv()` — returns `ReceivedPacket { payload, device_timestamp_us }`
+- `TransportFactory::open()` — returns `TransportLink` (both halves at once)
 
-#### CAN Transport (`src/transport/can.rs`)
-- **Status**: Reserved skeleton (not yet implemented)
-- **Purpose**: Future support for XCP-on-CAN
+#### Ethernet (`src/transport/ethernet/`)
+- `codec.rs` — shared 4-byte LEN/COUNTER header, incremental `EthFrameParser`, counter tracker
+- `udp.rs` — `UdpSender` / `UdpReceiver`; one datagram may hold several frames
+- `tcp.rs` — `TcpSender` / `TcpReceiver`; `into_split()` gives the halves directly
 
-#### Message Router (`src/transport/message_router.rs`)
-- **Purpose**: Correlate requests with responses
-- **Mechanism**: Uses packet counter to match responses
-- **Timeout**: Configurable timeout for response waiting
+#### CAN (`src/transport/can/`)
+- `mod.rs` — `CanConfig` + `open()`; one XCP packet per CAN frame, no transport header
+- `shared.rs` — device handle, reader thread, `FrameFilter` (ID **and** PID based)
+- `sender.rs` / `receiver.rs` — the two halves; the reader thread feeds an unbounded FIFO
+
+#### Router (`src/transport/router.rs`)
+- Plain function: `spawn_router(receiver, addr, cto_cap, dto_cap) -> (CtoChannel, DtoChannel, RouterHandle)`
+- PID classification: `PID >= 0xFC` → CTO, `PID < 0xFC` → DTO
+- `ConnectionClosed` ends the task (both channels close); other I/O errors retry with backoff
+- `CtoChannel::wait_response()` skips asynchronous EV/SERV and returns the first RES/ERR
 
 ### 5. Calibration Management
 
@@ -371,11 +374,14 @@ xcp_client/
 │   │   ├── commands.rs      # Command builders
 │   │   └── responses.rs     # Response parsers
 │   ├── transport/           # Transport abstraction layer
-│   │   ├── transport.rs     # Transport trait and factory
-│   │   ├── udp.rs           # UDP transport
-│   │   ├── tcp.rs           # TCP transport
-│   │   ├── can.rs           # CAN transport (reserved)
-│   │   └── message_router.rs # Request/response correlation
+│   │   ├── mod.rs           # Re-exports
+│   │   ├── link.rs          # TransportSender / TransportReceiver / TransportLink
+│   │   ├── error.rs         # TransportError
+│   │   ├── config.rs        # TransportConfig / TransportType
+│   │   ├── factory.rs       # TransportFactory::open
+│   │   ├── router.rs        # PID classification, CtoChannel / DtoChannel
+│   │   ├── ethernet/        # codec.rs + udp.rs + tcp.rs
+│   │   └── can/             # mod.rs + shared.rs + sender.rs + receiver.rs + drivers
 │   ├── web/                 # Web UI
 │   │   ├── web.rs           # Module entry
 │   │   ├── server.rs        # Axum HTTP server
@@ -417,9 +423,11 @@ xcp_client/
 - Event broadcast channel notifies UI of slave state changes
 
 ### 2. Transport Abstraction
-- `Transport` trait provides unified interface for UDP, TCP, and future CAN
-- `TransportFactory` creates transport instances based on configuration
-- Message router handles request/response correlation
+- A link is created as two independent halves: `TransportSender` (send) and `TransportReceiver`
+  (receive). The receive half is owned by its single consumer, so the receive path is lock-free.
+- `TransportFactory::open()` returns both halves; `spawn_router()` moves the receive half into the
+  router task and returns two independent channels (`CtoChannel`, `DtoChannel`).
+- `DaqManager` owns the `DtoChannel` by value inside its task (moved in on start, returned on stop).
 
 ### 3. Backward Compatibility
 - Single-slave API maintained for legacy code
