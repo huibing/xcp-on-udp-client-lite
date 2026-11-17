@@ -857,3 +857,17 @@ UDP 的「datagram 里没有完整 XCP 帧」与 TCP 的「帧头长度不合法
   - **并发标定**：另起一个进程 `calibrate --var AIN_v_VoltageThd_C --value 0.75`，在 DAQ 持续流的同时完成 SET_CAL_PAGE + SET_MTA + DOWNLOAD（Success: 1），DAQ 侧输出不间断（校准前后行数 128 → 170，无 gap）。
   - 回读校验：临时探针读 0x08120004 得到 `0x3F400000` = 0.75，写入确实生效（写的是 working page，复位即回退）。
   - DAQ 生命周期探针：连续两轮 `start → 有数据 → stop → reclaim_dto → start` 均成功，最后 `disconnect` 干净退出（验证 DTO 通道交接与 router/sender 关闭顺序）。
+### 14.3 提交序列
+
+按 §12 分步落地，除最后一个 `!` 提交外每步都是纯增量（前 5 步可独立编译，只是新增代码尚未接入）：
+
+| # | 提交 | 内容 |
+|---|---|---|
+| 1 | `docs(transport): design the send/receive split at link creation` | 本设计稿 + v1 标记为被取代 + `ARCHITECTURE_DIAGRAM.md` |
+| 2 | `refactor(transport): redesign TransportError` | `error.rs`（9 变体 → 5 变体，带 addr + source） |
+| 3 | `refactor(transport/ethernet): share one frame codec` | `ethernet/codec.rs`（合并 UDP/TCP 重复的头解析与计数器跟踪） |
+| 4 | `refactor(transport): add the two link halves as independent traits` | `link.rs`（`TransportSender` / `TransportReceiver` / `TransportLink`） |
+| 5 | `refactor(transport/ethernet): split UDP and TCP into send/receive halves` | `UdpSender/UdpReceiver`、`TcpSender/TcpReceiver`（删 3 个 `Mutex`） |
+| 6 | `refactor(transport)!: create links as independent send/receive halves` | CAN 半边 + `router.rs` + `factory.rs` + `mod.rs` + `slave.rs` + `daq.rs` + `client.rs`，删除旧 5 个文件（原子切换点） |
+
+第 6 步必须原子完成：trait、3 个实现和 3 个调用方（slave / DAQ / client）同时改变，否则无法编译。
